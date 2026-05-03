@@ -1,0 +1,27 @@
+# ===== macOS =====
+.DS_Store
+Icon?
+
+# ===== Logs =====
+*.log
+
+# IDE
+.idea/
+
+# Public repository excludes
+docs/
+experimental/
+AGENTS.md
+
+# ===== CMake / Build artifacts =====
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Testing/
+CTestTestfile.cmake
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+*.ninja
+.ninja_*

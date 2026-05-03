@@ -1,0 +1,35 @@
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  cmake_minimum_required(VERSION 3.20)
+  project(lol_server LANGUAGES CXX)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
+add_library(
+  lol_server_core
+  src/Core/ClientConnection.cpp
+  src/Core/ClientConnection.hpp
+  src/Core/Server.cpp
+  src/Core/Server.hpp
+  src/Core/Session.cpp
+  src/Core/Session.hpp
+  src/Core/SessionManager.cpp
+  src/Core/SessionManager.hpp
+  src/Game/Room.cpp
+  src/Game/Room.hpp
+  src/Game/RoomManager.cpp
+  src/Game/RoomManager.hpp
+  src/Net/TcpPacket.cpp
+  src/Net/TcpPacket.hpp
+  src/Net/TcpPacketReader.cpp
+  src/Net/TcpPacketReader.hpp
+  src/Net/TcpListener.cpp
+  src/Net/TcpListener.hpp
+  src/Util/Time.cpp
+  src/Util/Time.hpp
+)
+
+target_include_directories(lol_server_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(lol_server_core PUBLIC cxx_std_17)
+
+add_executable(lol_server src/main.cpp)
+target_link_libraries(lol_server PRIVATE lol_server_core)
