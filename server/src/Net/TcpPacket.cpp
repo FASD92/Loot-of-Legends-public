@@ -1,6 +1,8 @@
 #include "Net/TcpPacket.hpp"
 
+#include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace {
 void writeU16BE(uint16_t value, uint8_t* out) {
@@ -12,6 +14,10 @@ void writeU64BE(uint64_t value, uint8_t* out) {
     for (size_t i = 0; i < 8; ++i) {
         out[i] = static_cast<uint8_t>((value >> ((7 - i) * 8)) & 0xFF);
     }
+}
+
+void writeI64BE(int64_t value, uint8_t* out) {
+    writeU64BE(static_cast<uint64_t>(value), out);
 }
 
 uint16_t readU16BE(const uint8_t* data) {
@@ -26,6 +32,10 @@ void writeU32BE(uint32_t value, uint8_t* out) {
     out[3] = static_cast<uint8_t>(value & 0xFF);
 }
 
+void writeI32BE(int32_t value, uint8_t* out) {
+    writeU32BE(static_cast<uint32_t>(value), out);
+}
+
 uint64_t readU64BE(const uint8_t* data) {
     uint64_t value = 0;
     for (size_t i = 0; i < 8; ++i) {
@@ -34,11 +44,19 @@ uint64_t readU64BE(const uint8_t* data) {
     return value;
 }
 
+int64_t readI64BE(const uint8_t* data) {
+    return static_cast<int64_t>(readU64BE(data));
+}
+
 uint32_t readU32BE(const uint8_t* data) {
     return (static_cast<uint32_t>(data[0]) << 24) |
            (static_cast<uint32_t>(data[1]) << 16) |
            (static_cast<uint32_t>(data[2]) << 8) |
            static_cast<uint32_t>(data[3]);
+}
+
+int32_t readI32BE(const uint8_t* data) {
+    return static_cast<int32_t>(readU32BE(data));
 }
 
 template <size_t PacketSize>
@@ -109,6 +127,20 @@ bool parseReadyRoomStatusPacket(
     outReadyPlayerCount = readU16BE(data + Net::kTcpHeaderSize + Net::kRoomIdFieldSize);
     outTotalPlayerCount = readU16BE(
         data + Net::kTcpHeaderSize + Net::kRoomIdFieldSize + Net::kPlayerCountFieldSize);
+    return true;
+}
+
+bool isValidSettlementId(const std::string& settlementId) {
+    if (settlementId.empty() || settlementId.size() > Net::kSettlementIdMaxLength) {
+        return false;
+    }
+
+    for (const unsigned char ch : settlementId) {
+        if (ch < 0x20 || ch > 0x7E) {   // printable ASCII
+            return false;
+        }
+    }
+
     return true;
 }
 }  // namespace
@@ -419,6 +451,108 @@ bool serializeInventorySnapshotPacket(
         writeU16BE(entries[i].quantity, entry + kItemIdFieldSize);
     }
 
+    return true;
+}
+// payload 없는 header-only
+bool serializeFinishSessionRequestPacket(std::array<uint8_t, kFinishSessionRequestPacketSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kFinishSessionRequest, outPacket);
+    return true;
+}
+// settlementResult는 가변 길이 패킷이라 실제 직렬화 전에 크기를 계산해야만 한다.
+// settlementIdLength와 inventoryDeltaCount가 가변.
+size_t settlementResultPacketSize(size_t settlementIdLength, size_t inventoryDeltaCount) {
+    return kTcpHeaderSize + kSettlementResultFixedPayloadSize + settlementIdLength +
+           (inventoryDeltaCount * kSettlementInventoryDeltaEntrySize);
+}
+
+bool serializeSettlementResultPacket(
+    const TcpSettlementResult& settlement,
+    std::vector<uint8_t>& outPacket) {
+    if (!isValidSettlementId(settlement.settlementId) ||
+        settlement.inventoryDeltas.size() > std::numeric_limits<uint16_t>::max()) {
+        return false;
+    }
+
+    const size_t packetSize =
+        settlementResultPacketSize(settlement.settlementId.size(), settlement.inventoryDeltas.size());
+    if (packetSize > kMaxTcpPacketSize) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(static_cast<uint16_t>(TcpPacketType::kSettlementResult), outPacket.data() + 2);
+
+    size_t offset = kTcpHeaderSize;
+    writeU16BE(static_cast<uint16_t>(settlement.settlementId.size()), outPacket.data() + offset);
+    offset += kSettlementIdLengthFieldSize;
+    std::copy(
+        settlement.settlementId.begin(),
+        settlement.settlementId.end(),
+        outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset));
+    offset += settlement.settlementId.size();
+    writeU64BE(settlement.sessionId, outPacket.data() + offset);
+    offset += kSessionIdFieldSize;
+    writeU64BE(settlement.accountId, outPacket.data() + offset);
+    offset += kSessionIdFieldSize;
+    writeU32BE(settlement.roomId, outPacket.data() + offset);
+    offset += kRoomIdFieldSize;
+    writeU64BE(settlement.startedAtUnixMs, outPacket.data() + offset);
+    offset += kTimestampFieldSize;
+    writeU64BE(settlement.finishedAtUnixMs, outPacket.data() + offset);
+    offset += kTimestampFieldSize;
+    writeI64BE(settlement.goldDelta, outPacket.data() + offset);
+    offset += kGoldDeltaFieldSize;
+    writeU16BE(static_cast<uint16_t>(settlement.reason), outPacket.data() + offset);
+    offset += kSettlementReasonFieldSize;
+    writeU16BE(static_cast<uint16_t>(settlement.inventoryDeltas.size()), outPacket.data() + offset);
+    offset += kSettlementInventoryDeltaCountFieldSize;
+
+    for (const TcpSettlementInventoryDelta& delta : settlement.inventoryDeltas) {
+        writeU32BE(delta.itemId, outPacket.data() + offset);
+        offset += kItemIdFieldSize;
+        writeI32BE(delta.quantityDelta, outPacket.data() + offset);
+        offset += kQuantityDeltaFieldSize;
+        writeU32BE(delta.sourceDropId, outPacket.data() + offset);
+        offset += kDropIdFieldSize;
+    }
+
+    return true;
+}
+// metaResponse 또한 settlementIdLength 때문에 가변 길이다.
+size_t metaResponsePacketSize(size_t settlementIdLength) {
+    return kTcpHeaderSize + kMetaResponseFixedPayloadSize + settlementIdLength;
+}
+
+bool serializeMetaResponsePacket(
+    const TcpMetaResponse& response,
+    std::vector<uint8_t>& outPacket) {
+    if (!isValidSettlementId(response.settlementId)) {
+        return false;
+    }
+
+    const size_t packetSize = metaResponsePacketSize(response.settlementId.size());
+    if (packetSize > kMaxTcpPacketSize) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(static_cast<uint16_t>(TcpPacketType::kMetaResponse), outPacket.data() + 2);
+
+    size_t offset = kTcpHeaderSize;
+    writeU16BE(static_cast<uint16_t>(response.op), outPacket.data() + offset);
+    offset += kMetaResponseOpFieldSize;
+    writeU16BE(static_cast<uint16_t>(response.settlementId.size()), outPacket.data() + offset);
+    offset += kSettlementIdLengthFieldSize;
+    std::copy(
+        response.settlementId.begin(),
+        response.settlementId.end(),
+        outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset));
+    offset += response.settlementId.size();
+    writeU16BE(static_cast<uint16_t>(response.status), outPacket.data() + offset);
+    offset += kMetaResponseStatusFieldSize;
+    writeU32BE(response.retryAfterMs, outPacket.data() + offset);
     return true;
 }
 
@@ -822,6 +956,123 @@ bool parseInventorySnapshotPacket(
         });
     }
 
+    return true;
+}
+
+bool parseFinishSessionRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader) {
+    return parseExactPacketType(data, size, TcpPacketType::kFinishSessionRequest, outHeader) &&
+           size == kFinishSessionRequestPacketSize;
+}
+
+bool parseSettlementResultPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    TcpSettlementResult& outSettlement) {
+    outSettlement = TcpSettlementResult{};  // 출력 구조체를 초기화. 파싱 실패 시 이전 값이 남지 않도록.
+    if (!parseTcpPacketHeader(data, size, outHeader)) {
+        return false;
+    }
+
+    if (outHeader.type != TcpPacketType::kSettlementResult ||
+        size < kTcpHeaderSize + kSettlementResultFixedPayloadSize) {
+        return false;
+    }
+
+    size_t offset = kTcpHeaderSize;
+    const uint16_t settlementIdLength = readU16BE(data + offset);
+    offset += kSettlementIdLengthFieldSize;
+    if (offset + settlementIdLength > size) {
+        return false;
+    }
+
+    std::string settlementId(
+        reinterpret_cast<const char*>(data + offset),
+        reinterpret_cast<const char*>(data + offset + settlementIdLength));
+    if (!isValidSettlementId(settlementId)) {
+        return false;
+    }
+    offset += settlementIdLength;
+    // settlementId 가변 길이 필드를 읽은 뒤, 남은 고정 길이 필드들이 패킷 안에 온전히 들어있는지 확인하는 방어 코드.
+    const size_t fixedRemainderSize = kSettlementResultFixedPayloadSize - kSettlementIdLengthFieldSize;
+    if (offset + fixedRemainderSize > size) {
+        return false;
+    }
+
+    outSettlement.settlementId = std::move(settlementId);
+    outSettlement.sessionId = readU64BE(data + offset);
+    offset += kSessionIdFieldSize;
+    outSettlement.accountId = readU64BE(data + offset);
+    offset += kSessionIdFieldSize;
+    outSettlement.roomId = readU32BE(data + offset);
+    offset += kRoomIdFieldSize;
+    outSettlement.startedAtUnixMs = readU64BE(data + offset);
+    offset += kTimestampFieldSize;
+    outSettlement.finishedAtUnixMs = readU64BE(data + offset);
+    offset += kTimestampFieldSize;
+    outSettlement.goldDelta = readI64BE(data + offset);
+    offset += kGoldDeltaFieldSize;
+    outSettlement.reason = static_cast<TcpSettlementReason>(readU16BE(data + offset));
+    offset += kSettlementReasonFieldSize;
+    const uint16_t inventoryDeltaCount = readU16BE(data + offset);
+    offset += kSettlementInventoryDeltaCountFieldSize;
+
+    const size_t expectedSize = settlementResultPacketSize(settlementIdLength, inventoryDeltaCount);
+    if (expectedSize != size) {
+        return false;
+    }
+
+    outSettlement.inventoryDeltas.reserve(inventoryDeltaCount);
+    for (uint16_t i = 0; i < inventoryDeltaCount; ++i) {
+        TcpSettlementInventoryDelta delta;
+        delta.itemId = readU32BE(data + offset);
+        offset += kItemIdFieldSize;
+        delta.quantityDelta = readI32BE(data + offset);
+        offset += kQuantityDeltaFieldSize;
+        delta.sourceDropId = readU32BE(data + offset);
+        offset += kDropIdFieldSize;
+        outSettlement.inventoryDeltas.push_back(delta);
+    }
+
+    return true;
+}
+// inventory delta count가 없어서 settlementResult 보다는 단순하다.
+bool parseMetaResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    TcpMetaResponse& outResponse) {
+    outResponse = TcpMetaResponse{};
+    if (!parseTcpPacketHeader(data, size, outHeader)) {
+        return false;
+    }
+
+    if (outHeader.type != TcpPacketType::kMetaResponse ||
+        size < kTcpHeaderSize + kMetaResponseFixedPayloadSize) {
+        return false;
+    }
+
+    size_t offset = kTcpHeaderSize;
+    outResponse.op = static_cast<TcpMetaResponseOp>(readU16BE(data + offset));
+    offset += kMetaResponseOpFieldSize;
+    const uint16_t settlementIdLength = readU16BE(data + offset);
+    offset += kSettlementIdLengthFieldSize;
+    const size_t expectedSize = metaResponsePacketSize(settlementIdLength);
+    if (expectedSize != size || offset + settlementIdLength > size) {
+        return false;
+    }
+
+    std::string settlementId(
+        reinterpret_cast<const char*>(data + offset),
+        reinterpret_cast<const char*>(data + offset + settlementIdLength));
+    if (!isValidSettlementId(settlementId)) {
+        return false;
+    }
+    outResponse.settlementId = std::move(settlementId);
+    offset += settlementIdLength;
+    outResponse.status = static_cast<TcpMetaResponseStatus>(readU16BE(data + offset));
+    offset += kMetaResponseStatusFieldSize;
+    outResponse.retryAfterMs = readU32BE(data + offset);
     return true;
 }
 

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -85,6 +86,37 @@ struct RoomCommandResult {
           drops(std::move(dropsIn)) {}
 };
 
+enum class SettlementReason : uint16_t {
+    kNormal = 0,
+    kDisconnect = 1,
+    kServerShutdown = 2,
+    kForcedClose = 3,
+};
+
+struct SettlementInventoryDelta {
+    uint32_t itemId{0};
+    int32_t quantityDelta{0};
+    uint32_t sourceDropId{0};
+};
+
+struct SettlementResult {
+    std::string settlementId;
+    uint64_t sessionId{0};
+    uint64_t accountId{0};
+    uint32_t roomId{0};
+    uint64_t startedAtUnixMs{0};
+    uint64_t finishedAtUnixMs{0};
+    int64_t goldDelta{0};
+    SettlementReason reason{SettlementReason::kNormal};
+    std::vector<SettlementInventoryDelta> inventoryDeltas{};
+};
+
+struct SettlementCommandResult {
+    bool ok{false};
+    RoomCommandError error{RoomCommandError::kNone};
+    SettlementResult settlement{};
+};
+
 class RoomManager {
 public:
     explicit RoomManager(
@@ -98,6 +130,7 @@ public:
     RoomCommandResult spawnMonster(uint32_t roomId);
     RoomCommandResult defeatMonster(uint64_t sessionId, uint32_t monsterId);
     RoomCommandResult claimLoot(uint64_t sessionId, uint32_t dropId);
+    SettlementCommandResult buildSettlementResult(uint64_t sessionId, uint64_t finishedAtUnixMs);
 
     std::optional<uint32_t> findRoomIdForSession(uint64_t sessionId) const;   // sessionId와 일치하는 세션이 없으면 std::nullopt 반환
     const Room* findRoom(uint32_t roomId) const;
@@ -106,13 +139,18 @@ public:
 
 private:
     RoomSummary summarizeRoom(const Room& room) const;
+    void forgetSettlement(uint64_t sessionId);
+    void forgetSettlementsForPlayers(const std::vector<uint64_t>& sessionIds);
 
     std::unordered_map<uint32_t, Room> rooms_;
     std::unordered_map<uint64_t, uint32_t> sessionToRoomId_;
+    std::unordered_map<uint64_t, uint64_t> sessionStartedAtMs_;
+    std::unordered_map<uint64_t, SettlementResult> settlementBySessionId_;  // 서버 프로세스 메모리 내에서의 idempotency일 뿐임을 명심하자.
     // 성공 후에만 증가
     uint32_t nextRoomId_;
     uint32_t nextMonsterId_;
     uint32_t nextDropId_;
+    uint32_t nextSettlementSequence_;
     uint16_t maxPlayersPerRoom_;
     uint16_t maxInventoryWeight_;
 };

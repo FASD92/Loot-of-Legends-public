@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <iterator>
 #include <thread>
 #include <utility>
@@ -15,6 +16,13 @@ namespace {
 constexpr std::chrono::milliseconds kSessionTimeout(10000);
 constexpr std::chrono::milliseconds kLoopSleep(1);
 constexpr size_t kReceiveBufferSize = 512;
+
+uint64_t currentUnixTimeMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
 
 void markClientForDisconnect(std::vector<int>& disconnectedClients, int clientFd) {
     if (std::find(disconnectedClients.begin(), disconnectedClients.end(), clientFd) ==
@@ -37,6 +45,71 @@ std::vector<Net::TcpDropEntry> toTcpDropEntries(const std::vector<Game::Drop>& d
         entries.push_back(Net::TcpDropEntry{drop.dropId, drop.itemId, drop.quantity});
     }
     return entries;
+}
+
+std::vector<Net::TcpInventoryEntry> toTcpInventoryEntries(
+    const std::vector<Game::InventoryEntry>& entries) {
+    std::vector<Net::TcpInventoryEntry> tcpEntries;
+    tcpEntries.reserve(entries.size());
+    for (const Game::InventoryEntry& entry : entries) {
+        tcpEntries.push_back(Net::TcpInventoryEntry{entry.itemId, entry.quantity});
+    }
+    return tcpEntries;
+}
+
+Net::TcpLootRejectReason toTcpLootRejectReason(Game::LootRejectReason reason) {
+    switch (reason) {
+    case Game::LootRejectReason::kAlreadyClaimed:
+        return Net::TcpLootRejectReason::kAlreadyClaimed;
+    case Game::LootRejectReason::kOverweight:
+        return Net::TcpLootRejectReason::kOverweight;
+    case Game::LootRejectReason::kNone:
+    default:
+        return Net::TcpLootRejectReason::kNone;
+    }
+}
+// Game 도메인 정산 결과를 TCP 패킷 구조로 변환하는 어댑터
+Net::TcpSettlementReason toTcpSettlementReason(Game::SettlementReason reason) {
+    switch (reason) {
+    case Game::SettlementReason::kDisconnect:
+        return Net::TcpSettlementReason::kDisconnect;
+    case Game::SettlementReason::kServerShutdown:
+        return Net::TcpSettlementReason::kServerShutdown;
+    case Game::SettlementReason::kForcedClose:
+        return Net::TcpSettlementReason::kForcedClose;
+    case Game::SettlementReason::kNormal:
+    default:
+        return Net::TcpSettlementReason::kNormal;
+    }
+}
+
+std::vector<Net::TcpSettlementInventoryDelta> toTcpSettlementInventoryDeltas(
+    const std::vector<Game::SettlementInventoryDelta>& deltas) {
+    std::vector<Net::TcpSettlementInventoryDelta> tcpDeltas;
+    tcpDeltas.reserve(deltas.size());
+    for (const Game::SettlementInventoryDelta& delta : deltas) {
+        tcpDeltas.push_back(
+            Net::TcpSettlementInventoryDelta{
+                delta.itemId,
+                delta.quantityDelta,
+                delta.sourceDropId});
+    }
+    return tcpDeltas;
+}
+
+Net::TcpSettlementResult toTcpSettlementResult(const Game::SettlementResult& settlement) {
+    Net::TcpSettlementResult tcpSettlement;
+    tcpSettlement.settlementId = settlement.settlementId;
+    tcpSettlement.sessionId = settlement.sessionId;
+    tcpSettlement.accountId = settlement.accountId;
+    tcpSettlement.roomId = settlement.roomId;
+    tcpSettlement.startedAtUnixMs = settlement.startedAtUnixMs;
+    tcpSettlement.finishedAtUnixMs = settlement.finishedAtUnixMs;
+    tcpSettlement.goldDelta = settlement.goldDelta;
+    tcpSettlement.reason = toTcpSettlementReason(settlement.reason);
+    tcpSettlement.inventoryDeltas =
+        toTcpSettlementInventoryDeltas(settlement.inventoryDeltas);
+    return tcpSettlement;
 }
 
 // 게임 룸 로직에서 나온 에러를 네트워크 프로토콜용 에러 코드로 변환하는 어댑터
@@ -200,7 +273,11 @@ void Server::processActiveConnections(Util::TimePoint now) {
                 break;
             }
 
-            if (!handleRoomPacket(connection, framedPacket, disconnectedClients, roomListChanged)) {
+            if (!handleRoomPacket(
+                    connection,
+                    framedPacket,
+                    disconnectedClients,
+                    roomListChanged)) {
                 break;
             }
         }
@@ -451,6 +528,80 @@ bool Server::handleRoomPacket(
         return true;
     }
 
+    case Net::TcpPacketType::kClickLootRequest: {
+        uint32_t dropId = 0;
+        if (!Net::parseClickLootRequestPacket(packet.data(), packet.size(), header, dropId)) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return false;
+        }
+
+        const Game::RoomCommandResult result =
+            roomManager_.claimLoot(session->sessionId(), dropId);
+        if (!result.ok) {
+            std::array<uint8_t, Net::kErrorPacketSize> errorPacket{};
+            Net::serializeErrorPacket(
+                Net::TcpPacketType::kClickLootRequest,
+                toTcpErrorCode(result.error),
+                errorPacket);
+            return sendPacketToClient(
+                connection.clientFd(),
+                errorPacket.data(),
+                errorPacket.size(),
+                disconnectedClients);
+        }
+
+        if (result.lootRejected) {
+            return sendLootRejected(connection.clientFd(), result, disconnectedClients);
+        }
+
+        if (result.lootJustClaimed &&
+            !broadcastLootResolved(result, disconnectedClients)) {
+            return false;
+        }
+
+        if (result.lootJustClaimed &&
+            !sendInventorySnapshot(connection.clientFd(), result.inventory, disconnectedClients)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    case Net::TcpPacketType::kFinishSessionRequest: {
+        if (!Net::parseFinishSessionRequestPacket(packet.data(), packet.size(), header)) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return false;
+        }
+
+        const Game::SettlementCommandResult result =
+            roomManager_.buildSettlementResult(session->sessionId(), currentUnixTimeMs());
+        if (!result.ok) {
+            std::array<uint8_t, Net::kErrorPacketSize> errorPacket{};
+            Net::serializeErrorPacket(
+                Net::TcpPacketType::kFinishSessionRequest,
+                toTcpErrorCode(result.error),
+                errorPacket);
+            return sendPacketToClient(
+                connection.clientFd(),
+                errorPacket.data(),
+                errorPacket.size(),
+                disconnectedClients);
+        }
+
+        std::vector<uint8_t> responsePacket;
+        const Net::TcpSettlementResult settlement = toTcpSettlementResult(result.settlement);
+        if (!Net::serializeSettlementResultPacket(settlement, responsePacket)) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return false;
+        }
+
+        return sendPacketToClient(
+            connection.clientFd(),
+            responsePacket.data(),
+            responsePacket.size(),
+            disconnectedClients);
+    }
+
     default:
         markClientForDisconnect(disconnectedClients, connection.clientFd());
         return false;
@@ -565,6 +716,63 @@ bool Server::broadcastDropListSnapshot(
     }
 
     return allSucceeded;
+}
+
+bool Server::broadcastLootResolved(
+    const Game::RoomCommandResult& result,
+    std::vector<int>& disconnectedClients) {
+    std::array<uint8_t, Net::kLootResolvedPacketSize> packet{};
+    Net::serializeLootResolvedPacket(
+        result.room.roomId,
+        result.drop.dropId,
+        result.winnerSessionId,
+        result.drop.itemId,
+        result.drop.quantity,
+        packet);
+
+    bool allSucceeded = true;
+    for (const auto& entry : connections_) {
+        if (!isRoomMember(result, entry.second->sessionId())) {
+            continue;
+        }
+
+        if (!sendPacketToClient(entry.first, packet.data(), packet.size(), disconnectedClients)) {
+            allSucceeded = false;
+        }
+    }
+
+    return allSucceeded;
+}
+
+bool Server::sendLootRejected(
+    int clientFd,
+    const Game::RoomCommandResult& result,
+    std::vector<int>& disconnectedClients) {
+    std::array<uint8_t, Net::kLootRejectedPacketSize> packet{};
+    Net::serializeLootRejectedPacket(
+        result.room.roomId,
+        result.drop.dropId,
+        toTcpLootRejectReason(result.lootRejectReason),
+        packet);
+    return sendPacketToClient(clientFd, packet.data(), packet.size(), disconnectedClients);
+}
+
+bool Server::sendInventorySnapshot(
+    int clientFd,
+    const Game::InventorySnapshot& inventory,
+    std::vector<int>& disconnectedClients) {
+    std::vector<uint8_t> packet;
+    const std::vector<Net::TcpInventoryEntry> entries = toTcpInventoryEntries(inventory.entries);
+    if (!Net::serializeInventorySnapshotPacket(
+            inventory.sessionId,
+            inventory.currentWeight,
+            inventory.maxWeight,
+            entries,
+            packet)) {
+        return false;
+    }
+
+    return sendPacketToClient(clientFd, packet.data(), packet.size(), disconnectedClients);
 }
 
 void Server::broadcastStateSnapshots(bool clientListChanged, bool roomListChanged) {

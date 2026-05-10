@@ -1,6 +1,17 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "Game/RoomManager.hpp"
+
+namespace {
+uint64_t currentUnixTimeMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+}  // namespace
 
 TEST(RoomManagerTests, CreateRoomAssignsUniqueRoomIds) {
     Game::RoomManager manager;
@@ -457,4 +468,75 @@ TEST(RoomManagerTests, LeaveRoomResetsLootOwnershipAndInventories) {
     ASSERT_NE(remainingInventory, nullptr);
     EXPECT_EQ(remainingInventory->currentWeight, 0u);
     EXPECT_TRUE(remainingInventory->entries.empty());
+}
+
+TEST(RoomManagerTests, BuildSettlementResultIncludesClaimedInventoryDeltas) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+    const Game::RoomCommandResult spawned = manager.spawnMonster(created.room.roomId);
+    ASSERT_TRUE(spawned.ok);
+    const Game::RoomCommandResult defeated = manager.defeatMonster(10, spawned.monster.monsterId);
+    ASSERT_TRUE(defeated.ok);
+    ASSERT_EQ(defeated.drops.size(), 1u);
+    ASSERT_TRUE(manager.claimLoot(10, defeated.drops[0].dropId).ok);
+
+    const uint64_t finishedAtMs = currentUnixTimeMs();
+    const Game::SettlementCommandResult result =
+        manager.buildSettlementResult(10, finishedAtMs);
+
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(result.error, Game::RoomCommandError::kNone);
+    EXPECT_FALSE(result.settlement.settlementId.empty());
+    EXPECT_EQ(result.settlement.sessionId, 10u);
+    EXPECT_EQ(result.settlement.accountId, 10u);
+    EXPECT_EQ(result.settlement.roomId, created.room.roomId);
+    EXPECT_LE(result.settlement.startedAtUnixMs, result.settlement.finishedAtUnixMs);
+    EXPECT_EQ(result.settlement.finishedAtUnixMs, finishedAtMs);
+    EXPECT_EQ(result.settlement.goldDelta, 0);
+    EXPECT_EQ(result.settlement.reason, Game::SettlementReason::kNormal);
+    ASSERT_EQ(result.settlement.inventoryDeltas.size(), 1u);
+    EXPECT_EQ(result.settlement.inventoryDeltas[0].itemId, defeated.drops[0].itemId);
+    EXPECT_EQ(result.settlement.inventoryDeltas[0].quantityDelta, defeated.drops[0].quantity);
+    EXPECT_EQ(result.settlement.inventoryDeltas[0].sourceDropId, defeated.drops[0].dropId);
+}
+
+TEST(RoomManagerTests, RepeatedBuildSettlementResultReturnsSamePayload) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+
+    const uint64_t firstFinishedAtMs = currentUnixTimeMs();
+    const Game::SettlementCommandResult first =
+        manager.buildSettlementResult(10, firstFinishedAtMs);
+    ASSERT_TRUE(first.ok);
+
+    const Game::SettlementCommandResult second =
+        manager.buildSettlementResult(10, firstFinishedAtMs + 1000);
+    ASSERT_TRUE(second.ok);
+
+    EXPECT_EQ(second.settlement.settlementId, first.settlement.settlementId);
+    EXPECT_EQ(second.settlement.sessionId, first.settlement.sessionId);
+    EXPECT_EQ(second.settlement.accountId, first.settlement.accountId);
+    EXPECT_EQ(second.settlement.roomId, first.settlement.roomId);
+    EXPECT_EQ(second.settlement.startedAtUnixMs, first.settlement.startedAtUnixMs);
+    EXPECT_EQ(second.settlement.finishedAtUnixMs, first.settlement.finishedAtUnixMs);
+    EXPECT_EQ(second.settlement.goldDelta, first.settlement.goldDelta);
+    EXPECT_EQ(second.settlement.reason, first.settlement.reason);
+    EXPECT_EQ(second.settlement.inventoryDeltas.size(), first.settlement.inventoryDeltas.size());
+}
+
+TEST(RoomManagerTests, BuildSettlementResultRejectsSessionOutsideRoom) {
+    Game::RoomManager manager;
+
+    const Game::SettlementCommandResult result =
+        manager.buildSettlementResult(10, currentUnixTimeMs());
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error, Game::RoomCommandError::kNotInRoom);
 }

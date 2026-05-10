@@ -12,6 +12,7 @@ Icon?
 docs/
 experimental/
 AGENTS.md
+meta-server/
 
 # ===== CMake / Build artifacts =====
 build/

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace Net {
@@ -43,6 +44,26 @@ constexpr size_t kLootResolvedPacketSize =
     kQuantityFieldSize;
 constexpr size_t kLootRejectedPacketSize =
     kTcpHeaderSize + kRoomIdFieldSize + kDropIdFieldSize + kLootRejectReasonFieldSize;
+constexpr size_t kFinishSessionRequestPacketSize = kTcpHeaderSize;
+constexpr size_t kSettlementIdLengthFieldSize = 2;
+constexpr size_t kSettlementIdMaxLength = 64;
+constexpr size_t kTimestampFieldSize = 8;
+constexpr size_t kGoldDeltaFieldSize = 8;
+constexpr size_t kSettlementReasonFieldSize = 2;
+constexpr size_t kSettlementInventoryDeltaCountFieldSize = 2;
+constexpr size_t kQuantityDeltaFieldSize = 4;
+constexpr size_t kSettlementInventoryDeltaEntrySize =
+    kItemIdFieldSize + kQuantityDeltaFieldSize + kDropIdFieldSize;
+constexpr size_t kSettlementResultFixedPayloadSize =
+    kSettlementIdLengthFieldSize + (2 * kSessionIdFieldSize) + kRoomIdFieldSize +
+    (2 * kTimestampFieldSize) + kGoldDeltaFieldSize + kSettlementReasonFieldSize +
+    kSettlementInventoryDeltaCountFieldSize;
+constexpr size_t kMetaResponseOpFieldSize = 2;
+constexpr size_t kMetaResponseStatusFieldSize = 2;
+constexpr size_t kRetryAfterMsFieldSize = 4;
+constexpr size_t kMetaResponseFixedPayloadSize =
+    kMetaResponseOpFieldSize + kSettlementIdLengthFieldSize + kMetaResponseStatusFieldSize +
+    kRetryAfterMsFieldSize;
 constexpr size_t kErrorPacketSize = 8;
 
 enum class TcpPacketType : uint16_t {
@@ -66,6 +87,9 @@ enum class TcpPacketType : uint16_t {
     kLootResolved = 0x0110,
     kLootRejected = 0x0111,
     kInventorySnapshot = 0x0112,
+    kFinishSessionRequest = 0x0113,
+    kSettlementResult = 0x0114,
+    kMetaResponse = 0x0115,
     kError = 0x01FF,
 };
 
@@ -103,6 +127,52 @@ enum class TcpLootRejectReason : uint16_t {
 struct TcpInventoryEntry {
     uint32_t itemId{0};
     uint16_t quantity{0};
+};
+
+enum class TcpSettlementReason : uint16_t {
+    kNormal = 0,    // 정상 종료
+    kDisconnect = 1,    // 연결 끊김으로 인한 종료
+    kServerShutdown = 2,    // 서버 종료로 인한 정산
+    kForcedClose = 3,   // 강제 종료
+};
+
+struct TcpSettlementInventoryDelta {
+    uint32_t itemId{0};
+    int32_t quantityDelta{0};   // 감소량 또한 표시해야 하니 signed.
+    uint32_t sourceDropId{0};
+};
+
+struct TcpSettlementResult {
+    std::string settlementId;
+    uint64_t sessionId{0};
+    uint64_t accountId{0};
+    uint32_t roomId{0};
+    uint64_t startedAtUnixMs{0};
+    uint64_t finishedAtUnixMs{0};
+    int64_t goldDelta{0};
+    TcpSettlementReason reason{TcpSettlementReason::kNormal};
+    std::vector<TcpSettlementInventoryDelta> inventoryDeltas;
+};
+
+enum class TcpMetaResponseOp : uint16_t {
+    kSettlementApplied = 1,
+    kSettlementDuplicate = 2,
+    kSettlementRejected = 3,
+    kSettlementRetryLater = 4,
+};
+
+enum class TcpMetaResponseStatus : uint16_t {
+    kApplied = 1,
+    kDuplicate = 2,
+    kRejected = 3,
+    kRetryLater = 4,
+};
+
+struct TcpMetaResponse {
+    TcpMetaResponseOp op{TcpMetaResponseOp::kSettlementApplied};
+    std::string settlementId;
+    TcpMetaResponseStatus status{TcpMetaResponseStatus::kApplied};
+    uint32_t retryAfterMs{0};
 };
 
 bool serializeWelcomePacket(uint64_t sessionId, std::array<uint8_t, kWelcomePacketSize>& outPacket);
@@ -180,6 +250,15 @@ bool serializeInventorySnapshotPacket(
     uint16_t currentWeight,
     uint16_t maxWeight,
     const std::vector<TcpInventoryEntry>& entries,
+    std::vector<uint8_t>& outPacket);
+bool serializeFinishSessionRequestPacket(std::array<uint8_t, kFinishSessionRequestPacketSize>& outPacket);
+size_t settlementResultPacketSize(size_t settlementIdLength, size_t inventoryDeltaCount);
+bool serializeSettlementResultPacket(
+    const TcpSettlementResult& settlement,
+    std::vector<uint8_t>& outPacket);
+size_t metaResponsePacketSize(size_t settlementIdLength);
+bool serializeMetaResponsePacket(
+    const TcpMetaResponse& response,
     std::vector<uint8_t>& outPacket);
 bool serializeErrorPacket(
     TcpPacketType failedType,
@@ -295,6 +374,17 @@ bool parseInventorySnapshotPacket(
     uint16_t& outCurrentWeight,
     uint16_t& outMaxWeight,
     std::vector<TcpInventoryEntry>& outEntries);
+bool parseFinishSessionRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
+bool parseSettlementResultPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    TcpSettlementResult& outSettlement);
+bool parseMetaResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    TcpMetaResponse& outResponse);
 bool parseErrorPacket(
     const uint8_t* data,
     size_t size,

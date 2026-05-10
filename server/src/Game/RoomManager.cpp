@@ -1,6 +1,8 @@
 #include "Game/RoomManager.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <sstream>
 
 namespace Game {
 namespace {
@@ -8,12 +10,26 @@ constexpr uint32_t kDefaultMonsterTypeId = 1;
 constexpr uint16_t kDefaultMonsterMaxHp = 100;
 constexpr uint32_t kDefaultDropItemId = 1001;
 constexpr uint16_t kDefaultDropQuantity = 1;
+
+uint64_t currentUnixTimeMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+// settlementId는 사람이 읽을 수 있는 문자열. roomId, sessionId, sequence를 조합해서 만든다.
+std::string makeSettlementId(uint32_t roomId, uint64_t sessionId, uint32_t sequence) {
+    std::ostringstream out;
+    out << "room-" << roomId << "-session-" << sessionId << "-finish-" << sequence;
+    return out.str();
+}
 }  // namespace
 
 RoomManager::RoomManager(uint16_t maxPlayersPerRoom, uint16_t maxInventoryWeight)
     : nextRoomId_(1),
       nextMonsterId_(1),
       nextDropId_(1),
+      nextSettlementSequence_(1),
       maxPlayersPerRoom_(maxPlayersPerRoom),
       maxInventoryWeight_(maxInventoryWeight) {}
 
@@ -31,6 +47,8 @@ RoomCommandResult RoomManager::createRoom(uint64_t sessionId) {
 
     rooms_.emplace(roomId, room);
     sessionToRoomId_.emplace(sessionId, roomId);
+    sessionStartedAtMs_[sessionId] = currentUnixTimeMs();
+    forgetSettlement(sessionId);
     return RoomCommandResult(
         true,
         RoomCommandError::kNone,
@@ -57,6 +75,8 @@ RoomCommandResult RoomManager::joinRoom(uint64_t sessionId, uint32_t roomId) {
     }
 
     sessionToRoomId_.emplace(sessionId, roomId);
+    sessionStartedAtMs_[sessionId] = currentUnixTimeMs();
+    forgetSettlementsForPlayers(roomIt->second.playerSessionIds()); // join은 Room 멤버십을 바꾸므로 해당 Room의 모든 플레이어 정산 캐시를 무효화해야 한다.
     return RoomCommandResult(
         true,
         RoomCommandError::kNone,
@@ -74,11 +94,16 @@ RoomCommandResult RoomManager::leaveRoom(uint64_t sessionId) {
     auto roomIt = rooms_.find(roomId);
     if (roomIt == rooms_.end()) {
         sessionToRoomId_.erase(mappingIt);
+        sessionStartedAtMs_.erase(sessionId);
+        forgetSettlement(sessionId);
         return RoomCommandResult(false, RoomCommandError::kNotFound);
     }
 
+    const std::vector<uint64_t> affectedSessionIds = roomIt->second.playerSessionIds();
     roomIt->second.removePlayer(sessionId);
     sessionToRoomId_.erase(mappingIt);
+    sessionStartedAtMs_.erase(sessionId);
+    forgetSettlementsForPlayers(affectedSessionIds);
 
     RoomSummary summary = summarizeRoom(roomIt->second);
     const std::vector<uint64_t> playerSessionIds = roomIt->second.playerSessionIds();
@@ -110,6 +135,9 @@ RoomCommandResult RoomManager::markReady(uint64_t sessionId) {
 
     room.markReady(sessionId);
     const bool battleJustStarted = room.tryStartBattle();
+    if (battleJustStarted) {    // 런타임 상태가 크게 바뀌는 이벤트. 이전에 만들어둔 settlement 캐시는 더 이상 현재 상태를 대표하지 않을 수 있으므로 삭제한다.
+        forgetSettlementsForPlayers(room.playerSessionIds());
+    }
     return RoomCommandResult(
         true,
         RoomCommandError::kNone,
@@ -223,7 +251,78 @@ RoomCommandResult RoomManager::claimLoot(uint64_t sessionId, uint32_t dropId) {
     result.winnerSessionId = claim.winnerSessionId;
     result.drop = claim.drop;
     result.inventory = claim.inventory;
+    if (claim.claimed) {    // 실제로 이 세션이 loot를 획득한 경우에만 정산 캐시 무효화.
+        forgetSettlement(sessionId);
+    }
     return result;
+}
+
+SettlementCommandResult RoomManager::buildSettlementResult(
+    uint64_t sessionId,
+    uint64_t finishedAtUnixMs) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return SettlementCommandResult{false, RoomCommandError::kNotInRoom, SettlementResult{}};
+    }
+
+    auto roomIt = rooms_.find(mappingIt->second);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        sessionStartedAtMs_.erase(sessionId);
+        forgetSettlement(sessionId);
+        return SettlementCommandResult{false, RoomCommandError::kNotFound, SettlementResult{}};
+    }
+
+    const Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        sessionStartedAtMs_.erase(sessionId);
+        forgetSettlement(sessionId);
+        return SettlementCommandResult{false, RoomCommandError::kNotInRoom, SettlementResult{}};
+    }
+
+    auto cachedIt = settlementBySessionId_.find(sessionId);
+    if (cachedIt != settlementBySessionId_.end()) {
+        return SettlementCommandResult{true, RoomCommandError::kNone, cachedIt->second};
+    }
+
+    const InventorySnapshot* inventory = room.findInventory(sessionId);
+    if (inventory == nullptr) {
+        return SettlementCommandResult{false, RoomCommandError::kNotFound, SettlementResult{}};
+    }
+
+    SettlementResult settlement;
+    settlement.settlementId =
+        makeSettlementId(room.roomId(), sessionId, nextSettlementSequence_++);
+    settlement.sessionId = sessionId;
+    // Week 6 Debug CLI에는 별도 계정 인증이 없으므로 sessionId를 debug accountId로 사용한다.
+    settlement.accountId = sessionId;
+    settlement.roomId = room.roomId();
+    const auto startedIt = sessionStartedAtMs_.find(sessionId);
+    settlement.startedAtUnixMs =
+        startedIt == sessionStartedAtMs_.end() ? finishedAtUnixMs : startedIt->second;
+    settlement.finishedAtUnixMs = finishedAtUnixMs;
+    settlement.goldDelta = 0;
+    settlement.reason = SettlementReason::kNormal;
+
+    settlement.inventoryDeltas.reserve(room.drops().size());
+    for (const Drop& drop : room.drops()) {
+        if (!drop.claimed || drop.ownerSessionId != sessionId) {
+            continue;
+        }
+
+        settlement.inventoryDeltas.push_back(
+            SettlementInventoryDelta{
+                drop.itemId,
+                static_cast<int32_t>(drop.quantity),
+                drop.dropId});
+    }
+
+    settlementBySessionId_[sessionId] = settlement;
+    return SettlementCommandResult{
+        true,
+        RoomCommandError::kNone,
+        settlementBySessionId_.at(sessionId)};
 }
 
 std::optional<uint32_t> RoomManager::findRoomIdForSession(uint64_t sessionId) const {
@@ -261,6 +360,17 @@ std::vector<RoomSummary> RoomManager::roomList() const {
 size_t RoomManager::roomCount() const {
     return rooms_.size();
 }
+
+void RoomManager::forgetSettlement(uint64_t sessionId) {
+    settlementBySessionId_.erase(sessionId);
+}
+
+void RoomManager::forgetSettlementsForPlayers(const std::vector<uint64_t>& sessionIds) {
+    for (uint64_t sessionId : sessionIds) {
+        forgetSettlement(sessionId);
+    }
+}
+
 /*  Room 내부 상태를 외부용 요약 구조체로 변환하는 함수
  *  서버가 Room 전체를 다시 열어보지 않아도 기본 상태 판단이 가능하게 함 */
 RoomSummary RoomManager::summarizeRoom(const Room& room) const {

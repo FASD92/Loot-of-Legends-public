@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <string>
 #include <vector>
 
 #include "Net/TcpPacket.hpp"
@@ -479,4 +480,131 @@ TEST(TcpPacketTests, RejectInventorySnapshotThatExceedsMaxPacketSize) {
     std::vector<Net::TcpInventoryEntry> entries(168, Net::TcpInventoryEntry{3001, 1});
     std::vector<uint8_t> packet;
     EXPECT_FALSE(Net::serializeInventorySnapshotPacket(1001, 0, 10, entries, packet));
+}
+
+TEST(TcpPacketTests, SerializeAndParseFinishSessionRequestPacket) {
+    std::array<uint8_t, Net::kFinishSessionRequestPacketSize> packet{};
+    ASSERT_TRUE(Net::serializeFinishSessionRequestPacket(packet));
+
+    Net::TcpPacketHeader header;
+    ASSERT_TRUE(Net::parseFinishSessionRequestPacket(packet.data(), packet.size(), header));
+
+    EXPECT_EQ(header.type, Net::TcpPacketType::kFinishSessionRequest);
+    EXPECT_EQ(header.size, Net::kFinishSessionRequestPacketSize);
+}
+
+TEST(TcpPacketTests, SerializeAndParseSettlementResultPacket) {
+    Net::TcpSettlementResult settlement;
+    settlement.settlementId = "room-42-session-1001-finish-1";
+    settlement.sessionId = 1001;
+    settlement.accountId = 1001;
+    settlement.roomId = 42;
+    settlement.startedAtUnixMs = 1710000000000;
+    settlement.finishedAtUnixMs = 1710000005000;
+    settlement.goldDelta = -25;
+    settlement.reason = Net::TcpSettlementReason::kNormal;
+    settlement.inventoryDeltas = {
+        Net::TcpSettlementInventoryDelta{3001, 2, 77},
+        Net::TcpSettlementInventoryDelta{3002, -1, 78},
+    };
+
+    std::vector<uint8_t> packet;
+    ASSERT_TRUE(Net::serializeSettlementResultPacket(settlement, packet));
+
+    Net::TcpPacketHeader header;
+    Net::TcpSettlementResult parsed;
+    ASSERT_TRUE(Net::parseSettlementResultPacket(packet.data(), packet.size(), header, parsed));
+
+    EXPECT_EQ(header.type, Net::TcpPacketType::kSettlementResult);
+    EXPECT_EQ(header.size, Net::settlementResultPacketSize(settlement.settlementId.size(), 2));
+    EXPECT_EQ(parsed.settlementId, settlement.settlementId);
+    EXPECT_EQ(parsed.sessionId, 1001u);
+    EXPECT_EQ(parsed.accountId, 1001u);
+    EXPECT_EQ(parsed.roomId, 42u);
+    EXPECT_EQ(parsed.startedAtUnixMs, 1710000000000u);
+    EXPECT_EQ(parsed.finishedAtUnixMs, 1710000005000u);
+    EXPECT_EQ(parsed.goldDelta, -25);
+    EXPECT_EQ(parsed.reason, Net::TcpSettlementReason::kNormal);
+    ASSERT_EQ(parsed.inventoryDeltas.size(), 2u);
+    EXPECT_EQ(parsed.inventoryDeltas[0].itemId, 3001u);
+    EXPECT_EQ(parsed.inventoryDeltas[0].quantityDelta, 2);
+    EXPECT_EQ(parsed.inventoryDeltas[0].sourceDropId, 77u);
+    EXPECT_EQ(parsed.inventoryDeltas[1].itemId, 3002u);
+    EXPECT_EQ(parsed.inventoryDeltas[1].quantityDelta, -1);
+    EXPECT_EQ(parsed.inventoryDeltas[1].sourceDropId, 78u);
+}
+
+TEST(TcpPacketTests, RejectSettlementResultWithInvalidSettlementIdLength) {
+    Net::TcpSettlementResult settlement;
+    settlement.settlementId = std::string(Net::kSettlementIdMaxLength + 1, 'a');
+
+    std::vector<uint8_t> packet;
+    EXPECT_FALSE(Net::serializeSettlementResultPacket(settlement, packet));
+}
+
+TEST(TcpPacketTests, RejectSettlementResultWithInvalidDeltaCountSize) {
+    Net::TcpSettlementResult settlement;
+    settlement.settlementId = "room-42-session-1001-finish-1";
+    settlement.sessionId = 1001;
+    settlement.accountId = 1001;
+    settlement.roomId = 42;
+    settlement.startedAtUnixMs = 1710000000000;
+    settlement.finishedAtUnixMs = 1710000005000;
+    settlement.inventoryDeltas = {
+        Net::TcpSettlementInventoryDelta{3001, 2, 77},
+    };
+
+    std::vector<uint8_t> packet;
+    ASSERT_TRUE(Net::serializeSettlementResultPacket(settlement, packet));
+
+    const size_t countOffset = Net::kTcpHeaderSize + Net::kSettlementIdLengthFieldSize +
+        settlement.settlementId.size() + (2 * Net::kSessionIdFieldSize) + Net::kRoomIdFieldSize +
+        (2 * Net::kTimestampFieldSize) + Net::kGoldDeltaFieldSize + Net::kSettlementReasonFieldSize;
+    packet[countOffset] = 0x00;
+    packet[countOffset + 1] = 0x02;
+
+    Net::TcpPacketHeader header;
+    Net::TcpSettlementResult parsed;
+    EXPECT_FALSE(Net::parseSettlementResultPacket(packet.data(), packet.size(), header, parsed));
+}
+
+TEST(TcpPacketTests, RejectSettlementResultThatExceedsMaxPacketSize) {
+    Net::TcpSettlementResult settlement;
+    settlement.settlementId = "settlement";
+    settlement.inventoryDeltas.assign(
+        81,
+        Net::TcpSettlementInventoryDelta{3001, 1, 77});
+
+    std::vector<uint8_t> packet;
+    EXPECT_FALSE(Net::serializeSettlementResultPacket(settlement, packet));
+}
+
+TEST(TcpPacketTests, SerializeAndParseMetaResponsePacket) {
+    Net::TcpMetaResponse response;
+    response.op = Net::TcpMetaResponseOp::kSettlementRetryLater;
+    response.settlementId = "room-42-session-1001-finish-1";
+    response.status = Net::TcpMetaResponseStatus::kRetryLater;
+    response.retryAfterMs = 1500;
+
+    std::vector<uint8_t> packet;
+    ASSERT_TRUE(Net::serializeMetaResponsePacket(response, packet));
+
+    Net::TcpPacketHeader header;
+    Net::TcpMetaResponse parsed;
+    ASSERT_TRUE(Net::parseMetaResponsePacket(packet.data(), packet.size(), header, parsed));
+
+    EXPECT_EQ(header.type, Net::TcpPacketType::kMetaResponse);
+    EXPECT_EQ(header.size, Net::metaResponsePacketSize(response.settlementId.size()));
+    EXPECT_EQ(parsed.op, Net::TcpMetaResponseOp::kSettlementRetryLater);
+    EXPECT_EQ(parsed.settlementId, response.settlementId);
+    EXPECT_EQ(parsed.status, Net::TcpMetaResponseStatus::kRetryLater);
+    EXPECT_EQ(parsed.retryAfterMs, 1500u);
+}
+
+TEST(TcpPacketTests, RejectMetaResponseWithInvalidSettlementIdLength) {
+    Net::TcpMetaResponse response;
+    response.settlementId = std::string(Net::kSettlementIdMaxLength + 1, 'a');
+
+    std::vector<uint8_t> packet;
+    EXPECT_FALSE(Net::serializeMetaResponsePacket(response, packet));
 }

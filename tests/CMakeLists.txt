@@ -25,6 +25,7 @@ add_executable(
   core/SessionManagerTests.cpp
   core/TcpListenerTests.cpp
   core/ServerIntegrationTests.cpp
+  client/DebugCliCommandTests.cpp
   protocol/PacketParserTests.cpp
   protocol/PacketSerializerTests.cpp
   protocol/DispatcherTests.cpp
@@ -33,7 +34,7 @@ add_executable(
 target_compile_features(lol_tests PRIVATE cxx_std_17)
 #add_subdirectory(../server server_build)
 
-target_link_libraries(lol_tests PRIVATE GTest::gtest_main lol_server_core)
+target_link_libraries(lol_tests PRIVATE GTest::gtest_main lol_server_core lol_debug_cli_core)
 #target_include_directories(lol_tests PRIVATE ../server/src)
 
 include(GoogleTest)

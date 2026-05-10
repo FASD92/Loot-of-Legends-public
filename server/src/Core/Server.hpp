@@ -54,6 +54,17 @@ private:
     bool broadcastDropListSnapshot(
         const Game::RoomCommandResult& result,
         std::vector<int>& disconnectedClients);
+    bool broadcastLootResolved(
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients);
+    bool sendLootRejected(
+        int clientFd,
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients);
+    bool sendInventorySnapshot(
+        int clientFd,
+        const Game::InventorySnapshot& inventory,
+        std::vector<int>& disconnectedClients);
     void broadcastStateSnapshots(bool clientListChanged, bool roomListChanged);
     bool disconnectClient(int clientFd);
     void closeAllConnections();
