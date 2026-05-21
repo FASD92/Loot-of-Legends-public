@@ -24,10 +24,24 @@ add_executable(
   core/TcpPacketReaderTests.cpp
   core/SessionManagerTests.cpp
   core/TcpListenerTests.cpp
+  core/UdpSocketTests.cpp
   core/ServerIntegrationTests.cpp
   client/DebugCliCommandTests.cpp
+  protocol/AckWindowTests.cpp
+  protocol/RudpDatagramReceiverTests.cpp
+  protocol/RudpHelloPayloadTests.cpp
+  protocol/RudpInputCommandPayloadTests.cpp
+  protocol/RudpInputCommandSequenceTrackerTests.cpp
   protocol/PacketParserTests.cpp
   protocol/PacketSerializerTests.cpp
+  protocol/RudpPeerReceiveTests.cpp
+  protocol/RudpPeerRegistryTests.cpp
+  protocol/RudpReceivePipelineTests.cpp
+  protocol/RudpSocketDrainTests.cpp
+  protocol/ReliableSendQueueTests.cpp
+  protocol/RudpRetransmissionFlushTests.cpp
+  protocol/RudpRetransmissionScanTests.cpp
+  protocol/RudpSessionBinderTests.cpp
   protocol/DispatcherTests.cpp
 )
 

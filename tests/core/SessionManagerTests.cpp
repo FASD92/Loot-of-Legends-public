@@ -42,3 +42,17 @@ TEST(SessionManagerTests, RemoveErasesSessionByRemoteKey) {
     EXPECT_EQ(manager.size(), 0u);
     EXPECT_EQ(manager.find("127.0.0.1:10003"), nullptr);
 }
+
+TEST(SessionManagerTests, FindsSessionBySessionId) {
+    Core::SessionManager manager(std::chrono::milliseconds(1000));
+    Util::TimePoint now = Util::now();
+
+    auto sessionA = manager.findOrCreate("127.0.0.1:10004", now);
+    auto sessionB = manager.findOrCreate("127.0.0.1:10005", now);
+    ASSERT_NE(sessionA, nullptr);
+    ASSERT_NE(sessionB, nullptr);
+
+    EXPECT_EQ(manager.findBySessionId(sessionA->sessionId()), sessionA);
+    EXPECT_EQ(manager.findBySessionId(sessionB->sessionId()), sessionB);
+    EXPECT_EQ(manager.findBySessionId(9999), nullptr);
+}

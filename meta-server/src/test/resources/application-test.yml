@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 2
+      minimum-idle: 1
+  data:
+    redis:
+      timeout: 1s
+
+meta:
+  internal:
+    token: test-internal-token

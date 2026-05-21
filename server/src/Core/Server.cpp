@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "Core/Session.hpp"
+#include "Net/RudpHelloPayload.hpp"
+#include "Net/RudpInputCommandPayload.hpp"
 #include "Net/TcpPacket.hpp"
 #include "Util/Time.hpp"
 
@@ -16,6 +18,7 @@ namespace {
 constexpr std::chrono::milliseconds kSessionTimeout(10000);
 constexpr std::chrono::milliseconds kLoopSleep(1);
 constexpr size_t kReceiveBufferSize = 512;
+constexpr size_t kRudpMaxPacketsPerTick = 64;
 
 uint64_t currentUnixTimeMs() {
     return static_cast<uint64_t>(
@@ -132,15 +135,57 @@ Net::TcpErrorCode toTcpErrorCode(Game::RoomCommandError error) {
 
 namespace Core {
 Server::Server(uint16_t port)
+    : Server(port, kSessionTimeout) {}
+
+Server::Server(uint16_t port, std::chrono::milliseconds rudpPeerTimeout)
     : sessionManager_(kSessionTimeout),
       roomManager_(),
+      rudpPeerRegistry_(rudpPeerTimeout),
       activeConnectionCount_(0),
       sessionCountSnapshot_(0),
+      rudpPeerCountSnapshot_(0),
+      rudpDrainAttempted_(0),
+      rudpDrainDelivered_(0),
+      rudpDrainMalformed_(0),
+      rudpDrainInvalidEndpoint_(0),
+      rudpDrainAckOnly_(0),
+      rudpDrainDuplicate_(0),
+      rudpDrainTooOld_(0),
+      rudpDrainSocketErrors_(0),
+      rudpRetransmissionExpired_(0),
+      rudpRetransmissionDue_(0),
+      rudpRetransmissionResent_(0),
+      rudpRetransmissionSendErrors_(0),
+      rudpRetransmissionDroppedPeers_(0),
+      rudpBindingHelloReceived_(0),
+      rudpBindingBound_(0),
+      rudpBindingRefreshed_(0),
+      rudpBindingUnknownSession_(0),
+      rudpBindingConflicts_(0),
+      rudpBindingInvalidEndpoint_(0),
+      rudpBindingInvalidPayload_(0),
+      rudpBindingIgnoredNonHello_(0),
+      rudpBindingInputCandidates_(0),
+      rudpBindingInputDecoded_(0),
+      rudpBindingInputDecodeFailed_(0),
+      rudpBindingUnboundInputRejected_(0),
+      rudpBindingUnsupportedPacketIgnored_(0),
+      rudpBindingInputSequenceAccepted_(0),
+      rudpBindingInputSequenceDuplicateRejected_(0),
+      rudpBindingInputSequenceStaleRejected_(0),
+      rudpBindingInputSequenceAmbiguousRejected_(0),
+      rudpBindingInputSequenceInvalidSessionRejected_(0),
+      rudpBindingCountSnapshot_(0),
       running_(false),
       port_(port) {}
 
 bool Server::start() {
     if (!listener_.open(port_)) {
+        return false;
+    }
+    if (!udpSocket_.open(port_)) {
+        listener_.close();
+        running_.store(false);
         return false;
     }
     running_.store(true);
@@ -154,6 +199,7 @@ void Server::run() {
     }
 
     closeAllConnections();
+    udpSocket_.close();
 }
 
 void Server::requestStop() {
@@ -164,6 +210,10 @@ uint16_t Server::boundPort() const {
     return listener_.boundPort();
 }
 
+uint16_t Server::udpBoundPort() const {
+    return udpSocket_.boundPort();
+}
+
 size_t Server::activeConnectionCount() const {
     return activeConnectionCount_.load(std::memory_order_relaxed);
 }
@@ -172,10 +222,84 @@ size_t Server::sessionCount() const {
     return sessionCountSnapshot_.load(std::memory_order_relaxed);
 }
 
+RudpServerDrainStats Server::rudpDrainStats() const {
+    RudpServerDrainStats stats;
+    stats.attempted = rudpDrainAttempted_.load(std::memory_order_relaxed);
+    stats.delivered = rudpDrainDelivered_.load(std::memory_order_relaxed);
+    stats.malformed = rudpDrainMalformed_.load(std::memory_order_relaxed);
+    stats.invalidEndpoint =
+        rudpDrainInvalidEndpoint_.load(std::memory_order_relaxed);
+    stats.ackOnly = rudpDrainAckOnly_.load(std::memory_order_relaxed);
+    stats.duplicate = rudpDrainDuplicate_.load(std::memory_order_relaxed);
+    stats.tooOld = rudpDrainTooOld_.load(std::memory_order_relaxed);
+    stats.socketErrors = rudpDrainSocketErrors_.load(std::memory_order_relaxed);
+    return stats;
+}
+
+RudpServerRetransmissionStats Server::rudpRetransmissionStats() const {
+    RudpServerRetransmissionStats stats;
+    stats.expired = rudpRetransmissionExpired_.load(std::memory_order_relaxed);
+    stats.due = rudpRetransmissionDue_.load(std::memory_order_relaxed);
+    stats.resent = rudpRetransmissionResent_.load(std::memory_order_relaxed);
+    stats.sendErrors =
+        rudpRetransmissionSendErrors_.load(std::memory_order_relaxed);
+    stats.droppedPeers =
+        rudpRetransmissionDroppedPeers_.load(std::memory_order_relaxed);
+    return stats;
+}
+
+RudpServerBindingStats Server::rudpBindingStats() const {
+    RudpServerBindingStats stats;
+    stats.helloReceived = rudpBindingHelloReceived_.load(std::memory_order_relaxed);
+    stats.bound = rudpBindingBound_.load(std::memory_order_relaxed);
+    stats.refreshed = rudpBindingRefreshed_.load(std::memory_order_relaxed);
+    stats.unknownSession =
+        rudpBindingUnknownSession_.load(std::memory_order_relaxed);
+    stats.conflicts = rudpBindingConflicts_.load(std::memory_order_relaxed);
+    stats.invalidEndpoint =
+        rudpBindingInvalidEndpoint_.load(std::memory_order_relaxed);
+    stats.invalidPayload =
+        rudpBindingInvalidPayload_.load(std::memory_order_relaxed);
+    stats.ignoredNonHello =
+        rudpBindingIgnoredNonHello_.load(std::memory_order_relaxed);
+    stats.inputCandidates =
+        rudpBindingInputCandidates_.load(std::memory_order_relaxed);
+    stats.inputDecoded =
+        rudpBindingInputDecoded_.load(std::memory_order_relaxed);
+    stats.inputDecodeFailed =
+        rudpBindingInputDecodeFailed_.load(std::memory_order_relaxed);
+    stats.unboundInputRejected =
+        rudpBindingUnboundInputRejected_.load(std::memory_order_relaxed);
+    stats.unsupportedPacketIgnored =
+        rudpBindingUnsupportedPacketIgnored_.load(std::memory_order_relaxed);
+    stats.inputSequenceAccepted =
+        rudpBindingInputSequenceAccepted_.load(std::memory_order_relaxed);
+    stats.inputSequenceDuplicateRejected =
+        rudpBindingInputSequenceDuplicateRejected_.load(std::memory_order_relaxed);
+    stats.inputSequenceStaleRejected =
+        rudpBindingInputSequenceStaleRejected_.load(std::memory_order_relaxed);
+    stats.inputSequenceAmbiguousRejected =
+        rudpBindingInputSequenceAmbiguousRejected_.load(std::memory_order_relaxed);
+    stats.inputSequenceInvalidSessionRejected =
+        rudpBindingInputSequenceInvalidSessionRejected_.load(std::memory_order_relaxed);
+    return stats;
+}
+
+size_t Server::rudpPeerCount() const {
+    return rudpPeerCountSnapshot_.load(std::memory_order_relaxed);
+}
+
+size_t Server::rudpBindingCount() const {
+    return rudpBindingCountSnapshot_.load(std::memory_order_relaxed);
+}
+
 void Server::tickOnce() {
     Util::TimePoint now = Util::now();
     acceptNewClients(now);
     processActiveConnections(now);
+    processRudpSocket(now);
+    processRudpPeerLifecycle(now);
+    processRudpRetransmissions(now);
     sessionManager_.tick(now);
     sessionCountSnapshot_.store(sessionManager_.size(), std::memory_order_relaxed);
 }
@@ -292,6 +416,168 @@ void Server::processActiveConnections(Util::TimePoint now) {
         broadcastStateSnapshots(
             !disconnectedClients.empty(),
             roomListChanged || roomChangedByDisconnect);
+    }
+}
+
+void Server::processRudpSocket(Util::TimePoint now) {
+    const Net::RudpSocketDrainSummary summary =
+        Net::drainRudpSocket(udpSocket_, rudpPeerRegistry_, now, kRudpMaxPacketsPerTick);
+    accumulateRudpDrainStats(summary);
+    processRudpDeliveries(summary.deliveries, now);
+}
+
+void Server::processRudpDeliveries(
+    const std::vector<Net::RudpPacketDelivery>& deliveries,
+    Util::TimePoint now) {
+    for (const Net::RudpPacketDelivery& delivery : deliveries) {
+        if (delivery.header.packetType != static_cast<uint16_t>(Net::RudpPacketType::kHello)) {
+            rudpBindingIgnoredNonHello_.fetch_add(1, std::memory_order_relaxed);
+            processRudpAdapterGate(delivery);
+            continue;
+        }
+        processRudpHelloDelivery(delivery, now);
+    }
+}
+
+void Server::processRudpAdapterGate(const Net::RudpPacketDelivery& delivery) {
+    if (delivery.header.packetType !=
+        static_cast<uint16_t>(Net::RudpPacketType::kInputCommand)) {
+        rudpBindingUnsupportedPacketIgnored_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    const std::optional<uint64_t> sessionId =
+        rudpSessionBinder_.findSessionId(delivery.endpoint);
+    if (!sessionId.has_value()) {
+        rudpBindingUnboundInputRejected_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    rudpBindingInputCandidates_.fetch_add(1, std::memory_order_relaxed);
+    Net::RudpInputCommandPayload input;
+    if (!Net::parseRudpInputCommandPayload(
+            delivery.payload.data(),
+            delivery.payload.size(),
+            input)) {
+        rudpBindingInputDecodeFailed_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    rudpBindingInputDecoded_.fetch_add(1, std::memory_order_relaxed);
+    const Net::RudpInputCommandSequenceResult sequenceResult =
+        rudpInputCommandSequenceTracker_.record(*sessionId, input.cmdSeq);
+    switch (sequenceResult) {
+    case Net::RudpInputCommandSequenceResult::kAcceptedFirst:
+    case Net::RudpInputCommandSequenceResult::kAcceptedNewer:
+        rudpBindingInputSequenceAccepted_.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case Net::RudpInputCommandSequenceResult::kDuplicate:
+        rudpBindingInputSequenceDuplicateRejected_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        break;
+    case Net::RudpInputCommandSequenceResult::kStale:
+        rudpBindingInputSequenceStaleRejected_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        break;
+    case Net::RudpInputCommandSequenceResult::kAmbiguous:
+        rudpBindingInputSequenceAmbiguousRejected_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        break;
+    case Net::RudpInputCommandSequenceResult::kInvalidSession:
+        rudpBindingInputSequenceInvalidSessionRejected_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        break;
+    }
+}
+
+void Server::processRudpHelloDelivery(
+    const Net::RudpPacketDelivery& delivery,
+    Util::TimePoint now) {
+    rudpBindingHelloReceived_.fetch_add(1, std::memory_order_relaxed);
+
+    Net::RudpHelloPayload hello;
+    if (!Net::parseRudpHelloPayload(
+            delivery.payload.data(),
+            delivery.payload.size(),
+            hello)) {
+        rudpBindingInvalidPayload_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    auto session = sessionManager_.findBySessionId(hello.sessionId);
+    if (!session) {
+        rudpBindingUnknownSession_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    const Net::RudpSessionBindResult bindResult =
+        rudpSessionBinder_.bind(delivery.endpoint, hello.sessionId);
+    switch (bindResult) {
+    case Net::RudpSessionBindResult::kBoundNew:
+        rudpBindingBound_.fetch_add(1, std::memory_order_relaxed);
+        session->updateLastHeard(now);
+        break;
+    case Net::RudpSessionBindResult::kRefreshed:
+        rudpBindingRefreshed_.fetch_add(1, std::memory_order_relaxed);
+        session->updateLastHeard(now);
+        break;
+    case Net::RudpSessionBindResult::kEndpointConflict:
+    case Net::RudpSessionBindResult::kSessionConflict:
+        rudpBindingConflicts_.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case Net::RudpSessionBindResult::kInvalidEndpoint:
+        rudpBindingInvalidEndpoint_.fetch_add(1, std::memory_order_relaxed);
+        break;
+    }
+
+    rudpBindingCountSnapshot_.store(
+        rudpSessionBinder_.size(),
+        std::memory_order_relaxed);
+}
+
+void Server::processRudpPeerLifecycle(Util::TimePoint now) {
+    rudpPeerRegistry_.tick(now);
+    rudpPeerCountSnapshot_.store(rudpPeerRegistry_.size(), std::memory_order_relaxed);
+}
+
+void Server::processRudpRetransmissions(Util::TimePoint now) {
+    const Net::RudpRetransmissionFlushSummary summary =
+        Net::flushRudpRetransmissions(udpSocket_, rudpPeerRegistry_, now);
+    accumulateRudpRetransmissionStats(summary);
+}
+
+void Server::accumulateRudpDrainStats(const Net::RudpSocketDrainSummary& summary) {
+    rudpDrainAttempted_.fetch_add(summary.attempted, std::memory_order_relaxed);
+    rudpDrainDelivered_.fetch_add(summary.delivered, std::memory_order_relaxed);
+    rudpDrainMalformed_.fetch_add(summary.malformed, std::memory_order_relaxed);
+    rudpDrainInvalidEndpoint_.fetch_add(
+        summary.invalidEndpoint,
+        std::memory_order_relaxed);
+    rudpDrainAckOnly_.fetch_add(summary.ackOnly, std::memory_order_relaxed);
+    rudpDrainDuplicate_.fetch_add(summary.duplicate, std::memory_order_relaxed);
+    rudpDrainTooOld_.fetch_add(summary.tooOld, std::memory_order_relaxed);
+    rudpDrainSocketErrors_.fetch_add(summary.socketErrors, std::memory_order_relaxed);
+}
+
+void Server::accumulateRudpRetransmissionStats(
+    const Net::RudpRetransmissionFlushSummary& summary) {
+    rudpRetransmissionExpired_.fetch_add(summary.expired, std::memory_order_relaxed);
+    rudpRetransmissionDue_.fetch_add(summary.due, std::memory_order_relaxed);
+    rudpRetransmissionResent_.fetch_add(summary.resent, std::memory_order_relaxed);
+    rudpRetransmissionSendErrors_.fetch_add(
+        summary.sendErrors,
+        std::memory_order_relaxed);
+    rudpRetransmissionDroppedPeers_.fetch_add(
+        summary.droppedPeers,
+        std::memory_order_relaxed);
+    if (summary.droppedPeers > 0) {
+        rudpPeerCountSnapshot_.store(
+            rudpPeerRegistry_.size(),
+            std::memory_order_relaxed);
     }
 }
 
@@ -832,7 +1118,13 @@ bool Server::disconnectClient(int clientFd) {
         return false;
     }
 
-    const bool roomChanged = roomManager_.leaveRoom(it->second->sessionId()).ok;
+    const uint64_t sessionId = it->second->sessionId();
+    const bool roomChanged = roomManager_.leaveRoom(sessionId).ok;
+    rudpSessionBinder_.removeBySessionId(sessionId);
+    rudpInputCommandSequenceTracker_.removeSession(sessionId);
+    rudpBindingCountSnapshot_.store(
+        rudpSessionBinder_.size(),
+        std::memory_order_relaxed);
     sessionManager_.remove(it->second->remoteKey());
     listener_.closeClient(clientFd);
     connections_.erase(it);

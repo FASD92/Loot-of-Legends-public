@@ -29,6 +29,15 @@ std::shared_ptr<Session> SessionManager::find(const std::string& remoteKey) cons
     return it->second;
 }
 
+std::shared_ptr<Session> SessionManager::findBySessionId(uint64_t sessionId) const {
+    for (const auto& entry : sessions_) {
+        if (entry.second->sessionId() == sessionId) {
+            return entry.second;
+        }
+    }
+    return nullptr;
+}
+
 void SessionManager::remove(const std::string& remoteKey) {
     sessions_.erase(remoteKey);
 }

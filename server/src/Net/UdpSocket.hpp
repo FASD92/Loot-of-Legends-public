@@ -24,6 +24,7 @@ public:
     bool sendTo(const uint8_t* data, size_t size, const UdpEndpoint& endpoint);
 
     int fd() const;
+    uint16_t boundPort() const;
 
 private:
     int fd_;

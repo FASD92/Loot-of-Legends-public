@@ -103,6 +103,30 @@ int UdpSocket::fd() const {     // 내부 fd 반환. const라 상태 변경 x
     return fd_;
 }
 
+uint16_t UdpSocket::boundPort() const {
+    if (fd_ < 0) {
+        return 0;
+    }
+
+    sockaddr_storage addr{};
+    socklen_t addrLen = sizeof(addr);
+    if (::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &addrLen) < 0) {
+        return 0;
+    }
+
+    if (addr.ss_family == AF_INET) {
+        const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(&addr);
+        return ntohs(ipv4->sin_port);
+    }
+
+    if (addr.ss_family == AF_INET6) {
+        const sockaddr_in6* ipv6 = reinterpret_cast<const sockaddr_in6*>(&addr);
+        return ntohs(ipv6->sin6_port);
+    }
+
+    return 0;
+}
+
     // 로깅용 문자열 변환
     // ip 문자열을 담을 버퍼(IPv6 최대 길이)와 포트 변수 준비
 std::string endpointToString(const UdpEndpoint& endpoint) {

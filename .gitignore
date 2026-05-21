@@ -12,7 +12,6 @@ Icon?
 docs/
 experimental/
 AGENTS.md
-meta-server/
 
 # ===== CMake / Build artifacts =====
 build/
@@ -26,3 +25,7 @@ install_manifest.txt
 compile_commands.json
 *.ninja
 .ninja_*
+
+# ===== Gradle / Java build artifacts =====
+meta-server/.gradle/
+meta-server/build/

@@ -17,6 +17,7 @@ public:
 
     std::shared_ptr<Session> findOrCreate(const std::string& remoteKey, Util::TimePoint now);
     std::shared_ptr<Session> find(const std::string& remoteKey) const;
+    std::shared_ptr<Session> findBySessionId(uint64_t sessionId) const;
     void remove(const std::string& remoteKey);
 
     void tick(Util::TimePoint now);

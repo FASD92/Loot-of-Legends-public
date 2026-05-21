@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: loot-of-legends-meta-server
+
+server:
+  port: 8081
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+meta:
+  internal:
+    token: ${META_INTERNAL_TOKEN}
