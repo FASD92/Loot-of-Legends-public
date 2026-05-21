@@ -12,7 +12,10 @@
 #include "Core/SessionManager.hpp"
 #include "Game/RoomManager.hpp"
 #include "Net/RudpInputCommandSequenceTracker.hpp"
+#include "Net/RudpMetaResponseIdempotencyTracker.hpp"
+#include "Net/RudpMetaResponsePayload.hpp"
 #include "Net/RudpPeerRegistry.hpp"
+#include "Net/RudpReliableEventSendQueue.hpp"
 #include "Net/RudpRetransmissionFlush.hpp"
 #include "Net/RudpSessionBinder.hpp"
 #include "Net/RudpSocketDrain.hpp"
@@ -62,6 +65,34 @@ struct RudpServerBindingStats {
     size_t inputSequenceInvalidSessionRejected{0};
 };
 
+struct RudpServerReliableEventStats {
+    size_t tracked{0};
+    size_t duplicateSequence{0};
+    size_t duplicateLogicalEvent{0};
+    size_t invalidSession{0};
+    size_t invalidDescriptor{0};
+    size_t invalidPacketBytes{0};
+};
+
+struct RudpServerMetaResponseStats {
+    size_t completedFirst{0};
+    size_t completionDuplicate{0};
+    size_t retryObserved{0};
+    size_t retryDuplicate{0};
+    size_t retryIgnoredAfterCompletion{0};
+    size_t invalidPayload{0};
+    size_t enqueued{0};
+};
+
+enum class RudpServerReliableEventTrackResult {
+    kTracked,
+    kDuplicateSequence,
+    kDuplicateLogicalEvent,
+    kInvalidSession,
+    kInvalidDescriptor,
+    kInvalidPacketBytes,
+};
+
 class Server {
 public:
     explicit Server(uint16_t port);
@@ -77,8 +108,11 @@ public:
     RudpServerDrainStats rudpDrainStats() const;
     RudpServerRetransmissionStats rudpRetransmissionStats() const;
     RudpServerBindingStats rudpBindingStats() const;
+    RudpServerReliableEventStats rudpReliableEventStats() const;
+    RudpServerMetaResponseStats rudpMetaResponseStats() const;
     size_t rudpPeerCount() const;
     size_t rudpBindingCount() const;
+    size_t rudpReliableEventPendingCount() const;
 
 private:
     void tickOnce();
@@ -92,11 +126,33 @@ private:
         const Net::RudpPacketDelivery& delivery,
         Util::TimePoint now);
     void processRudpAdapterGate(const Net::RudpPacketDelivery& delivery);
+    RudpServerReliableEventTrackResult trackRudpReliableEventForSession(
+        uint64_t sessionId,
+        const Net::RudpReliableEventDescriptor& descriptor,
+        uint32_t sequence,
+        const std::vector<uint8_t>& packetBytes,
+        Util::TimePoint now);
+    void enqueueRudpBattleStartEvent(
+        const Game::RoomCommandResult& result,
+        Util::TimePoint now);
+    void enqueueRudpMonsterDeathEvent(
+        const Game::RoomCommandResult& result,
+        Util::TimePoint now);
+    void enqueueRudpLootResolvedEvent(
+        const Game::RoomCommandResult& result,
+        Util::TimePoint now);
+    bool observeRudpMetaResponseForSession(
+        uint64_t sessionId,
+        const Net::RudpMetaResponsePayload& payload,
+        Util::TimePoint now);
+    uint32_t nextRudpReliableEventSequenceForSession(uint64_t sessionId);
+    void clearRudpReliableEventsForSession(uint64_t sessionId);
     void processRudpPeerLifecycle(Util::TimePoint now);
     void processRudpRetransmissions(Util::TimePoint now);
     void accumulateRudpDrainStats(const Net::RudpSocketDrainSummary& summary);
     void accumulateRudpRetransmissionStats(
         const Net::RudpRetransmissionFlushSummary& summary);
+    size_t calculateRudpReliableEventPendingCount() const;
     std::vector<uint64_t> collectActiveSessionIds() const;
     std::vector<Net::TcpRoomEntry> collectRoomEntries() const;
     bool handleRoomPacket(
@@ -145,6 +201,10 @@ private:
     Net::RudpPeerRegistry rudpPeerRegistry_;
     Net::RudpSessionBinder rudpSessionBinder_;
     Net::RudpInputCommandSequenceTracker rudpInputCommandSequenceTracker_;
+    Net::RudpMetaResponseIdempotencyTracker rudpMetaResponseIdempotencyTracker_;
+    std::unordered_map<uint64_t, Net::RudpReliableEventSendQueue>
+        rudpReliableEventQueues_;
+    std::unordered_map<uint64_t, uint32_t> rudpReliableEventNextSequenceBySession_;
     std::unordered_map<int, std::unique_ptr<ClientConnection>> connections_;
     std::atomic<size_t> activeConnectionCount_;
     std::atomic<size_t> sessionCountSnapshot_;
@@ -181,6 +241,20 @@ private:
     std::atomic<size_t> rudpBindingInputSequenceAmbiguousRejected_;
     std::atomic<size_t> rudpBindingInputSequenceInvalidSessionRejected_;
     std::atomic<size_t> rudpBindingCountSnapshot_;
+    std::atomic<size_t> rudpReliableEventTracked_;
+    std::atomic<size_t> rudpReliableEventDuplicateSequence_;
+    std::atomic<size_t> rudpReliableEventDuplicateLogicalEvent_;
+    std::atomic<size_t> rudpReliableEventInvalidSession_;
+    std::atomic<size_t> rudpReliableEventInvalidDescriptor_;
+    std::atomic<size_t> rudpReliableEventInvalidPacketBytes_;
+    std::atomic<size_t> rudpReliableEventPendingCountSnapshot_;
+    std::atomic<size_t> rudpMetaResponseCompletedFirst_;
+    std::atomic<size_t> rudpMetaResponseCompletionDuplicate_;
+    std::atomic<size_t> rudpMetaResponseRetryObserved_;
+    std::atomic<size_t> rudpMetaResponseRetryDuplicate_;
+    std::atomic<size_t> rudpMetaResponseRetryIgnoredAfterCompletion_;
+    std::atomic<size_t> rudpMetaResponseInvalidPayload_;
+    std::atomic<size_t> rudpMetaResponseEnqueued_;
     std::atomic<bool> running_;
     uint16_t port_;
 };

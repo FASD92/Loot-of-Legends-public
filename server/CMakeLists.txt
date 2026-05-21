@@ -20,14 +20,24 @@ add_library(
   src/Game/RoomManager.hpp
   src/Net/RudpAckWindow.cpp
   src/Net/RudpAckWindow.hpp
+  src/Net/RudpBattleStartPayload.cpp
+  src/Net/RudpBattleStartPayload.hpp
   src/Net/RudpDatagramReceiver.cpp
   src/Net/RudpDatagramReceiver.hpp
+  src/Net/RudpGameEventPayload.cpp
+  src/Net/RudpGameEventPayload.hpp
+  src/Net/RudpGameplayEventIdempotencyTracker.cpp
+  src/Net/RudpGameplayEventIdempotencyTracker.hpp
   src/Net/RudpHelloPayload.cpp
   src/Net/RudpHelloPayload.hpp
   src/Net/RudpInputCommandPayload.cpp
   src/Net/RudpInputCommandPayload.hpp
   src/Net/RudpInputCommandSequenceTracker.cpp
   src/Net/RudpInputCommandSequenceTracker.hpp
+  src/Net/RudpMetaResponseIdempotencyTracker.cpp
+  src/Net/RudpMetaResponseIdempotencyTracker.hpp
+  src/Net/RudpMetaResponsePayload.cpp
+  src/Net/RudpMetaResponsePayload.hpp
   src/Net/RudpPacket.cpp
   src/Net/RudpPacket.hpp
   src/Net/RudpPeer.cpp
@@ -36,6 +46,8 @@ add_library(
   src/Net/RudpPeerRegistry.hpp
   src/Net/RudpReceivePipeline.cpp
   src/Net/RudpReceivePipeline.hpp
+  src/Net/RudpReliableEventSendQueue.cpp
+  src/Net/RudpReliableEventSendQueue.hpp
   src/Net/RudpReliableSendQueue.cpp
   src/Net/RudpReliableSendQueue.hpp
   src/Net/RudpRetransmissionFlush.cpp

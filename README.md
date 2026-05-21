@@ -56,11 +56,11 @@
 | Debug CLI | 완료 | Unity 없이도 서버 흐름을 명령 단위로 재현 가능한 개발용 클라이언트 |
 | `SettlementResult` 계약 | 완료 | `finish_session` 요청에 대해 정산 payload 생성, 반복 요청 시 동일 payload 반환 |
 | Spring Meta Server / MySQL / Redis | 진행 중 | 정산 API, 내부 토큰 검증, MySQL 트랜잭션/멱등 처리 세로 슬라이스 구현 |
-| Custom RUDP | 진행 중 | ACK window, reliable send queue, retransmission, Hello binding, InputCommand `cmdSeq` gate 구현 |
+| Custom RUDP | 진행 중 | ACK/retransmission, Hello/InputCommand `cmdSeq` gate, Reliable Ordered event payload/queue/duplicate guard 구현 |
 | Unity Thin Client | 예정 | 서버 응답을 표시하는 얇은 렌더러로 구현 예정 |
 | 100-client stress / soak | 예정 | Room actor / WorkerPool 전환 이후 운영 검증 예정 |
 
-현재 공개 레포의 초점은 **C++ 서버 권한 루프 + Debug CLI + RUDP 전송 계층 실험 + Spring Meta 정산 세로 슬라이스 + 자동 테스트**입니다.
+현재 공개 레포의 초점은 **C++ 서버 권한 루프 + Debug CLI + RUDP Reliable Ordered event layer + Spring Meta 정산 세로 슬라이스 + 자동 테스트**입니다.
 
 ---
 
@@ -75,7 +75,7 @@
 | 서버 인벤토리 검증 | 루팅 성공/거절 결과에 따라 인벤토리와 무게 상태를 서버에서 관리 |
 | 패킷 계약 설계 | `Size + Type` 헤더 기반 TCP 패킷 직렬화/역직렬화 구현 |
 | 재현 가능한 시연 | Debug CLI로 Unity 없이도 전체 서버 흐름을 재현 |
-| 테스트 가능한 설계 | RoomManager 단위 테스트와 TCP 통합 테스트로 핵심 불변식 검증 |
+| 테스트 가능한 설계 | RoomManager 단위 테스트, TCP 통합 테스트, RUDP protocol 테스트로 핵심 불변식 검증 |
 | 정산 경계 설계 | 세션 중 휘발 상태를 `SettlementResult`로 정리하고, 이후 Meta/DB 정산으로 확장 가능하게 설계 |
 
 ---
@@ -271,7 +271,7 @@ sequenceDiagram
 | Loot | ClickLoot 요청, winner 확정, duplicate/overweight rejection |
 | Inventory | winner inventory 갱신, current/max weight snapshot 전송 |
 | Settlement | FinishSessionRequest, SettlementResult 생성, 반복 요청 멱등 응답 |
-| RUDP | ACK window, reliable send queue, retransmission scan/flush, Hello session binding, InputCommand sequence gate |
+| RUDP | ACK window, retransmission scan/flush, Hello session binding, InputCommand sequence gate, Reliable Ordered event payload/queue/duplicate guard |
 | Meta Server | Spring Boot 정산 API, internal token 검증, MySQL/Redis 기반 테스트 세로 슬라이스 |
 | Debug CLI | 다중 alias 접속, room/ready/loot/settlement 명령, 상태 출력 |
 | Test | GoogleTest 기반 domain/unit/integration/protocol/client command tests |
@@ -458,7 +458,7 @@ cd meta-server
 | `SessionManagerTests` | session 생성, 중복 없는 sessionId, 제거 흐름 |
 | `TcpListenerTests` | TCP listener lifecycle |
 | `DebugCliCommandTests` | CLI 명령 파싱, alias command, 인자 검증 |
-| `protocol/*` | RUDP ACK/retransmission/receive pipeline/input command gate와 parser/serializer/dispatcher 검증 |
+| `protocol/*` | RUDP ACK/retransmission/receive pipeline, InputCommand gate, Reliable Ordered event payload/queue/duplicate guard 검증 |
 | `meta-server/src/test` | Spring 정산 API, DB schema, repository, service idempotency, rollback invariant 검증 |
 
 <details>
@@ -480,6 +480,8 @@ cd meta-server
 - Room 이탈 시 2인 MVP 기준 battle/monster/drop/inventory runtime state가 초기화됩니다.
 - `SettlementResult`는 sessionId, accountId, roomId, timestamps, goldDelta, inventoryDeltas를 포함합니다.
 - 반복 `finish_session` 요청은 같은 settlementId와 같은 payload를 반환합니다.
+- RUDP Reliable Ordered event는 current-field payload contract와 derived key 기반 idempotency로 중복 반영을 막습니다.
+- BattleStart/GameEvent/MetaResponse payload codec과 pending queue metadata는 테스트로 고정합니다.
 
 </details>
 
@@ -526,7 +528,7 @@ cd meta-server
 ### 다음 구현 목표
 
 1. C++ 서버의 `SettlementResult`를 Spring Meta Server로 실제 전송합니다.
-2. RUDP input command 경로를 gameplay command 처리와 더 촘촘하게 연결합니다.
+2. RUDP Reliable Ordered event pending queue를 실제 UDP datagram 송신과 ACK consume 경로로 확장합니다.
 3. 전투/루팅 hot path에는 동기 DB 접근을 넣지 않고, DB는 세션 종료 정산 경계에서만 연결합니다.
 4. Room Actor / WorkerPool로 동일 Room 직렬 처리와 다중 Room 병렬 처리를 분리합니다.
 5. Unity Thin Client와 stress/soak test로 외부 재현성을 확장합니다.
@@ -542,7 +544,7 @@ cd meta-server
 | 플레이어 수 | 현재 MVP는 2인 Room 기준입니다. 10인 Room 경합은 Room Actor 전환 이후 확장 예정입니다.                         |
 | DB 정산 | Spring Meta Server의 정산 API와 DB 멱등 처리는 구현되어 있지만, C++ 서버와의 런타임 HTTP 연동은 후속 범위입니다. |
 | 멱등성 범위 | C++ `finish_session`은 프로세스 메모리 기준이고, Meta Server는 DB unique key 기반 영속 멱등성을 검증합니다. |
-| 전송 계층 | TCP gameplay 루프가 기준 경로이며, Custom RUDP는 Hello/InputCommand/ACK/retransmission 계층을 확장 중입니다. |
+| 전송 계층 | TCP gameplay 루프가 기준 경로이며, Custom RUDP는 Hello/InputCommand/ACK/retransmission과 Reliable Ordered event enqueue/duplicate guard까지 확장되었습니다. 실제 UDP datagram 송신, ACK server-loop consume, RoomEvent/WorkerPool 연결은 후속 범위입니다. |
 | Unity | 현재는 Debug CLI가 시연 수단입니다. Unity는 판정 주체가 아니라 서버 응답을 표시하는 thin client로 구현 예정입니다.          |
 | Stress/Soak | 100-client & 100-rooms stress와 loss/jitter/reorder soak test는 동시성/RUDP 단계 이후 진행 예정입니다. |
 

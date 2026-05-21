@@ -11,12 +11,16 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "Core/Server.hpp"
+#include "Net/RudpBattleStartPayload.hpp"
+#include "Net/RudpGameEventPayload.hpp"
 #include "Net/RudpHelloPayload.hpp"
 #include "Net/RudpInputCommandPayload.hpp"
+#include "Net/RudpMetaResponsePayload.hpp"
 #include "Net/RudpPacket.hpp"
 #include "Net/RudpReliableSendQueue.hpp"
 #include "Net/TcpPacket.hpp"
@@ -46,10 +50,106 @@ struct ServerTestAccess {
     static size_t rudpInputCommandSequenceTrackerSize(Server& server) {
         return server.rudpInputCommandSequenceTracker_.size();
     }
+
+    static RudpServerReliableEventTrackResult trackRudpReliableEvent(
+        Server& server,
+        uint64_t sessionId,
+        const Net::RudpReliableEventDescriptor& descriptor,
+        uint32_t sequence,
+        const std::vector<uint8_t>& packetBytes,
+        Util::TimePoint now) {
+        return server.trackRudpReliableEventForSession(
+            sessionId,
+            descriptor,
+            sequence,
+            packetBytes,
+            now);
+    }
+
+    static void clearRudpReliableEventsForSession(
+        Server& server,
+        uint64_t sessionId) {
+        server.clearRudpReliableEventsForSession(sessionId);
+    }
+
+    static bool broadcastBattleStart(
+        Server& server,
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients) {
+        return server.broadcastBattleStart(result, disconnectedClients);
+    }
+
+    static bool broadcastMonsterDeath(
+        Server& server,
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients) {
+        return server.broadcastMonsterDeath(result, disconnectedClients);
+    }
+
+    static bool broadcastLootResolved(
+        Server& server,
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients) {
+        return server.broadcastLootResolved(result, disconnectedClients);
+    }
+
+    static bool observeRudpMetaResponse(
+        Server& server,
+        uint64_t sessionId,
+        const Net::RudpMetaResponsePayload& payload,
+        Util::TimePoint now) {
+        return server.observeRudpMetaResponseForSession(
+            sessionId,
+            payload,
+            now);
+    }
+
+    static size_t rudpMetaResponseCompletionCount(Server& server) {
+        return server.rudpMetaResponseIdempotencyTracker_.completionCount();
+    }
+
+    static size_t rudpMetaResponseRetryCount(Server& server) {
+        return server.rudpMetaResponseIdempotencyTracker_.retryCount();
+    }
+
+    static size_t rudpReliableEventSessionQueueCount(Server& server) {
+        return server.rudpReliableEventQueues_.size();
+    }
+
+    static size_t rudpReliableEventSequenceAllocatorCount(Server& server) {
+        return server.rudpReliableEventNextSequenceBySession_.size();
+    }
+
+    static const Net::RudpReliableEventPendingEntry*
+    rudpReliableEventPendingEntry(
+        Server& server,
+        uint64_t sessionId,
+        uint32_t sequence) {
+        const auto queueIt = server.rudpReliableEventQueues_.find(sessionId);
+        if (queueIt == server.rudpReliableEventQueues_.end()) {
+            return nullptr;
+        }
+        return queueIt->second.pendingEntry(sequence);
+    }
+
+    static const std::vector<uint8_t>* rudpReliableEventPacketBytes(
+        Server& server,
+        uint64_t sessionId,
+        uint32_t sequence) {
+        const auto queueIt = server.rudpReliableEventQueues_.find(sessionId);
+        if (queueIt == server.rudpReliableEventQueues_.end()) {
+            return nullptr;
+        }
+        return queueIt->second.packetBytes(sequence);
+    }
 };
 }  // namespace Core
 
 namespace {
+Util::TimePoint timeAt(int64_t milliseconds) {
+    return Util::TimePoint{std::chrono::milliseconds(milliseconds)};
+}
+
 int connectToServer(uint16_t port) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -204,6 +304,263 @@ std::vector<uint8_t> readyInputCommandPayloadForTest(
     return payload;
 }
 
+std::vector<uint8_t> reliableEventPacketBytesForTest(uint8_t marker) {
+    return {0x4C, 0x4F, marker};
+}
+
+Net::RudpReliableEventDescriptor reliableEventDescriptorForTest(
+    Net::RudpReliableEventKind kind,
+    const std::string& logicalKey) {
+    switch (kind) {
+    case Net::RudpReliableEventKind::kBattleStart:
+        return Net::RudpReliableEventDescriptor{
+            kind,
+            logicalKey,
+            static_cast<uint16_t>(Net::RudpPacketType::kBattleStart),
+            static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+    case Net::RudpReliableEventKind::kMonsterDeath:
+    case Net::RudpReliableEventKind::kLootResolved:
+        return Net::RudpReliableEventDescriptor{
+            kind,
+            logicalKey,
+            static_cast<uint16_t>(Net::RudpPacketType::kGameEvent),
+            static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+    case Net::RudpReliableEventKind::kMetaResponse:
+        return Net::RudpReliableEventDescriptor{
+            kind,
+            logicalKey,
+            static_cast<uint16_t>(Net::RudpPacketType::kMetaResponse),
+            static_cast<uint8_t>(Net::RudpChannelId::kControl)};
+    }
+
+    return Net::RudpReliableEventDescriptor{
+        kind,
+        logicalKey,
+        static_cast<uint16_t>(Net::RudpPacketType::kError),
+        static_cast<uint8_t>(Net::RudpChannelId::kControl)};
+}
+
+Net::RudpMetaResponsePayload metaResponsePayloadForTest(
+    const std::string& settlementId,
+    Net::RudpMetaResponseOp op,
+    Net::RudpMetaResponseStatus status,
+    uint32_t retryAfterMs = 0) {
+    return Net::RudpMetaResponsePayload{op, settlementId, status, retryAfterMs};
+}
+
+Game::RoomCommandResult battleStartResultForTest(
+    uint32_t roomId,
+    std::vector<uint64_t> playerSessionIds) {
+    const uint16_t playerCount =
+        static_cast<uint16_t>(playerSessionIds.size());
+    return Game::RoomCommandResult(
+        true,
+        Game::RoomCommandError::kNone,
+        Game::RoomSummary(roomId, playerCount, 2, playerCount, true),
+        std::move(playerSessionIds),
+        true);
+}
+
+Game::RoomCommandResult monsterDeathResultForTest(
+    uint32_t roomId,
+    uint32_t monsterId,
+    std::vector<uint64_t> playerSessionIds) {
+    const uint16_t playerCount =
+        static_cast<uint16_t>(playerSessionIds.size());
+    return Game::RoomCommandResult(
+        true,
+        Game::RoomCommandError::kNone,
+        Game::RoomSummary(roomId, playerCount, 2, playerCount, true, false),
+        std::move(playerSessionIds),
+        false,
+        false,
+        true,
+        Game::Monster{monsterId, 2001, 10, false});
+}
+
+Game::RoomCommandResult lootResolvedResultForTest(
+    uint32_t roomId,
+    uint32_t dropId,
+    uint64_t winnerSessionId,
+    uint32_t itemId,
+    uint16_t quantity,
+    std::vector<uint64_t> playerSessionIds) {
+    const uint16_t playerCount =
+        static_cast<uint16_t>(playerSessionIds.size());
+    Game::RoomCommandResult result(
+        true,
+        Game::RoomCommandError::kNone,
+        Game::RoomSummary(roomId, playerCount, 2, playerCount, true, false),
+        std::move(playerSessionIds));
+    result.lootJustClaimed = true;
+    result.winnerSessionId = winnerSessionId;
+    result.drop = Game::Drop{dropId, itemId, quantity};
+    return result;
+}
+
+void expectBattleStartPending(
+    Core::Server& server,
+    uint64_t sessionId,
+    uint32_t sequence,
+    const std::string& expectedLogicalKey,
+    uint32_t expectedRoomId,
+    uint64_t expectedPlayerA,
+    uint64_t expectedPlayerB) {
+    const Net::RudpReliableEventPendingEntry* entry =
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->descriptor.kind, Net::RudpReliableEventKind::kBattleStart);
+    EXPECT_EQ(entry->descriptor.logicalKey, expectedLogicalKey);
+    EXPECT_EQ(
+        entry->descriptor.packetType,
+        static_cast<uint16_t>(Net::RudpPacketType::kBattleStart));
+    EXPECT_EQ(
+        entry->descriptor.channelId,
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent));
+
+    const std::vector<uint8_t>* packetBytes =
+        Core::ServerTestAccess::rudpReliableEventPacketBytes(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(packetBytes, nullptr);
+
+    Net::RudpBattleStartPayload payload;
+    ASSERT_TRUE(Net::parseRudpBattleStartPayload(
+        packetBytes->data(),
+        packetBytes->size(),
+        payload));
+    EXPECT_EQ(payload.roomId, expectedRoomId);
+    EXPECT_EQ(payload.playerASessionId, expectedPlayerA);
+    EXPECT_EQ(payload.playerBSessionId, expectedPlayerB);
+}
+
+void expectMonsterDeathPending(
+    Core::Server& server,
+    uint64_t sessionId,
+    uint32_t sequence,
+    const std::string& expectedLogicalKey,
+    uint32_t expectedRoomId,
+    uint32_t expectedMonsterId) {
+    const Net::RudpReliableEventPendingEntry* entry =
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->descriptor.kind, Net::RudpReliableEventKind::kMonsterDeath);
+    EXPECT_EQ(entry->descriptor.logicalKey, expectedLogicalKey);
+    EXPECT_EQ(
+        entry->descriptor.packetType,
+        static_cast<uint16_t>(Net::RudpPacketType::kGameEvent));
+    EXPECT_EQ(
+        entry->descriptor.channelId,
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent));
+
+    const std::vector<uint8_t>* packetBytes =
+        Core::ServerTestAccess::rudpReliableEventPacketBytes(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(packetBytes, nullptr);
+
+    Net::RudpMonsterDeathGameEventPayload payload;
+    ASSERT_TRUE(Net::parseRudpMonsterDeathGameEventPayload(
+        packetBytes->data(),
+        packetBytes->size(),
+        payload));
+    EXPECT_EQ(payload.roomId, expectedRoomId);
+    EXPECT_EQ(payload.monsterId, expectedMonsterId);
+}
+
+void expectLootResolvedPending(
+    Core::Server& server,
+    uint64_t sessionId,
+    uint32_t sequence,
+    const std::string& expectedLogicalKey,
+    uint32_t expectedRoomId,
+    uint32_t expectedDropId,
+    uint64_t expectedWinnerSessionId,
+    uint32_t expectedItemId,
+    uint16_t expectedQuantity) {
+    const Net::RudpReliableEventPendingEntry* entry =
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->descriptor.kind, Net::RudpReliableEventKind::kLootResolved);
+    EXPECT_EQ(entry->descriptor.logicalKey, expectedLogicalKey);
+    EXPECT_EQ(
+        entry->descriptor.packetType,
+        static_cast<uint16_t>(Net::RudpPacketType::kGameEvent));
+    EXPECT_EQ(
+        entry->descriptor.channelId,
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent));
+
+    const std::vector<uint8_t>* packetBytes =
+        Core::ServerTestAccess::rudpReliableEventPacketBytes(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(packetBytes, nullptr);
+
+    Net::RudpLootResolvedGameEventPayload payload;
+    ASSERT_TRUE(Net::parseRudpLootResolvedGameEventPayload(
+        packetBytes->data(),
+        packetBytes->size(),
+        payload));
+    EXPECT_EQ(payload.roomId, expectedRoomId);
+    EXPECT_EQ(payload.dropId, expectedDropId);
+    EXPECT_EQ(payload.winnerSessionId, expectedWinnerSessionId);
+    EXPECT_EQ(payload.itemId, expectedItemId);
+    EXPECT_EQ(payload.quantity, expectedQuantity);
+}
+
+void expectMetaResponsePending(
+    Core::Server& server,
+    uint64_t sessionId,
+    uint32_t sequence,
+    const std::string& expectedSettlementId,
+    Net::RudpMetaResponseOp expectedOp,
+    Net::RudpMetaResponseStatus expectedStatus,
+    uint32_t expectedRetryAfterMs) {
+    const Net::RudpReliableEventPendingEntry* entry =
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->descriptor.kind, Net::RudpReliableEventKind::kMetaResponse);
+    EXPECT_EQ(entry->descriptor.logicalKey, expectedSettlementId);
+    EXPECT_EQ(
+        entry->descriptor.packetType,
+        static_cast<uint16_t>(Net::RudpPacketType::kMetaResponse));
+    EXPECT_EQ(
+        entry->descriptor.channelId,
+        static_cast<uint8_t>(Net::RudpChannelId::kControl));
+
+    const std::vector<uint8_t>* packetBytes =
+        Core::ServerTestAccess::rudpReliableEventPacketBytes(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(packetBytes, nullptr);
+
+    Net::RudpMetaResponsePayload payload;
+    ASSERT_TRUE(Net::parseRudpMetaResponsePayload(
+        packetBytes->data(),
+        packetBytes->size(),
+        payload));
+    EXPECT_EQ(payload.op, expectedOp);
+    EXPECT_EQ(payload.settlementId, expectedSettlementId);
+    EXPECT_EQ(payload.status, expectedStatus);
+    EXPECT_EQ(payload.retryAfterMs, expectedRetryAfterMs);
+}
+
 Net::RudpPacketHeader rudpHeaderForType(
     uint32_t sequence,
     Net::RudpPacketType packetType,
@@ -332,6 +689,794 @@ bool bindRudpSessionForTest(
         });
 }
 }  // namespace
+
+TEST(ServerIntegrationTests, RudpReliableEventTracksValidBattleStartDescriptor) {
+    Core::Server server(0);
+
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            reliableEventDescriptorForTest(
+                Net::RudpReliableEventKind::kBattleStart,
+                "room-42:1001:1002"),
+            10,
+            reliableEventPacketBytesForTest(0x10),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kTracked);
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 1U);
+    EXPECT_EQ(stats.duplicateSequence, 0U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 1U);
+}
+
+TEST(ServerIntegrationTests, RudpReliableEventRejectsDuplicateSequence) {
+    Core::Server server(0);
+    ASSERT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            reliableEventDescriptorForTest(
+                Net::RudpReliableEventKind::kBattleStart,
+                "battle-a"),
+            10,
+            reliableEventPacketBytesForTest(0x10),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kTracked);
+
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            reliableEventDescriptorForTest(
+                Net::RudpReliableEventKind::kMonsterDeath,
+                "monster-b"),
+            10,
+            reliableEventPacketBytesForTest(0x20),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kDuplicateSequence);
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 1U);
+    EXPECT_EQ(stats.duplicateSequence, 1U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+}
+
+TEST(ServerIntegrationTests, RudpReliableEventRejectsDuplicateLogicalEventPerSession) {
+    Core::Server server(0);
+    const Net::RudpReliableEventDescriptor descriptor =
+        reliableEventDescriptorForTest(
+            Net::RudpReliableEventKind::kLootResolved,
+            "room-42:drop-77");
+    ASSERT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            descriptor,
+            20,
+            reliableEventPacketBytesForTest(0x20),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kTracked);
+
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            descriptor,
+            21,
+            reliableEventPacketBytesForTest(0x21),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kDuplicateLogicalEvent);
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 1U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 1U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+}
+
+TEST(ServerIntegrationTests, RudpReliableEventAllowsSameLogicalKeyAcrossSessions) {
+    Core::Server server(0);
+    const Net::RudpReliableEventDescriptor descriptor =
+        reliableEventDescriptorForTest(
+            Net::RudpReliableEventKind::kMetaResponse,
+            "settlement-1");
+
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            descriptor,
+            30,
+            reliableEventPacketBytesForTest(0x30),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kTracked);
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1002,
+            descriptor,
+            30,
+            reliableEventPacketBytesForTest(0x31),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kTracked);
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 2U);
+    EXPECT_EQ(stats.duplicateSequence, 0U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 2U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 2U);
+}
+
+TEST(ServerIntegrationTests, RudpMetaResponseFirstTerminalEnqueuesCompletion) {
+    Core::Server server(0);
+    const std::string settlementId = "room-42-session-1001-finish-1";
+
+    EXPECT_TRUE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kApplied,
+            Net::RudpMetaResponseStatus::kApplied),
+        timeAt(1000)));
+
+    const Core::RudpServerMetaResponseStats metaStats =
+        server.rudpMetaResponseStats();
+    EXPECT_EQ(metaStats.completedFirst, 1U);
+    EXPECT_EQ(metaStats.completionDuplicate, 0U);
+    EXPECT_EQ(metaStats.retryObserved, 0U);
+    EXPECT_EQ(metaStats.invalidPayload, 0U);
+    EXPECT_EQ(metaStats.enqueued, 1U);
+
+    const Core::RudpServerReliableEventStats eventStats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(eventStats.tracked, 1U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseCompletionCount(server), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseRetryCount(server), 0U);
+    expectMetaResponsePending(
+        server,
+        1001,
+        1,
+        settlementId,
+        Net::RudpMetaResponseOp::kApplied,
+        Net::RudpMetaResponseStatus::kApplied,
+        0);
+}
+
+TEST(
+    ServerIntegrationTests,
+    RudpMetaResponseTerminalDuplicateDoesNotGrowPending) {
+    Core::Server server(0);
+    const std::string settlementId = "room-42-session-1001-finish-1";
+    ASSERT_TRUE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kApplied,
+            Net::RudpMetaResponseStatus::kApplied),
+        timeAt(1000)));
+
+    EXPECT_FALSE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kRejected,
+            Net::RudpMetaResponseStatus::kRejected),
+        timeAt(1100)));
+
+    const Core::RudpServerMetaResponseStats metaStats =
+        server.rudpMetaResponseStats();
+    EXPECT_EQ(metaStats.completedFirst, 1U);
+    EXPECT_EQ(metaStats.completionDuplicate, 1U);
+    EXPECT_EQ(metaStats.enqueued, 1U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            1001,
+            2),
+        nullptr);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseCompletionCount(server), 1U);
+}
+
+TEST(ServerIntegrationTests, RudpMetaResponseRetryLaterEnqueuesOnce) {
+    Core::Server server(0);
+    const std::string settlementId = "room-42-session-1001-finish-1";
+
+    ASSERT_TRUE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kRetryLater,
+            Net::RudpMetaResponseStatus::kRetryLater,
+            250),
+        timeAt(1000)));
+    EXPECT_FALSE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kRetryLater,
+            Net::RudpMetaResponseStatus::kRetryLater,
+            500),
+        timeAt(1100)));
+
+    const Core::RudpServerMetaResponseStats metaStats =
+        server.rudpMetaResponseStats();
+    EXPECT_EQ(metaStats.completedFirst, 0U);
+    EXPECT_EQ(metaStats.retryObserved, 1U);
+    EXPECT_EQ(metaStats.retryDuplicate, 1U);
+    EXPECT_EQ(metaStats.enqueued, 1U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseCompletionCount(server), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseRetryCount(server), 1U);
+    expectMetaResponsePending(
+        server,
+        1001,
+        1,
+        settlementId,
+        Net::RudpMetaResponseOp::kRetryLater,
+        Net::RudpMetaResponseStatus::kRetryLater,
+        250);
+}
+
+TEST(
+    ServerIntegrationTests,
+    RudpMetaResponseRetryAfterCompletionIsIgnored) {
+    Core::Server server(0);
+    const std::string settlementId = "room-42-session-1001-finish-1";
+    ASSERT_TRUE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kApplied,
+            Net::RudpMetaResponseStatus::kApplied),
+        timeAt(1000)));
+
+    EXPECT_FALSE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kRetryLater,
+            Net::RudpMetaResponseStatus::kRetryLater,
+            250),
+        timeAt(1100)));
+
+    const Core::RudpServerMetaResponseStats metaStats =
+        server.rudpMetaResponseStats();
+    EXPECT_EQ(metaStats.completedFirst, 1U);
+    EXPECT_EQ(metaStats.retryIgnoredAfterCompletion, 1U);
+    EXPECT_EQ(metaStats.enqueued, 1U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseCompletionCount(server), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseRetryCount(server), 0U);
+}
+
+TEST(
+    ServerIntegrationTests,
+    RudpMetaResponseTerminalAfterRetryCompletesAfterPendingCleanup) {
+    Core::Server server(0);
+    const std::string settlementId = "room-42-session-1001-finish-1";
+    ASSERT_TRUE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kRetryLater,
+            Net::RudpMetaResponseStatus::kRetryLater,
+            250),
+        timeAt(1000)));
+    ASSERT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    ASSERT_EQ(Core::ServerTestAccess::rudpMetaResponseRetryCount(server), 1U);
+
+    Core::ServerTestAccess::clearRudpReliableEventsForSession(server, 1001);
+    ASSERT_EQ(server.rudpReliableEventPendingCount(), 0U);
+    ASSERT_EQ(Core::ServerTestAccess::rudpMetaResponseRetryCount(server), 1U);
+
+    EXPECT_TRUE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            settlementId,
+            Net::RudpMetaResponseOp::kApplied,
+            Net::RudpMetaResponseStatus::kApplied),
+        timeAt(1200)));
+
+    const Core::RudpServerMetaResponseStats metaStats =
+        server.rudpMetaResponseStats();
+    EXPECT_EQ(metaStats.completedFirst, 1U);
+    EXPECT_EQ(metaStats.retryObserved, 1U);
+    EXPECT_EQ(metaStats.enqueued, 2U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseCompletionCount(server), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseRetryCount(server), 0U);
+    expectMetaResponsePending(
+        server,
+        1001,
+        1,
+        settlementId,
+        Net::RudpMetaResponseOp::kApplied,
+        Net::RudpMetaResponseStatus::kApplied,
+        0);
+}
+
+TEST(ServerIntegrationTests, RudpMetaResponseRejectsInvalidPayload) {
+    Core::Server server(0);
+    EXPECT_FALSE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            "",
+            Net::RudpMetaResponseOp::kApplied,
+            Net::RudpMetaResponseStatus::kApplied),
+        timeAt(1000)));
+    EXPECT_FALSE(Core::ServerTestAccess::observeRudpMetaResponse(
+        server,
+        1001,
+        metaResponsePayloadForTest(
+            "room-42-session-1001-finish-1",
+            Net::RudpMetaResponseOp::kApplied,
+            Net::RudpMetaResponseStatus::kRetryLater),
+        timeAt(1100)));
+
+    const Core::RudpServerMetaResponseStats metaStats =
+        server.rudpMetaResponseStats();
+    EXPECT_EQ(metaStats.completedFirst, 0U);
+    EXPECT_EQ(metaStats.retryObserved, 0U);
+    EXPECT_EQ(metaStats.invalidPayload, 2U);
+    EXPECT_EQ(metaStats.enqueued, 0U);
+
+    const Core::RudpServerReliableEventStats eventStats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(eventStats.tracked, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseCompletionCount(server), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpMetaResponseRetryCount(server), 0U);
+}
+
+TEST(ServerIntegrationTests, RudpReliableEventRejectsInvalidInputsWithoutPendingState) {
+    Core::Server server(0);
+    const Net::RudpReliableEventDescriptor validDescriptor =
+        reliableEventDescriptorForTest(
+            Net::RudpReliableEventKind::kBattleStart,
+            "battle-a");
+    const Net::RudpReliableEventDescriptor invalidDescriptor{
+        Net::RudpReliableEventKind::kBattleStart,
+        "wrong-packet",
+        static_cast<uint16_t>(Net::RudpPacketType::kGameEvent),
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            0,
+            validDescriptor,
+            40,
+            reliableEventPacketBytesForTest(0x40),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kInvalidSession);
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            invalidDescriptor,
+            41,
+            reliableEventPacketBytesForTest(0x41),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kInvalidDescriptor);
+    EXPECT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            validDescriptor,
+            42,
+            {},
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kInvalidPacketBytes);
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 0U);
+    EXPECT_EQ(stats.invalidSession, 1U);
+    EXPECT_EQ(stats.invalidDescriptor, 1U);
+    EXPECT_EQ(stats.invalidPacketBytes, 1U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 0U);
+}
+
+TEST(ServerIntegrationTests, RudpReliableEventCleanupRemovesSessionPendingQueue) {
+    Core::Server server(0);
+    const Net::RudpReliableEventDescriptor descriptor =
+        reliableEventDescriptorForTest(
+            Net::RudpReliableEventKind::kBattleStart,
+            "battle-a");
+    ASSERT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1001,
+            descriptor,
+            50,
+            reliableEventPacketBytesForTest(0x50),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kTracked);
+    ASSERT_EQ(
+        Core::ServerTestAccess::trackRudpReliableEvent(
+            server,
+            1002,
+            descriptor,
+            50,
+            reliableEventPacketBytesForTest(0x51),
+            timeAt(1000)),
+        Core::RudpServerReliableEventTrackResult::kTracked);
+    ASSERT_EQ(server.rudpReliableEventPendingCount(), 2U);
+
+    Core::ServerTestAccess::clearRudpReliableEventsForSession(server, 1001);
+
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 1U);
+
+    Core::ServerTestAccess::clearRudpReliableEventsForSession(server, 1002);
+
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 0U);
+}
+
+TEST(ServerIntegrationTests, RudpBattleStartReliableEventEnqueuedForRoomPlayers) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+    const Game::RoomCommandResult result =
+        battleStartResultForTest(42, {1002, 1001});
+
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        result,
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 2U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 2U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 2U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventSequenceAllocatorCount(server),
+        2U);
+
+    expectBattleStartPending(
+        server,
+        1001,
+        1,
+        "BattleStart:42:1001:1002",
+        42,
+        1001,
+        1002);
+    expectBattleStartPending(
+        server,
+        1002,
+        1,
+        "BattleStart:42:1001:1002",
+        42,
+        1001,
+        1002);
+    EXPECT_TRUE(disconnectedClients.empty());
+}
+
+TEST(
+    ServerIntegrationTests,
+    RudpBattleStartReliableEventDuplicateObservationDoesNotGrowPending) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+    const Game::RoomCommandResult result =
+        battleStartResultForTest(42, {1001, 1002});
+
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        result,
+        disconnectedClients));
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        result,
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 2U);
+    EXPECT_EQ(stats.duplicateSequence, 0U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 2U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 2U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            1001,
+            2),
+        nullptr);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            1002,
+            2),
+        nullptr);
+}
+
+TEST(ServerIntegrationTests, RudpBattleStartReliableEventCleanupRemovesSequenceState) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+    const Game::RoomCommandResult result =
+        battleStartResultForTest(42, {1001, 1002});
+
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        result,
+        disconnectedClients));
+    ASSERT_EQ(
+        Core::ServerTestAccess::rudpReliableEventSequenceAllocatorCount(server),
+        2U);
+
+    Core::ServerTestAccess::clearRudpReliableEventsForSession(server, 1001);
+
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 1U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventSequenceAllocatorCount(server),
+        1U);
+
+    Core::ServerTestAccess::clearRudpReliableEventsForSession(server, 1002);
+
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 0U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventSequenceAllocatorCount(server),
+        0U);
+}
+
+TEST(ServerIntegrationTests, RudpBattleStartReliableEventSkipsInvalidShape) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        battleStartResultForTest(0, {1001, 1002}),
+        disconnectedClients));
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        battleStartResultForTest(42, {1001, 1001}),
+        disconnectedClients));
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        battleStartResultForTest(42, {1001}),
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 0U);
+    EXPECT_EQ(stats.duplicateSequence, 0U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 0U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventSequenceAllocatorCount(server),
+        0U);
+}
+
+TEST(ServerIntegrationTests, RudpGameEventMonsterDeathEnqueuedForRoomPlayers) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+    const Game::RoomCommandResult result =
+        monsterDeathResultForTest(42, 7, {1001, 1002});
+
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastMonsterDeath(
+        server,
+        result,
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 2U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 2U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 2U);
+
+    expectMonsterDeathPending(
+        server,
+        1001,
+        1,
+        "MonsterDeath:42:7",
+        42,
+        7);
+    expectMonsterDeathPending(
+        server,
+        1002,
+        1,
+        "MonsterDeath:42:7",
+        42,
+        7);
+    EXPECT_TRUE(disconnectedClients.empty());
+}
+
+TEST(ServerIntegrationTests, RudpGameEventLootResolvedEnqueuedForRoomPlayers) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+    const Game::RoomCommandResult result =
+        lootResolvedResultForTest(42, 77, 1001, 3001, 2, {1001, 1002});
+
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastLootResolved(
+        server,
+        result,
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 2U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 2U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 2U);
+
+    expectLootResolvedPending(
+        server,
+        1001,
+        1,
+        "LootResolved:42:77",
+        42,
+        77,
+        1001,
+        3001,
+        2);
+    expectLootResolvedPending(
+        server,
+        1002,
+        1,
+        "LootResolved:42:77",
+        42,
+        77,
+        1001,
+        3001,
+        2);
+    EXPECT_TRUE(disconnectedClients.empty());
+}
+
+TEST(
+    ServerIntegrationTests,
+    RudpGameEventDuplicateObservationDoesNotGrowPending) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+    const Game::RoomCommandResult monsterDeath =
+        monsterDeathResultForTest(42, 7, {1001, 1002});
+    const Game::RoomCommandResult lootResolved =
+        lootResolvedResultForTest(42, 77, 1001, 3001, 2, {1001, 1002});
+
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastMonsterDeath(
+        server,
+        monsterDeath,
+        disconnectedClients));
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastLootResolved(
+        server,
+        lootResolved,
+        disconnectedClients));
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastMonsterDeath(
+        server,
+        monsterDeath,
+        disconnectedClients));
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastLootResolved(
+        server,
+        lootResolved,
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 4U);
+    EXPECT_EQ(stats.duplicateSequence, 0U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 4U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 4U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            1001,
+            3),
+        nullptr);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            1002,
+            4),
+        nullptr);
+}
+
+TEST(
+    ServerIntegrationTests,
+    RudpGameEventDistinctKindsUseDistinctKeysAndSequences) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastMonsterDeath(
+        server,
+        monsterDeathResultForTest(42, 7, {1001, 1002}),
+        disconnectedClients));
+    ASSERT_TRUE(Core::ServerTestAccess::broadcastLootResolved(
+        server,
+        lootResolvedResultForTest(42, 7, 1001, 3001, 2, {1001, 1002}),
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 4U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 4U);
+
+    expectMonsterDeathPending(
+        server,
+        1001,
+        1,
+        "MonsterDeath:42:7",
+        42,
+        7);
+    expectLootResolvedPending(
+        server,
+        1001,
+        2,
+        "LootResolved:42:7",
+        42,
+        7,
+        1001,
+        3001,
+        2);
+}
+
+TEST(ServerIntegrationTests, RudpGameEventSkipsInvalidShape) {
+    Core::Server server(0);
+    std::vector<int> disconnectedClients;
+
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastMonsterDeath(
+        server,
+        monsterDeathResultForTest(0, 7, {1001, 1002}),
+        disconnectedClients));
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastMonsterDeath(
+        server,
+        monsterDeathResultForTest(42, 0, {1001, 1002}),
+        disconnectedClients));
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastMonsterDeath(
+        server,
+        monsterDeathResultForTest(42, 7, {}),
+        disconnectedClients));
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastLootResolved(
+        server,
+        lootResolvedResultForTest(0, 77, 1001, 3001, 2, {1001, 1002}),
+        disconnectedClients));
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastLootResolved(
+        server,
+        lootResolvedResultForTest(42, 0, 1001, 3001, 2, {1001, 1002}),
+        disconnectedClients));
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastLootResolved(
+        server,
+        lootResolvedResultForTest(42, 77, 1001, 3001, 2, {}),
+        disconnectedClients));
+
+    const Core::RudpServerReliableEventStats stats =
+        server.rudpReliableEventStats();
+    EXPECT_EQ(stats.tracked, 0U);
+    EXPECT_EQ(stats.duplicateSequence, 0U);
+    EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
+    EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 0U);
+    EXPECT_EQ(
+        Core::ServerTestAccess::rudpReliableEventSequenceAllocatorCount(server),
+        0U);
+}
 
 TEST(ServerIntegrationTests, StartsAndStopsUdpSocketLifecycle) {
     RunningServer runningServer(0);

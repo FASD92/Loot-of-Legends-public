@@ -4,11 +4,14 @@
 #include <array>
 #include <chrono>
 #include <iterator>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "Core/Session.hpp"
+#include "Net/RudpBattleStartPayload.hpp"
+#include "Net/RudpGameEventPayload.hpp"
 #include "Net/RudpHelloPayload.hpp"
 #include "Net/RudpInputCommandPayload.hpp"
 #include "Net/TcpPacket.hpp"
@@ -39,6 +42,45 @@ bool isRoomMember(const Game::RoomCommandResult& result, uint64_t sessionId) {
                result.playerSessionIds.begin(),
                result.playerSessionIds.end(),
                sessionId) != result.playerSessionIds.end();
+}
+
+bool buildRudpBattleStartPayload(
+    const Game::RoomCommandResult& result,
+    Net::RudpBattleStartPayload& outPayload) {
+    outPayload = Net::RudpBattleStartPayload{};
+    if (result.room.roomId == 0 || result.playerSessionIds.size() != 2u) {
+        return false;
+    }
+
+    const uint64_t firstSessionId = result.playerSessionIds[0];
+    const uint64_t secondSessionId = result.playerSessionIds[1];
+    if (firstSessionId == 0 || secondSessionId == 0 ||
+        firstSessionId == secondSessionId) {
+        return false;
+    }
+
+    outPayload.roomId = result.room.roomId;
+    outPayload.playerASessionId = std::min(firstSessionId, secondSessionId);
+    outPayload.playerBSessionId = std::max(firstSessionId, secondSessionId);
+    return true;
+}
+
+std::string battleStartLogicalKey(const Net::RudpBattleStartPayload& payload) {
+    return "BattleStart:" + std::to_string(payload.roomId) + ":" +
+        std::to_string(payload.playerASessionId) + ":" +
+        std::to_string(payload.playerBSessionId);
+}
+
+std::string monsterDeathLogicalKey(
+    const Net::RudpMonsterDeathGameEventPayload& payload) {
+    return "MonsterDeath:" + std::to_string(payload.roomId) + ":" +
+        std::to_string(payload.monsterId);
+}
+
+std::string lootResolvedLogicalKey(
+    const Net::RudpLootResolvedGameEventPayload& payload) {
+    return "LootResolved:" + std::to_string(payload.roomId) + ":" +
+        std::to_string(payload.dropId);
 }
 
 std::vector<Net::TcpDropEntry> toTcpDropEntries(const std::vector<Game::Drop>& drops) {
@@ -176,6 +218,20 @@ Server::Server(uint16_t port, std::chrono::milliseconds rudpPeerTimeout)
       rudpBindingInputSequenceAmbiguousRejected_(0),
       rudpBindingInputSequenceInvalidSessionRejected_(0),
       rudpBindingCountSnapshot_(0),
+      rudpReliableEventTracked_(0),
+      rudpReliableEventDuplicateSequence_(0),
+      rudpReliableEventDuplicateLogicalEvent_(0),
+      rudpReliableEventInvalidSession_(0),
+      rudpReliableEventInvalidDescriptor_(0),
+      rudpReliableEventInvalidPacketBytes_(0),
+      rudpReliableEventPendingCountSnapshot_(0),
+      rudpMetaResponseCompletedFirst_(0),
+      rudpMetaResponseCompletionDuplicate_(0),
+      rudpMetaResponseRetryObserved_(0),
+      rudpMetaResponseRetryDuplicate_(0),
+      rudpMetaResponseRetryIgnoredAfterCompletion_(0),
+      rudpMetaResponseInvalidPayload_(0),
+      rudpMetaResponseEnqueued_(0),
       running_(false),
       port_(port) {}
 
@@ -285,12 +341,50 @@ RudpServerBindingStats Server::rudpBindingStats() const {
     return stats;
 }
 
+RudpServerReliableEventStats Server::rudpReliableEventStats() const {
+    RudpServerReliableEventStats stats;
+    stats.tracked = rudpReliableEventTracked_.load(std::memory_order_relaxed);
+    stats.duplicateSequence =
+        rudpReliableEventDuplicateSequence_.load(std::memory_order_relaxed);
+    stats.duplicateLogicalEvent =
+        rudpReliableEventDuplicateLogicalEvent_.load(std::memory_order_relaxed);
+    stats.invalidSession =
+        rudpReliableEventInvalidSession_.load(std::memory_order_relaxed);
+    stats.invalidDescriptor =
+        rudpReliableEventInvalidDescriptor_.load(std::memory_order_relaxed);
+    stats.invalidPacketBytes =
+        rudpReliableEventInvalidPacketBytes_.load(std::memory_order_relaxed);
+    return stats;
+}
+
+RudpServerMetaResponseStats Server::rudpMetaResponseStats() const {
+    RudpServerMetaResponseStats stats;
+    stats.completedFirst =
+        rudpMetaResponseCompletedFirst_.load(std::memory_order_relaxed);
+    stats.completionDuplicate =
+        rudpMetaResponseCompletionDuplicate_.load(std::memory_order_relaxed);
+    stats.retryObserved =
+        rudpMetaResponseRetryObserved_.load(std::memory_order_relaxed);
+    stats.retryDuplicate =
+        rudpMetaResponseRetryDuplicate_.load(std::memory_order_relaxed);
+    stats.retryIgnoredAfterCompletion =
+        rudpMetaResponseRetryIgnoredAfterCompletion_.load(std::memory_order_relaxed);
+    stats.invalidPayload =
+        rudpMetaResponseInvalidPayload_.load(std::memory_order_relaxed);
+    stats.enqueued = rudpMetaResponseEnqueued_.load(std::memory_order_relaxed);
+    return stats;
+}
+
 size_t Server::rudpPeerCount() const {
     return rudpPeerCountSnapshot_.load(std::memory_order_relaxed);
 }
 
 size_t Server::rudpBindingCount() const {
     return rudpBindingCountSnapshot_.load(std::memory_order_relaxed);
+}
+
+size_t Server::rudpReliableEventPendingCount() const {
+    return rudpReliableEventPendingCountSnapshot_.load(std::memory_order_relaxed);
 }
 
 void Server::tickOnce() {
@@ -494,6 +588,264 @@ void Server::processRudpAdapterGate(const Net::RudpPacketDelivery& delivery) {
     }
 }
 
+RudpServerReliableEventTrackResult Server::trackRudpReliableEventForSession(
+    uint64_t sessionId,
+    const Net::RudpReliableEventDescriptor& descriptor,
+    uint32_t sequence,
+    const std::vector<uint8_t>& packetBytes,
+    Util::TimePoint now) {
+    if (sessionId == 0) {
+        rudpReliableEventInvalidSession_.fetch_add(1, std::memory_order_relaxed);
+        return RudpServerReliableEventTrackResult::kInvalidSession;
+    }
+
+    auto queueIt = rudpReliableEventQueues_.find(sessionId);
+    if (queueIt == rudpReliableEventQueues_.end()) {
+        Net::RudpReliableEventSendQueue queue;
+        const Net::RudpReliableEventTrackResult result =
+            queue.track(descriptor, sequence, packetBytes, now);
+        switch (result) {
+        case Net::RudpReliableEventTrackResult::kTracked:
+            rudpReliableEventQueues_.emplace(sessionId, std::move(queue));
+            rudpReliableEventTracked_.fetch_add(1, std::memory_order_relaxed);
+            rudpReliableEventPendingCountSnapshot_.store(
+                calculateRudpReliableEventPendingCount(),
+                std::memory_order_relaxed);
+            return RudpServerReliableEventTrackResult::kTracked;
+        case Net::RudpReliableEventTrackResult::kDuplicateSequence:
+            rudpReliableEventDuplicateSequence_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            return RudpServerReliableEventTrackResult::kDuplicateSequence;
+        case Net::RudpReliableEventTrackResult::kDuplicateLogicalEvent:
+            rudpReliableEventDuplicateLogicalEvent_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            return RudpServerReliableEventTrackResult::kDuplicateLogicalEvent;
+        case Net::RudpReliableEventTrackResult::kInvalidDescriptor:
+            rudpReliableEventInvalidDescriptor_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            return RudpServerReliableEventTrackResult::kInvalidDescriptor;
+        case Net::RudpReliableEventTrackResult::kInvalidPacketBytes:
+            rudpReliableEventInvalidPacketBytes_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            return RudpServerReliableEventTrackResult::kInvalidPacketBytes;
+        }
+    }
+
+    const Net::RudpReliableEventTrackResult result =
+        queueIt->second.track(descriptor, sequence, packetBytes, now);
+    switch (result) {
+    case Net::RudpReliableEventTrackResult::kTracked:
+        rudpReliableEventTracked_.fetch_add(1, std::memory_order_relaxed);
+        rudpReliableEventPendingCountSnapshot_.store(
+            calculateRudpReliableEventPendingCount(),
+            std::memory_order_relaxed);
+        return RudpServerReliableEventTrackResult::kTracked;
+    case Net::RudpReliableEventTrackResult::kDuplicateSequence:
+        rudpReliableEventDuplicateSequence_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        return RudpServerReliableEventTrackResult::kDuplicateSequence;
+    case Net::RudpReliableEventTrackResult::kDuplicateLogicalEvent:
+        rudpReliableEventDuplicateLogicalEvent_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        return RudpServerReliableEventTrackResult::kDuplicateLogicalEvent;
+    case Net::RudpReliableEventTrackResult::kInvalidDescriptor:
+        rudpReliableEventInvalidDescriptor_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        return RudpServerReliableEventTrackResult::kInvalidDescriptor;
+    case Net::RudpReliableEventTrackResult::kInvalidPacketBytes:
+        rudpReliableEventInvalidPacketBytes_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        return RudpServerReliableEventTrackResult::kInvalidPacketBytes;
+    }
+
+    rudpReliableEventInvalidDescriptor_.fetch_add(1, std::memory_order_relaxed);
+    return RudpServerReliableEventTrackResult::kInvalidDescriptor;
+}
+
+void Server::enqueueRudpBattleStartEvent(
+    const Game::RoomCommandResult& result,
+    Util::TimePoint now) {
+    Net::RudpBattleStartPayload payload;
+    if (!buildRudpBattleStartPayload(result, payload)) {
+        return;
+    }
+
+    std::vector<uint8_t> payloadBytes;
+    if (!Net::serializeRudpBattleStartPayload(payload, payloadBytes)) {
+        return;
+    }
+
+    const Net::RudpReliableEventDescriptor descriptor{
+        Net::RudpReliableEventKind::kBattleStart,
+        battleStartLogicalKey(payload),
+        static_cast<uint16_t>(Net::RudpPacketType::kBattleStart),
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+
+    for (uint64_t sessionId : result.playerSessionIds) {
+        trackRudpReliableEventForSession(
+            sessionId,
+            descriptor,
+            nextRudpReliableEventSequenceForSession(sessionId),
+            payloadBytes,
+            now);
+    }
+}
+
+void Server::enqueueRudpMonsterDeathEvent(
+    const Game::RoomCommandResult& result,
+    Util::TimePoint now) {
+    const Net::RudpMonsterDeathGameEventPayload payload{
+        result.room.roomId,
+        result.monster.monsterId};
+
+    std::vector<uint8_t> payloadBytes;
+    if (!Net::serializeRudpMonsterDeathGameEventPayload(payload, payloadBytes)) {
+        return;
+    }
+
+    const Net::RudpReliableEventDescriptor descriptor{
+        Net::RudpReliableEventKind::kMonsterDeath,
+        monsterDeathLogicalKey(payload),
+        static_cast<uint16_t>(Net::RudpPacketType::kGameEvent),
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+
+    for (uint64_t sessionId : result.playerSessionIds) {
+        trackRudpReliableEventForSession(
+            sessionId,
+            descriptor,
+            nextRudpReliableEventSequenceForSession(sessionId),
+            payloadBytes,
+            now);
+    }
+}
+
+void Server::enqueueRudpLootResolvedEvent(
+    const Game::RoomCommandResult& result,
+    Util::TimePoint now) {
+    const Net::RudpLootResolvedGameEventPayload payload{
+        result.room.roomId,
+        result.drop.dropId,
+        result.winnerSessionId,
+        result.drop.itemId,
+        result.drop.quantity};
+
+    std::vector<uint8_t> payloadBytes;
+    if (!Net::serializeRudpLootResolvedGameEventPayload(payload, payloadBytes)) {
+        return;
+    }
+
+    const Net::RudpReliableEventDescriptor descriptor{
+        Net::RudpReliableEventKind::kLootResolved,
+        lootResolvedLogicalKey(payload),
+        static_cast<uint16_t>(Net::RudpPacketType::kGameEvent),
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+
+    for (uint64_t sessionId : result.playerSessionIds) {
+        trackRudpReliableEventForSession(
+            sessionId,
+            descriptor,
+            nextRudpReliableEventSequenceForSession(sessionId),
+            payloadBytes,
+            now);
+    }
+}
+
+bool Server::observeRudpMetaResponseForSession(
+    uint64_t sessionId,
+    const Net::RudpMetaResponsePayload& payload,
+    Util::TimePoint now) {
+    if (sessionId == 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> payloadBytes;
+    if (!Net::serializeRudpMetaResponsePayload(payload, payloadBytes)) {
+        rudpMetaResponseInvalidPayload_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    const Net::RudpMetaResponseIdempotencyResult idempotencyResult =
+        rudpMetaResponseIdempotencyTracker_.record(
+            payload.settlementId,
+            payload.status);
+    switch (idempotencyResult) {
+    case Net::RudpMetaResponseIdempotencyResult::kCompletedFirst:
+        rudpMetaResponseCompletedFirst_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        break;
+    case Net::RudpMetaResponseIdempotencyResult::kRetryObserved:
+        rudpMetaResponseRetryObserved_.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case Net::RudpMetaResponseIdempotencyResult::kCompletionDuplicate:
+        rudpMetaResponseCompletionDuplicate_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        return false;
+    case Net::RudpMetaResponseIdempotencyResult::kRetryDuplicate:
+        rudpMetaResponseRetryDuplicate_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    case Net::RudpMetaResponseIdempotencyResult::kRetryIgnoredAfterCompletion:
+        rudpMetaResponseRetryIgnoredAfterCompletion_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+        return false;
+    case Net::RudpMetaResponseIdempotencyResult::kInvalidSettlementId:
+        rudpMetaResponseInvalidPayload_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    const Net::RudpReliableEventDescriptor descriptor{
+        Net::RudpReliableEventKind::kMetaResponse,
+        payload.settlementId,
+        static_cast<uint16_t>(Net::RudpPacketType::kMetaResponse),
+        static_cast<uint8_t>(Net::RudpChannelId::kControl)};
+
+    const RudpServerReliableEventTrackResult trackResult =
+        trackRudpReliableEventForSession(
+            sessionId,
+            descriptor,
+            nextRudpReliableEventSequenceForSession(sessionId),
+            payloadBytes,
+            now);
+    if (trackResult != RudpServerReliableEventTrackResult::kTracked) {
+        return false;
+    }
+
+    rudpMetaResponseEnqueued_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+uint32_t Server::nextRudpReliableEventSequenceForSession(uint64_t sessionId) {
+    uint32_t& nextSequence = rudpReliableEventNextSequenceBySession_[sessionId];
+    if (nextSequence == 0) {
+        nextSequence = 1;
+    }
+
+    const uint32_t sequence = nextSequence;
+    ++nextSequence;
+    if (nextSequence == 0) {
+        nextSequence = 1;
+    }
+    return sequence;
+}
+
+void Server::clearRudpReliableEventsForSession(uint64_t sessionId) {
+    rudpReliableEventQueues_.erase(sessionId);
+    rudpReliableEventNextSequenceBySession_.erase(sessionId);
+    rudpReliableEventPendingCountSnapshot_.store(
+        calculateRudpReliableEventPendingCount(),
+        std::memory_order_relaxed);
+}
+
 void Server::processRudpHelloDelivery(
     const Net::RudpPacketDelivery& delivery,
     Util::TimePoint now) {
@@ -579,6 +931,14 @@ void Server::accumulateRudpRetransmissionStats(
             rudpPeerRegistry_.size(),
             std::memory_order_relaxed);
     }
+}
+
+size_t Server::calculateRudpReliableEventPendingCount() const {
+    size_t total = 0;
+    for (const auto& entry : rudpReliableEventQueues_) {
+        total += entry.second.pendingCount();
+    }
+    return total;
 }
 
 std::vector<uint64_t> Server::collectActiveSessionIds() const {
@@ -913,6 +1273,8 @@ bool Server::broadcastBattleStart(
     if (result.playerSessionIds.size() < 2u) {
         return true;
     }
+    enqueueRudpBattleStartEvent(result, Util::now());
+
     // 패킷을 client마다 따로 만들지 않고 한 번만 만듦. 어차피 같은 room의 두 참가자에게 보내는 내용이 동일하니까. 즉, 직렬화 비용은 한 번만 지불하고 재사용한다.
     std::array<uint8_t, Net::kBattleStartPacketSize> packet{};
     Net::serializeBattleStartPacket(
@@ -964,6 +1326,8 @@ bool Server::broadcastMonsterSpawn(
 bool Server::broadcastMonsterDeath(
     const Game::RoomCommandResult& result,
     std::vector<int>& disconnectedClients) {
+    enqueueRudpMonsterDeathEvent(result, Util::now());
+
     std::array<uint8_t, Net::kMonsterDeathPacketSize> packet{};
     Net::serializeMonsterDeathPacket(result.room.roomId, result.monster.monsterId, packet);
 
@@ -1007,6 +1371,8 @@ bool Server::broadcastDropListSnapshot(
 bool Server::broadcastLootResolved(
     const Game::RoomCommandResult& result,
     std::vector<int>& disconnectedClients) {
+    enqueueRudpLootResolvedEvent(result, Util::now());
+
     std::array<uint8_t, Net::kLootResolvedPacketSize> packet{};
     Net::serializeLootResolvedPacket(
         result.room.roomId,
@@ -1122,6 +1488,7 @@ bool Server::disconnectClient(int clientFd) {
     const bool roomChanged = roomManager_.leaveRoom(sessionId).ok;
     rudpSessionBinder_.removeBySessionId(sessionId);
     rudpInputCommandSequenceTracker_.removeSession(sessionId);
+    clearRudpReliableEventsForSession(sessionId);
     rudpBindingCountSnapshot_.store(
         rudpSessionBinder_.size(),
         std::memory_order_relaxed);

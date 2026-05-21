@@ -28,15 +28,22 @@ add_executable(
   core/ServerIntegrationTests.cpp
   client/DebugCliCommandTests.cpp
   protocol/AckWindowTests.cpp
+  protocol/RudpBattleStartPayloadTests.cpp
   protocol/RudpDatagramReceiverTests.cpp
+  protocol/RudpGameEventPayloadTests.cpp
+  protocol/RudpGameplayEventIdempotencyTrackerTests.cpp
   protocol/RudpHelloPayloadTests.cpp
   protocol/RudpInputCommandPayloadTests.cpp
   protocol/RudpInputCommandSequenceTrackerTests.cpp
+  protocol/RudpMetaResponseIdempotencyTrackerTests.cpp
+  protocol/RudpMetaResponsePayloadTests.cpp
   protocol/PacketParserTests.cpp
   protocol/PacketSerializerTests.cpp
   protocol/RudpPeerReceiveTests.cpp
   protocol/RudpPeerRegistryTests.cpp
   protocol/RudpReceivePipelineTests.cpp
+  protocol/RudpReliableEventDeliveryGuardTests.cpp
+  protocol/RudpReliableEventSendQueueTests.cpp
   protocol/RudpSocketDrainTests.cpp
   protocol/ReliableSendQueueTests.cpp
   protocol/RudpRetransmissionFlushTests.cpp
