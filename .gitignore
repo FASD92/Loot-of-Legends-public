@@ -9,7 +9,11 @@ Icon?
 .idea/
 
 # Public repository excludes
-docs/
+docs/*
+!docs/
+!docs/architecture.md
+!docs/test_matrix.md
+!docs/roadmap.md
 experimental/
 AGENTS.md
 
