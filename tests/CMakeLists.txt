@@ -18,7 +18,14 @@ enable_testing()
 
 add_executable(
   lol_tests
+  core/OutboundSendQueueTests.cpp
+  core/RoomActorTests.cpp
+  core/RoomEventDispatcherTests.cpp
+  core/RoomEventMetricsTests.cpp
+  core/RoomEventQueueTests.cpp
+  core/RoomEventTests.cpp
   core/RoomManagerTests.cpp
+  core/WorkerPoolTests.cpp
   core/ServerRoomIntegrationTests.cpp
   core/TcpPacketTests.cpp
   core/TcpPacketReaderTests.cpp

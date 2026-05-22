@@ -1381,6 +1381,70 @@ TEST(ServerRoomIntegrationTests, FinishSessionReturnsIdempotentSettlementResult)
         }));
 }
 
+TEST(ServerRoomIntegrationTests, FinishSessionBeforeActorGameplayReturnsIdempotentEmptySettlement) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    int clientFd = connectToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    uint64_t sessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(clientFd, sessionId));
+    std::vector<uint64_t> clientSnapshot;
+    ASSERT_TRUE(recvClientListSnapshotPacket(clientFd, clientSnapshot));
+
+    ASSERT_TRUE(sendCreateRoomRequestPacket(clientFd));
+
+    uint32_t roomId = 0;
+    uint16_t playerCount = 0;
+    ASSERT_TRUE(recvCreateRoomResponsePacket(clientFd, roomId, playerCount));
+    EXPECT_GT(roomId, 0u);
+    EXPECT_EQ(playerCount, 1u);
+
+    std::vector<Net::TcpRoomEntry> roomSnapshot;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientFd, roomSnapshot));
+    ASSERT_EQ(roomSnapshot.size(), 1u);
+    EXPECT_EQ(roomSnapshot[0].roomId, roomId);
+    EXPECT_EQ(roomSnapshot[0].playerCount, 1u);
+
+    ASSERT_TRUE(sendFinishSessionRequestPacket(clientFd));
+    Net::TcpSettlementResult firstSettlement;
+    ASSERT_TRUE(recvSettlementResultPacket(clientFd, firstSettlement));
+    EXPECT_FALSE(firstSettlement.settlementId.empty());
+    EXPECT_EQ(firstSettlement.sessionId, sessionId);
+    EXPECT_EQ(firstSettlement.accountId, sessionId);
+    EXPECT_EQ(firstSettlement.roomId, roomId);
+    EXPECT_EQ(firstSettlement.reason, Net::TcpSettlementReason::kNormal);
+    EXPECT_EQ(firstSettlement.goldDelta, 0);
+    EXPECT_TRUE(firstSettlement.inventoryDeltas.empty());
+
+    ASSERT_TRUE(sendFinishSessionRequestPacket(clientFd));
+    Net::TcpSettlementResult repeatedSettlement;
+    ASSERT_TRUE(recvSettlementResultPacket(clientFd, repeatedSettlement));
+    EXPECT_EQ(repeatedSettlement.settlementId, firstSettlement.settlementId);
+    EXPECT_EQ(repeatedSettlement.sessionId, firstSettlement.sessionId);
+    EXPECT_EQ(repeatedSettlement.accountId, firstSettlement.accountId);
+    EXPECT_EQ(repeatedSettlement.roomId, firstSettlement.roomId);
+    EXPECT_EQ(repeatedSettlement.startedAtUnixMs, firstSettlement.startedAtUnixMs);
+    EXPECT_EQ(repeatedSettlement.finishedAtUnixMs, firstSettlement.finishedAtUnixMs);
+    EXPECT_EQ(repeatedSettlement.goldDelta, firstSettlement.goldDelta);
+    EXPECT_EQ(repeatedSettlement.reason, firstSettlement.reason);
+    EXPECT_TRUE(repeatedSettlement.inventoryDeltas.empty());
+
+    ::close(clientFd);
+    EXPECT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() == 0u &&
+                   runningServer.server.sessionCount() == 0u;
+        }));
+}
+
 TEST(ServerRoomIntegrationTests, RejectsFinishSessionRequestOutsideRoom) {
     RunningServer runningServer(0);
     ASSERT_TRUE(runningServer.server.start());
@@ -1526,6 +1590,124 @@ TEST(ServerRoomIntegrationTests, RejectsMonsterDeathRequestOutsideRoom) {
         }));
 
     ::close(clientFd);
+    EXPECT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() == 0u &&
+                   runningServer.server.sessionCount() == 0u;
+        }));
+}
+
+TEST(ServerRoomIntegrationTests, RejectsZeroMonsterDeathRequestInsideRoom) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    SpawnedBattleClients battle;
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+
+    ASSERT_TRUE(sendMonsterDeathRequestPacket(battle.clientA, 0));
+    Net::TcpPacketType failedType = Net::TcpPacketType::kWelcome;
+    Net::TcpErrorCode errorCode = Net::TcpErrorCode::kNone;
+    ASSERT_TRUE(recvErrorPacket(battle.clientA, failedType, errorCode));
+    EXPECT_EQ(failedType, Net::TcpPacketType::kMonsterDeathRequest);
+    EXPECT_EQ(errorCode, Net::TcpErrorCode::kNotFound);
+
+    ASSERT_TRUE(setReceiveTimeout(battle.clientB, std::chrono::milliseconds(50)));
+    std::vector<uint8_t> unexpectedPacket;
+    EXPECT_FALSE(recvPacket(battle.clientB, unexpectedPacket));
+
+    ::close(battle.clientB);
+    ::close(battle.clientA);
+    EXPECT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() == 0u &&
+                   runningServer.server.sessionCount() == 0u;
+        }));
+}
+
+TEST(ServerRoomIntegrationTests, RejectsZeroClickLootRequestInsideRoomWithoutConsumingDrop) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    SpawnedBattleClients battle;
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+
+    uint32_t dropId = 0;
+    uint32_t itemId = 0;
+    uint16_t quantity = 0;
+    ASSERT_TRUE(defeatMonsterAndReceiveDrop(battle, battle.clientA, dropId, itemId, quantity));
+
+    ASSERT_TRUE(sendClickLootRequestPacket(battle.clientA, 0));
+    Net::TcpPacketType failedType = Net::TcpPacketType::kWelcome;
+    Net::TcpErrorCode errorCode = Net::TcpErrorCode::kNone;
+    ASSERT_TRUE(recvErrorPacket(battle.clientA, failedType, errorCode));
+    EXPECT_EQ(failedType, Net::TcpPacketType::kClickLootRequest);
+    EXPECT_EQ(errorCode, Net::TcpErrorCode::kNotFound);
+
+    ASSERT_TRUE(setReceiveTimeout(battle.clientB, std::chrono::milliseconds(50)));
+    std::vector<uint8_t> unexpectedPacket;
+    EXPECT_FALSE(recvPacket(battle.clientB, unexpectedPacket));
+    ASSERT_TRUE(setReceiveTimeout(battle.clientB, std::chrono::milliseconds(500)));
+
+    ASSERT_TRUE(sendClickLootRequestPacket(battle.clientA, dropId));
+
+    uint32_t lootRoomId = 0;
+    uint32_t resolvedDropId = 0;
+    uint64_t winnerSessionId = 0;
+    uint32_t resolvedItemId = 0;
+    uint16_t resolvedQuantity = 0;
+    ASSERT_TRUE(recvLootResolvedPacket(
+        battle.clientA,
+        lootRoomId,
+        resolvedDropId,
+        winnerSessionId,
+        resolvedItemId,
+        resolvedQuantity));
+    EXPECT_EQ(lootRoomId, battle.roomId);
+    EXPECT_EQ(resolvedDropId, dropId);
+    EXPECT_EQ(winnerSessionId, battle.sessionA);
+    EXPECT_EQ(resolvedItemId, itemId);
+    EXPECT_EQ(resolvedQuantity, quantity);
+
+    ASSERT_TRUE(recvLootResolvedPacket(
+        battle.clientB,
+        lootRoomId,
+        resolvedDropId,
+        winnerSessionId,
+        resolvedItemId,
+        resolvedQuantity));
+    EXPECT_EQ(lootRoomId, battle.roomId);
+    EXPECT_EQ(resolvedDropId, dropId);
+    EXPECT_EQ(winnerSessionId, battle.sessionA);
+
+    uint64_t inventorySessionId = 0;
+    uint16_t currentWeight = 0;
+    uint16_t maxWeight = 0;
+    std::vector<Net::TcpInventoryEntry> inventoryEntries;
+    ASSERT_TRUE(recvInventorySnapshotPacket(
+        battle.clientA,
+        inventorySessionId,
+        currentWeight,
+        maxWeight,
+        inventoryEntries));
+    EXPECT_EQ(inventorySessionId, battle.sessionA);
+    EXPECT_EQ(currentWeight, quantity);
+    EXPECT_EQ(maxWeight, 10u);
+    ASSERT_EQ(inventoryEntries.size(), 1u);
+    EXPECT_EQ(inventoryEntries[0].itemId, itemId);
+    EXPECT_EQ(inventoryEntries[0].quantity, quantity);
+
+    ::close(battle.clientB);
+    ::close(battle.clientA);
     EXPECT_TRUE(waitUntil(
         [&runningServer]() {
             return runningServer.server.activeConnectionCount() == 0u &&

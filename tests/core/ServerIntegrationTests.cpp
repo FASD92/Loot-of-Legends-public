@@ -181,6 +181,18 @@ bool recvAll(int fd, uint8_t* buffer, size_t size) {
     return true;
 }
 
+bool sendAll(int fd, const uint8_t* data, size_t size) {
+    size_t sentTotal = 0;
+    while (sentTotal < size) {
+        const ssize_t sent = ::send(fd, data + sentTotal, size - sentTotal, 0);
+        if (sent <= 0) {
+            return false;
+        }
+        sentTotal += static_cast<size_t>(sent);
+    }
+    return true;
+}
+
 bool recvWelcomePacket(int fd, uint64_t& outSessionId) {
     std::array<uint8_t, Net::kWelcomePacketSize> packet{};
     if (!recvAll(fd, packet.data(), packet.size())) {
@@ -222,6 +234,90 @@ bool recvClientListSnapshotPacket(int fd, std::vector<uint64_t>& outSessionIds) 
 
     Net::TcpPacketHeader header;
     return Net::parseClientListSnapshotPacket(packet.data(), packet.size(), header, outSessionIds);
+}
+
+bool recvCreateRoomResponsePacket(int fd, uint32_t& outRoomId, uint16_t& outPlayerCount) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseCreateRoomResponsePacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outPlayerCount);
+}
+
+bool recvJoinRoomResponsePacket(int fd, uint32_t& outRoomId, uint16_t& outPlayerCount) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseJoinRoomResponsePacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outPlayerCount);
+}
+
+bool recvReadyRoomResponsePacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint16_t& outReadyPlayerCount,
+    uint16_t& outTotalPlayerCount) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseReadyRoomResponsePacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outReadyPlayerCount,
+        outTotalPlayerCount);
+}
+
+bool recvRoomListSnapshotPacket(int fd, std::vector<Net::TcpRoomEntry>& outRooms) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseRoomListSnapshotPacket(packet.data(), packet.size(), header, outRooms);
+}
+
+bool sendCreateRoomRequestPacket(int fd) {
+    std::array<uint8_t, Net::kTcpHeaderSize> packet{};
+    if (!Net::serializeCreateRoomRequestPacket(packet)) {
+        return false;
+    }
+    return sendAll(fd, packet.data(), packet.size());
+}
+
+bool sendJoinRoomRequestPacket(int fd, uint32_t roomId) {
+    std::array<uint8_t, Net::kRoomIdPacketSize> packet{};
+    if (!Net::serializeJoinRoomRequestPacket(roomId, packet)) {
+        return false;
+    }
+    return sendAll(fd, packet.data(), packet.size());
+}
+
+bool sendReadyRoomRequestPacket(int fd) {
+    std::array<uint8_t, Net::kTcpHeaderSize> packet{};
+    if (!Net::serializeReadyRoomRequestPacket(packet)) {
+        return false;
+    }
+    return sendAll(fd, packet.data(), packet.size());
 }
 
 bool waitUntil(
@@ -1940,6 +2036,99 @@ TEST(ServerIntegrationTests, DecodesBoundRudpInputCommandAtAdapterGate) {
         }));
 
     ::close(clientFd);
+}
+
+TEST(ServerIntegrationTests, RudpReadyInputDoesNotMutateTcpRoomBeforePlan44) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t tcpPort = runningServer.server.boundPort();
+    const uint16_t udpPort = runningServer.server.udpBoundPort();
+    ASSERT_GT(tcpPort, 0);
+    ASSERT_GT(udpPort, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    Net::UdpSocket sender;
+    ASSERT_TRUE(sender.open(0));
+    int clientA = -1;
+    uint64_t sessionA = 0;
+    ASSERT_TRUE(bindRudpSessionForTest(runningServer, sender, clientA, sessionA));
+
+    int clientB = connectToServer(tcpPort);
+    ASSERT_GE(clientB, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientB, std::chrono::milliseconds(500)));
+    uint64_t sessionB = 0;
+    ASSERT_TRUE(recvWelcomePacket(clientB, sessionB));
+
+    std::vector<uint64_t> clientSnapshot;
+    ASSERT_TRUE(recvClientListSnapshotPacket(clientB, clientSnapshot));
+    ASSERT_TRUE(recvClientListSnapshotPacket(clientA, clientSnapshot));
+
+    ASSERT_TRUE(sendCreateRoomRequestPacket(clientA));
+    uint32_t roomId = 0;
+    uint16_t playerCount = 0;
+    ASSERT_TRUE(recvCreateRoomResponsePacket(clientA, roomId, playerCount));
+    EXPECT_GT(roomId, 0u);
+    EXPECT_EQ(playerCount, 1u);
+
+    std::vector<Net::TcpRoomEntry> roomSnapshot;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientA, roomSnapshot));
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientB, roomSnapshot));
+
+    ASSERT_TRUE(sendJoinRoomRequestPacket(clientB, roomId));
+    uint32_t joinedRoomId = 0;
+    ASSERT_TRUE(recvJoinRoomResponsePacket(clientB, joinedRoomId, playerCount));
+    EXPECT_EQ(joinedRoomId, roomId);
+    EXPECT_EQ(playerCount, 2u);
+
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientA, roomSnapshot));
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientB, roomSnapshot));
+
+    sendUdpPacket(
+        sender,
+        serializeRudpPacketForTest(
+            inputCommandRudpHeader(101),
+            readyInputCommandPayloadForTest(77, 1)),
+        udpPort);
+
+    ASSERT_TRUE(waitUntil(
+        [&runningServer]() {
+            const Core::RudpServerBindingStats stats =
+                runningServer.server.rudpBindingStats();
+            return stats.inputCandidates >= 1U &&
+                stats.inputDecoded >= 1U &&
+                stats.inputSequenceAccepted >= 1U;
+        }));
+
+    ASSERT_TRUE(setReceiveTimeout(clientA, std::chrono::milliseconds(50)));
+    ASSERT_TRUE(setReceiveTimeout(clientB, std::chrono::milliseconds(50)));
+    std::vector<uint8_t> unexpectedPacket;
+    EXPECT_FALSE(recvPacket(clientA, unexpectedPacket));
+    EXPECT_FALSE(recvPacket(clientB, unexpectedPacket));
+
+    ASSERT_TRUE(setReceiveTimeout(clientA, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(setReceiveTimeout(clientB, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendReadyRoomRequestPacket(clientB));
+    uint32_t readyRoomId = 0;
+    uint16_t readyPlayerCount = 0;
+    uint16_t totalPlayerCount = 0;
+    ASSERT_TRUE(recvReadyRoomResponsePacket(
+        clientB,
+        readyRoomId,
+        readyPlayerCount,
+        totalPlayerCount));
+    EXPECT_EQ(readyRoomId, roomId);
+    EXPECT_EQ(readyPlayerCount, 1u);
+    EXPECT_EQ(totalPlayerCount, 2u);
+
+    ASSERT_TRUE(setReceiveTimeout(clientA, std::chrono::milliseconds(50)));
+    ASSERT_TRUE(setReceiveTimeout(clientB, std::chrono::milliseconds(50)));
+    EXPECT_FALSE(recvPacket(clientA, unexpectedPacket));
+    EXPECT_FALSE(recvPacket(clientB, unexpectedPacket));
+
+    ::close(clientB);
+    ::close(clientA);
 }
 
 TEST(ServerIntegrationTests, RejectsMalformedBoundRudpInputCommandAtAdapterGate) {

@@ -10,6 +10,9 @@
 
 #include "Core/ClientConnection.hpp"
 #include "Core/SessionManager.hpp"
+#include "Game/OutboundSendQueue.hpp"
+#include "Game/RoomEventDispatcher.hpp"
+#include "Game/RoomEventMetrics.hpp"
 #include "Game/RoomManager.hpp"
 #include "Net/RudpInputCommandSequenceTracker.hpp"
 #include "Net/RudpMetaResponseIdempotencyTracker.hpp"
@@ -160,6 +163,25 @@ private:
         const std::vector<uint8_t>& packet,
         std::vector<int>& disconnectedClients,
         bool& outRoomListChanged);
+    bool dispatchTcpRoomEvent(
+        ClientConnection& connection,
+        Net::TcpPacketType failedType,
+        const Game::RoomEvent& event,
+        std::vector<int>& disconnectedClients);
+    bool drainInlineRoomEvents(std::vector<int>& disconnectedClients);
+    bool applyInlineRoomEvent(
+        uint32_t roomId,
+        const Game::RoomEvent& event,
+        std::vector<int>& disconnectedClients);
+    bool flushOutboundQueue(std::vector<int>& disconnectedClients);
+    bool flushOutboundEnvelope(
+        const Game::OutboundEnvelope& envelope,
+        std::vector<int>& disconnectedClients);
+    bool sendTcpError(
+        int clientFd,
+        Net::TcpPacketType failedType,
+        Net::TcpErrorCode errorCode,
+        std::vector<int>& disconnectedClients);
     bool sendPacketToClient(
         int clientFd,
         const uint8_t* data,
@@ -188,6 +210,7 @@ private:
         int clientFd,
         const Game::InventorySnapshot& inventory,
         std::vector<int>& disconnectedClients);
+    int findClientFdForSession(uint64_t sessionId) const;
     void broadcastStateSnapshots(bool clientListChanged, bool roomListChanged);
     bool disconnectClient(int clientFd);
     void closeAllConnections();
@@ -198,6 +221,9 @@ private:
     Net::UdpSocket udpSocket_;
     SessionManager sessionManager_;
     Game::RoomManager roomManager_;
+    Game::RoomEventMetrics roomEventMetrics_;
+    Game::RoomEventDispatcher roomEventDispatcher_;
+    Game::OutboundSendQueue outboundSendQueue_;
     Net::RudpPeerRegistry rudpPeerRegistry_;
     Net::RudpSessionBinder rudpSessionBinder_;
     Net::RudpInputCommandSequenceTracker rudpInputCommandSequenceTracker_;

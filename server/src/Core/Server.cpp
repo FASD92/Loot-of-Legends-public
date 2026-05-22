@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Core/Session.hpp"
+#include "Game/RoomActor.hpp"
 #include "Net/RudpBattleStartPayload.hpp"
 #include "Net/RudpGameEventPayload.hpp"
 #include "Net/RudpHelloPayload.hpp"
@@ -22,6 +23,7 @@ constexpr std::chrono::milliseconds kSessionTimeout(10000);
 constexpr std::chrono::milliseconds kLoopSleep(1);
 constexpr size_t kReceiveBufferSize = 512;
 constexpr size_t kRudpMaxPacketsPerTick = 64;
+constexpr size_t kServerRoomEventQueueCapacity = 128;
 
 uint64_t currentUnixTimeMs() {
     return static_cast<uint64_t>(
@@ -173,6 +175,51 @@ Net::TcpErrorCode toTcpErrorCode(Game::RoomCommandError error) {
         return Net::TcpErrorCode::kNone;
     }
 }
+
+Net::TcpPacketType requestTypeFromRoomEventType(Game::RoomEventType type) {
+    switch (type) {
+    case Game::RoomEventType::kReady:
+        return Net::TcpPacketType::kReadyRoomRequest;
+    case Game::RoomEventType::kMonsterDeath:
+        return Net::TcpPacketType::kMonsterDeathRequest;
+    case Game::RoomEventType::kClickLoot:
+        return Net::TcpPacketType::kClickLootRequest;
+    }
+
+    return Net::TcpPacketType::kReadyRoomRequest;
+}
+
+Net::TcpErrorCode toTcpErrorCode(Game::RoomEventDispatcherEnqueueStatus status) {
+    switch (status) {
+    case Game::RoomEventDispatcherEnqueueStatus::kRejectedBackpressure:
+    case Game::RoomEventDispatcherEnqueueStatus::kRejectedShutdown:
+        return Net::TcpErrorCode::kFull;
+    case Game::RoomEventDispatcherEnqueueStatus::kRejectedUnknownRoom:
+        return Net::TcpErrorCode::kNotFound;
+    case Game::RoomEventDispatcherEnqueueStatus::kEnqueued:
+    default:
+        return Net::TcpErrorCode::kNone;
+    }
+}
+
+Game::RoomCommandResult roomCommandResultFromOutboundEnvelope(
+    const Game::OutboundEnvelope& envelope) {
+    Game::RoomCommandResult result(
+        envelope.error == Game::RoomCommandError::kNone,
+        envelope.error,
+        envelope.room,
+        envelope.playerSessionIds,
+        false,
+        false,
+        false,
+        envelope.monster,
+        envelope.drops);
+    result.lootRejectReason = envelope.lootRejectReason;
+    result.winnerSessionId = envelope.winnerSessionId;
+    result.drop = envelope.drop;
+    result.inventory = envelope.inventory;
+    return result;
+}
 }  // namespace
 
 namespace Core {
@@ -182,6 +229,7 @@ Server::Server(uint16_t port)
 Server::Server(uint16_t port, std::chrono::milliseconds rudpPeerTimeout)
     : sessionManager_(kSessionTimeout),
       roomManager_(),
+      roomEventDispatcher_(kServerRoomEventQueueCapacity, &roomEventMetrics_),
       rudpPeerRegistry_(rudpPeerTimeout),
       activeConnectionCount_(0),
       sessionCountSnapshot_(0),
@@ -1013,6 +1061,7 @@ bool Server::handleRoomPacket(
             return false;
         }
 
+        roomEventDispatcher_.registerRoom(result.room.roomId);
         outRoomListChanged = true;
         return true;
     }
@@ -1095,48 +1144,20 @@ bool Server::handleRoomPacket(
             return false;
         }
 
-        const Game::RoomCommandResult result = roomManager_.markReady(session->sessionId());
-        if (!result.ok) {   // 도메인 실패 처리: 방에 속하지 않았거나, 내부 매핑이 깨졌을 경우 <- 요청 형식은 ok!
-            std::array<uint8_t, Net::kErrorPacketSize> errorPacket{};
-            Net::serializeErrorPacket(
-                Net::TcpPacketType::kReadyRoomRequest,
-                toTcpErrorCode(result.error),
-                errorPacket);
-            return sendPacketToClient(
+        const auto roomId = roomManager_.findRoomIdForSession(session->sessionId());
+        if (!roomId.has_value()) {
+            return sendTcpError(
                 connection.clientFd(),
-                errorPacket.data(),
-                errorPacket.size(),
+                Net::TcpPacketType::kReadyRoomRequest,
+                Net::TcpErrorCode::kNotInRoom,
                 disconnectedClients);
         }
 
-        std::array<uint8_t, Net::kReadyRoomStatusPacketSize> responsePacket{};
-        Net::serializeReadyRoomResponsePacket(
-            result.room.roomId,
-            result.room.readyPlayerCount,
-            result.room.playerCount,
-            responsePacket);
-        if (!sendPacketToClient(
-                connection.clientFd(),
-                responsePacket.data(),
-                responsePacket.size(),
-                disconnectedClients)) {
-            return false;
-        }
-        // battleJustStarted는 RoomManager::markReady() 안에서 room.tryStartBattle() 결과를 담아 돌려준다.
-        if (result.battleJustStarted && !broadcastBattleStart(result, disconnectedClients)) {
-            return false;
-        }
-
-        if (result.battleJustStarted) {
-            const Game::RoomCommandResult spawnResult = roomManager_.spawnMonster(result.room.roomId);
-            if (spawnResult.ok &&
-                spawnResult.monsterJustSpawned &&
-                !broadcastMonsterSpawn(spawnResult, disconnectedClients)) {
-                return false;
-            }
-        }
-
-        return true;
+        return dispatchTcpRoomEvent(
+            connection,
+            Net::TcpPacketType::kReadyRoomRequest,
+            Game::makeReadyRoomEvent(session->sessionId(), *roomId),
+            disconnectedClients);
     }
 
     case Net::TcpPacketType::kMonsterDeathRequest: {
@@ -1146,32 +1167,28 @@ bool Server::handleRoomPacket(
             return false;
         }
 
-        const Game::RoomCommandResult result =
-            roomManager_.defeatMonster(session->sessionId(), monsterId);
-        if (!result.ok) {
-            std::array<uint8_t, Net::kErrorPacketSize> errorPacket{};
-            Net::serializeErrorPacket(
-                Net::TcpPacketType::kMonsterDeathRequest,
-                toTcpErrorCode(result.error),
-                errorPacket);
-            return sendPacketToClient(
+        const auto roomId = roomManager_.findRoomIdForSession(session->sessionId());
+        if (!roomId.has_value()) {
+            return sendTcpError(
                 connection.clientFd(),
-                errorPacket.data(),
-                errorPacket.size(),
+                Net::TcpPacketType::kMonsterDeathRequest,
+                Net::TcpErrorCode::kNotInRoom,
                 disconnectedClients);
         }
 
-        if (result.monsterJustDefeated &&
-            !broadcastMonsterDeath(result, disconnectedClients)) {
-            return false;
+        if (monsterId == 0) {
+            return sendTcpError(
+                connection.clientFd(),
+                Net::TcpPacketType::kMonsterDeathRequest,
+                Net::TcpErrorCode::kNotFound,
+                disconnectedClients);
         }
 
-        if (result.monsterJustDefeated &&
-            !broadcastDropListSnapshot(result, disconnectedClients)) {
-            return false;
-        }
-
-        return true;
+        return dispatchTcpRoomEvent(
+            connection,
+            Net::TcpPacketType::kMonsterDeathRequest,
+            Game::makeMonsterDeathRoomEvent(session->sessionId(), *roomId, monsterId),
+            disconnectedClients);
     }
 
     case Net::TcpPacketType::kClickLootRequest: {
@@ -1181,36 +1198,28 @@ bool Server::handleRoomPacket(
             return false;
         }
 
-        const Game::RoomCommandResult result =
-            roomManager_.claimLoot(session->sessionId(), dropId);
-        if (!result.ok) {
-            std::array<uint8_t, Net::kErrorPacketSize> errorPacket{};
-            Net::serializeErrorPacket(
-                Net::TcpPacketType::kClickLootRequest,
-                toTcpErrorCode(result.error),
-                errorPacket);
-            return sendPacketToClient(
+        const auto roomId = roomManager_.findRoomIdForSession(session->sessionId());
+        if (!roomId.has_value()) {
+            return sendTcpError(
                 connection.clientFd(),
-                errorPacket.data(),
-                errorPacket.size(),
+                Net::TcpPacketType::kClickLootRequest,
+                Net::TcpErrorCode::kNotInRoom,
                 disconnectedClients);
         }
 
-        if (result.lootRejected) {
-            return sendLootRejected(connection.clientFd(), result, disconnectedClients);
+        if (dropId == 0) {
+            return sendTcpError(
+                connection.clientFd(),
+                Net::TcpPacketType::kClickLootRequest,
+                Net::TcpErrorCode::kNotFound,
+                disconnectedClients);
         }
 
-        if (result.lootJustClaimed &&
-            !broadcastLootResolved(result, disconnectedClients)) {
-            return false;
-        }
-
-        if (result.lootJustClaimed &&
-            !sendInventorySnapshot(connection.clientFd(), result.inventory, disconnectedClients)) {
-            return false;
-        }
-
-        return true;
+        return dispatchTcpRoomEvent(
+            connection,
+            Net::TcpPacketType::kClickLootRequest,
+            Game::makeClickLootRoomEvent(session->sessionId(), *roomId, dropId),
+            disconnectedClients);
     }
 
     case Net::TcpPacketType::kFinishSessionRequest: {
@@ -1252,6 +1261,160 @@ bool Server::handleRoomPacket(
         markClientForDisconnect(disconnectedClients, connection.clientFd());
         return false;
     }
+}
+
+bool Server::dispatchTcpRoomEvent(
+    ClientConnection& connection,
+    Net::TcpPacketType failedType,
+    const Game::RoomEvent& event,
+    std::vector<int>& disconnectedClients) {
+    const Game::RoomEventDispatcherEnqueueResult enqueueResult =
+        roomEventDispatcher_.enqueue(event);
+    if (enqueueResult.status != Game::RoomEventDispatcherEnqueueStatus::kEnqueued) {
+        return sendTcpError(
+            connection.clientFd(),
+            failedType,
+            toTcpErrorCode(enqueueResult.status),
+            disconnectedClients);
+    }
+
+    return drainInlineRoomEvents(disconnectedClients);
+}
+
+bool Server::drainInlineRoomEvents(std::vector<int>& disconnectedClients) {
+    bool allSucceeded = true;
+    uint32_t roomId = 0;
+    while (roomEventDispatcher_.tryPopActiveRoom(roomId)) {
+        Game::RoomEvent event;
+        while (roomEventDispatcher_.tryDequeueRoomEvent(roomId, event)) {
+            if (!applyInlineRoomEvent(roomId, event, disconnectedClients)) {
+                allSucceeded = false;
+            }
+        }
+        roomEventDispatcher_.completeRoomProcessing(roomId);
+    }
+
+    return allSucceeded;
+}
+
+bool Server::applyInlineRoomEvent(
+    uint32_t roomId,
+    const Game::RoomEvent& event,
+    std::vector<int>& disconnectedClients) {
+    Game::RoomActor actor(roomId);
+    const Game::RoomEventApplyResult result = actor.apply(roomManager_, event);
+    roomEventMetrics_.recordProcessed();
+
+    if (result.status == Game::RoomEventApplyStatus::kInvalidEvent ||
+        result.status == Game::RoomEventApplyStatus::kRoomMismatch) {
+        const int clientFd = findClientFdForSession(event.sessionId);
+        if (clientFd < 0) {
+            return true;
+        }
+
+        return sendTcpError(
+            clientFd,
+            requestTypeFromRoomEventType(event.type),
+            Net::TcpErrorCode::kNotInRoom,
+            disconnectedClients);
+    }
+
+    outboundSendQueue_.enqueueFromRoomEventApplyResult(event, result);
+    if (result.status == Game::RoomEventApplyStatus::kApplied &&
+        result.commandResult.battleJustStarted) {
+        const Game::RoomCommandResult spawnResult =
+            roomManager_.spawnMonster(result.commandResult.room.roomId);
+        if (spawnResult.ok && spawnResult.monsterJustSpawned) {
+            outboundSendQueue_.enqueueRoomCommandBroadcasts(spawnResult);
+        }
+    }
+
+    return flushOutboundQueue(disconnectedClients);
+}
+
+bool Server::flushOutboundQueue(std::vector<int>& disconnectedClients) {
+    bool allSucceeded = true;
+    Game::OutboundEnvelope envelope;
+    while (outboundSendQueue_.tryPop(envelope)) {
+        if (!flushOutboundEnvelope(envelope, disconnectedClients)) {
+            allSucceeded = false;
+        }
+    }
+
+    return allSucceeded;
+}
+
+bool Server::flushOutboundEnvelope(
+    const Game::OutboundEnvelope& envelope,
+    std::vector<int>& disconnectedClients) {
+    const Game::RoomCommandResult result = roomCommandResultFromOutboundEnvelope(envelope);
+    switch (envelope.message) {
+    case Game::OutboundMessageType::kError: {
+        const int clientFd = findClientFdForSession(envelope.targetSessionId);
+        if (clientFd < 0) {
+            return true;
+        }
+        return sendTcpError(
+            clientFd,
+            requestTypeFromRoomEventType(envelope.sourceEventType),
+            toTcpErrorCode(envelope.error),
+            disconnectedClients);
+    }
+    case Game::OutboundMessageType::kReadyRoomResponse: {
+        const int clientFd = findClientFdForSession(envelope.targetSessionId);
+        if (clientFd < 0) {
+            return true;
+        }
+        std::array<uint8_t, Net::kReadyRoomStatusPacketSize> packet{};
+        if (!Net::serializeReadyRoomResponsePacket(
+                envelope.room.roomId,
+                envelope.room.readyPlayerCount,
+                envelope.room.playerCount,
+                packet)) {
+            return false;
+        }
+        return sendPacketToClient(clientFd, packet.data(), packet.size(), disconnectedClients);
+    }
+    case Game::OutboundMessageType::kBattleStart:
+        return broadcastBattleStart(result, disconnectedClients);
+    case Game::OutboundMessageType::kMonsterSpawn:
+        return broadcastMonsterSpawn(result, disconnectedClients);
+    case Game::OutboundMessageType::kMonsterDeath:
+        return broadcastMonsterDeath(result, disconnectedClients);
+    case Game::OutboundMessageType::kDropListSnapshot:
+        return broadcastDropListSnapshot(result, disconnectedClients);
+    case Game::OutboundMessageType::kLootRejected: {
+        const int clientFd = findClientFdForSession(envelope.targetSessionId);
+        if (clientFd < 0) {
+            return true;
+        }
+        return sendLootRejected(clientFd, result, disconnectedClients);
+    }
+    case Game::OutboundMessageType::kLootResolved:
+        return broadcastLootResolved(result, disconnectedClients);
+    case Game::OutboundMessageType::kInventorySnapshot: {
+        const int clientFd = findClientFdForSession(envelope.targetSessionId);
+        if (clientFd < 0) {
+            return true;
+        }
+        return sendInventorySnapshot(clientFd, envelope.inventory, disconnectedClients);
+    }
+    }
+
+    return false;
+}
+
+bool Server::sendTcpError(
+    int clientFd,
+    Net::TcpPacketType failedType,
+    Net::TcpErrorCode errorCode,
+    std::vector<int>& disconnectedClients) {
+    std::array<uint8_t, Net::kErrorPacketSize> packet{};
+    if (!Net::serializeErrorPacket(failedType, errorCode, packet)) {
+        return false;
+    }
+
+    return sendPacketToClient(clientFd, packet.data(), packet.size(), disconnectedClients);
 }
 
 bool Server::sendPacketToClient(
@@ -1425,6 +1588,16 @@ bool Server::sendInventorySnapshot(
     }
 
     return sendPacketToClient(clientFd, packet.data(), packet.size(), disconnectedClients);
+}
+
+int Server::findClientFdForSession(uint64_t sessionId) const {
+    for (const auto& entry : connections_) {
+        if (entry.second->sessionId() == sessionId) {
+            return entry.first;
+        }
+    }
+
+    return -1;
 }
 
 void Server::broadcastStateSnapshots(bool clientListChanged, bool roomListChanged) {

@@ -16,8 +16,20 @@ add_library(
   src/Core/SessionManager.hpp
   src/Game/Room.cpp
   src/Game/Room.hpp
+  src/Game/RoomActor.cpp
+  src/Game/RoomActor.hpp
+  src/Game/RoomEventDispatcher.cpp
+  src/Game/RoomEventDispatcher.hpp
+  src/Game/RoomEventMetrics.cpp
+  src/Game/RoomEventMetrics.hpp
+  src/Game/RoomEventQueue.cpp
+  src/Game/RoomEventQueue.hpp
   src/Game/RoomManager.cpp
   src/Game/RoomManager.hpp
+  src/Game/OutboundSendQueue.cpp
+  src/Game/OutboundSendQueue.hpp
+  src/Game/WorkerPool.cpp
+  src/Game/WorkerPool.hpp
   src/Net/RudpAckWindow.cpp
   src/Net/RudpAckWindow.hpp
   src/Net/RudpBattleStartPayload.cpp
