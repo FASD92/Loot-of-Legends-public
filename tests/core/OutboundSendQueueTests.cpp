@@ -212,6 +212,79 @@ TEST(OutboundSendQueueTests, ClickLootClaimAndRejectResultsProduceExpectedEnvelo
     EXPECT_TRUE(queue.empty());
 }
 
+TEST(OutboundSendQueueTests, CenterDropClickLootResultsProduceFullPassVisibilityEnvelopes) {
+    BattleRoomFixture fixture;
+    const Game::RoomCommandResult dropped = fixture.manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    ASSERT_EQ(dropped.drops.size(), 1U);
+    const uint32_t dropId = dropped.drops[0].dropId;
+    const uint32_t itemId = dropped.drops[0].itemId;
+    const uint16_t quantity = dropped.drops[0].quantity;
+
+    const Game::SmokePlayerPlacementResult placed =
+        fixture.manager.placePlayersAroundCenterDropForSmoke(10);
+    ASSERT_TRUE(placed.ok);
+
+    const Game::RoomActor actor(fixture.roomId);
+    Game::OutboundSendQueue queue;
+
+    const Game::RoomEvent firstClick =
+        Game::makeClickLootRoomEvent(10, fixture.roomId, dropId);
+    const Game::RoomEventApplyResult firstResult =
+        actor.apply(fixture.manager, firstClick);
+    ASSERT_EQ(firstResult.status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_TRUE(firstResult.commandResult.lootJustClaimed);
+    EXPECT_EQ(queue.enqueueFromRoomEventApplyResult(firstClick, firstResult), 2U);
+
+    const Game::OutboundEnvelope resolved = popEnvelope(queue);
+    expectRoomTarget(resolved, Game::OutboundMessageType::kLootResolved, fixture.roomId);
+    EXPECT_EQ(resolved.sourceEventType, Game::RoomEventType::kClickLoot);
+    EXPECT_EQ(resolved.winnerSessionId, 10U);
+    EXPECT_EQ(resolved.drop.dropId, dropId);
+    EXPECT_EQ(resolved.drop.itemId, itemId);
+    EXPECT_EQ(resolved.drop.quantity, quantity);
+    EXPECT_TRUE(resolved.drop.claimed);
+    EXPECT_EQ(resolved.drop.ownerSessionId, 10U);
+
+    const Game::OutboundEnvelope inventory = popEnvelope(queue);
+    expectSessionTarget(
+        inventory,
+        Game::OutboundMessageType::kInventorySnapshot,
+        10,
+        fixture.roomId);
+    EXPECT_EQ(inventory.sourceEventType, Game::RoomEventType::kClickLoot);
+    EXPECT_EQ(inventory.inventory.sessionId, 10U);
+    EXPECT_EQ(inventory.inventory.currentWeight, quantity);
+    ASSERT_EQ(inventory.inventory.entries.size(), 1U);
+    EXPECT_EQ(inventory.inventory.entries[0].itemId, itemId);
+    EXPECT_EQ(inventory.inventory.entries[0].quantity, quantity);
+    EXPECT_TRUE(queue.empty());
+
+    const Game::RoomEvent secondClick =
+        Game::makeClickLootRoomEvent(20, fixture.roomId, dropId);
+    const Game::RoomEventApplyResult secondResult =
+        actor.apply(fixture.manager, secondClick);
+    ASSERT_EQ(secondResult.status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_TRUE(secondResult.commandResult.lootRejected);
+    EXPECT_EQ(queue.enqueueFromRoomEventApplyResult(secondClick, secondResult), 1U);
+
+    const Game::OutboundEnvelope rejected = popEnvelope(queue);
+    expectSessionTarget(
+        rejected,
+        Game::OutboundMessageType::kLootRejected,
+        20,
+        fixture.roomId);
+    EXPECT_EQ(rejected.sourceEventType, Game::RoomEventType::kClickLoot);
+    EXPECT_EQ(rejected.lootRejectReason, Game::LootRejectReason::kAlreadyClaimed);
+    EXPECT_EQ(rejected.winnerSessionId, 10U);
+    EXPECT_EQ(rejected.drop.dropId, dropId);
+    EXPECT_EQ(rejected.drop.itemId, itemId);
+    EXPECT_EQ(rejected.drop.quantity, quantity);
+    EXPECT_TRUE(rejected.drop.claimed);
+    EXPECT_EQ(rejected.drop.ownerSessionId, 10U);
+    EXPECT_TRUE(queue.empty());
+}
+
 TEST(OutboundSendQueueTests, RoomCommandRejectedProducesSessionErrorEnvelope) {
     BattleRoomFixture fixture;
     const Game::RoomCommandResult spawned = fixture.manager.spawnMonster(fixture.roomId);

@@ -114,6 +114,106 @@ TEST(RoomActorTests, AppliesQueuedClickLootEventsWithoutChangingOwnershipInvaria
     EXPECT_EQ(room->drops()[0].ownerSessionId, 10u);
 }
 
+TEST(RoomActorTests, CenterDropPlacementQueuedClickLootKeepsSingleWinner) {
+    Game::RoomManager manager;
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).battleJustStarted);
+
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    ASSERT_EQ(dropped.drops.size(), 1u);
+    const uint32_t dropId = dropped.drops[0].dropId;
+    const uint32_t itemId = dropped.drops[0].itemId;
+    const uint16_t quantity = dropped.drops[0].quantity;
+
+    const Game::SmokePlayerPlacementResult placed =
+        manager.placePlayersAroundCenterDropForSmoke(10);
+    ASSERT_TRUE(placed.ok);
+    ASSERT_EQ(placed.movementSnapshots.size(), 2u);
+    EXPECT_EQ(placed.movementSnapshots[0].sessionId, 10u);
+    EXPECT_EQ(placed.movementSnapshots[0].position.x, -Game::Room::kMovementScale);
+    EXPECT_EQ(placed.movementSnapshots[0].position.y, 0);
+    EXPECT_EQ(placed.movementSnapshots[1].sessionId, 20u);
+    EXPECT_EQ(placed.movementSnapshots[1].position.x, Game::Room::kMovementScale);
+    EXPECT_EQ(placed.movementSnapshots[1].position.y, 0);
+
+    Game::RoomEventQueue queue(2);
+    ASSERT_EQ(
+        queue.enqueue(Game::makeClickLootRoomEvent(10, created.room.roomId, dropId)),
+        Game::RoomEventQueueEnqueueResult::kEnqueued);
+    ASSERT_EQ(
+        queue.enqueue(Game::makeClickLootRoomEvent(20, created.room.roomId, dropId)),
+        Game::RoomEventQueueEnqueueResult::kEnqueued);
+
+    const Game::RoomActor actor(created.room.roomId);
+    Game::RoomEvent event;
+    ASSERT_TRUE(queue.tryDequeue(event));
+    const Game::RoomEventApplyResult firstClaim = actor.apply(manager, event);
+    ASSERT_EQ(firstClaim.status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_TRUE(firstClaim.commandResult.ok);
+    EXPECT_TRUE(firstClaim.commandResult.lootJustClaimed);
+    EXPECT_FALSE(firstClaim.commandResult.lootRejected);
+    EXPECT_EQ(firstClaim.commandResult.winnerSessionId, 10u);
+    EXPECT_EQ(firstClaim.commandResult.drop.dropId, dropId);
+    EXPECT_EQ(firstClaim.commandResult.drop.itemId, itemId);
+    EXPECT_EQ(firstClaim.commandResult.drop.quantity, quantity);
+    EXPECT_TRUE(firstClaim.commandResult.drop.claimed);
+    EXPECT_EQ(firstClaim.commandResult.drop.ownerSessionId, 10u);
+    EXPECT_EQ(firstClaim.commandResult.inventory.sessionId, 10u);
+    EXPECT_EQ(firstClaim.commandResult.inventory.currentWeight, quantity);
+    ASSERT_EQ(firstClaim.commandResult.inventory.entries.size(), 1u);
+    EXPECT_EQ(firstClaim.commandResult.inventory.entries[0].itemId, itemId);
+    EXPECT_EQ(firstClaim.commandResult.inventory.entries[0].quantity, quantity);
+
+    ASSERT_TRUE(queue.tryDequeue(event));
+    const Game::RoomEventApplyResult secondClaim = actor.apply(manager, event);
+    ASSERT_EQ(secondClaim.status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_TRUE(secondClaim.commandResult.ok);
+    EXPECT_FALSE(secondClaim.commandResult.lootJustClaimed);
+    EXPECT_TRUE(secondClaim.commandResult.lootRejected);
+    EXPECT_EQ(secondClaim.commandResult.lootRejectReason, Game::LootRejectReason::kAlreadyClaimed);
+    EXPECT_EQ(secondClaim.commandResult.winnerSessionId, 10u);
+    EXPECT_EQ(secondClaim.commandResult.drop.dropId, dropId);
+    EXPECT_TRUE(secondClaim.commandResult.drop.claimed);
+    EXPECT_EQ(secondClaim.commandResult.drop.ownerSessionId, 10u);
+    EXPECT_EQ(secondClaim.commandResult.inventory.sessionId, 20u);
+    EXPECT_EQ(secondClaim.commandResult.inventory.currentWeight, 0u);
+    EXPECT_TRUE(secondClaim.commandResult.inventory.entries.empty());
+    EXPECT_FALSE(queue.tryDequeue(event));
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    ASSERT_EQ(room->drops().size(), 1u);
+    EXPECT_TRUE(room->drops()[0].claimed);
+    EXPECT_EQ(room->drops()[0].ownerSessionId, 10u);
+    EXPECT_EQ(room->drops()[0].itemId, itemId);
+    EXPECT_EQ(room->drops()[0].quantity, quantity);
+
+    const Game::InventorySnapshot* winnerInventory = room->findInventory(10);
+    ASSERT_NE(winnerInventory, nullptr);
+    EXPECT_EQ(winnerInventory->currentWeight, quantity);
+    ASSERT_EQ(winnerInventory->entries.size(), 1u);
+    EXPECT_EQ(winnerInventory->entries[0].itemId, itemId);
+    EXPECT_EQ(winnerInventory->entries[0].quantity, quantity);
+
+    const Game::InventorySnapshot* loserInventory = room->findInventory(20);
+    ASSERT_NE(loserInventory, nullptr);
+    EXPECT_EQ(loserInventory->currentWeight, 0u);
+    EXPECT_TRUE(loserInventory->entries.empty());
+
+    const Game::MovementPosition* winnerPosition = room->findMovementPosition(10);
+    ASSERT_NE(winnerPosition, nullptr);
+    EXPECT_EQ(winnerPosition->x, -Game::Room::kMovementScale);
+    EXPECT_EQ(winnerPosition->y, 0);
+    const Game::MovementPosition* loserPosition = room->findMovementPosition(20);
+    ASSERT_NE(loserPosition, nullptr);
+    EXPECT_EQ(loserPosition->x, Game::Room::kMovementScale);
+    EXPECT_EQ(loserPosition->y, 0);
+}
+
 TEST(RoomActorTests, TenPlayerClickLootContentionKeepsSingleOwner) {
     constexpr std::size_t kPlayerCount = 10;
     constexpr uint64_t kFirstSessionId = 1000;

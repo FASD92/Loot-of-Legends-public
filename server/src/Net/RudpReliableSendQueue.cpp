@@ -60,6 +60,19 @@ size_t RudpReliableSendQueue::consumeAck(uint32_t ack, uint32_t ackBits) {
     return before - pending_.size();
 }
 
+bool RudpReliableSendQueue::remove(uint32_t sequence) {
+    const size_t before = pending_.size();
+    pending_.erase(
+        std::remove_if(
+            pending_.begin(),
+            pending_.end(),
+            [sequence](const PendingPacket& packet) {
+                return packet.sequence == sequence;
+            }),
+        pending_.end());
+    return before != pending_.size();
+}
+
 std::vector<uint32_t> RudpReliableSendQueue::dueForRetransmission(
     TimePoint now) const {
     std::vector<uint32_t> sequences;

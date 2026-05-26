@@ -35,6 +35,7 @@ RudpSocketDrainSummary drainRudpSocket(
                 break;
             case RudpReceivePipelineResult::kAckOnly:
                 ++summary.ackOnly;
+                summary.ackOnlyDeliveries.push_back(std::move(delivery));
                 break;
             case RudpReceivePipelineResult::kDuplicate:
                 ++summary.duplicate;

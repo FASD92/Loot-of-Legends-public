@@ -47,6 +47,7 @@ public:
         TimePoint now);
 
     size_t consumeAck(uint32_t ack, uint32_t ackBits);
+    bool remove(uint32_t sequence);
     std::vector<uint32_t> dueForRetransmission(TimePoint now) const;
     std::vector<uint32_t> expiredSequences(TimePoint now) const;
     bool markRetransmitted(uint32_t sequence, TimePoint now);

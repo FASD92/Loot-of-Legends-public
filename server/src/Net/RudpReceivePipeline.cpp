@@ -33,6 +33,13 @@ RudpReceivePipelineResult processRudpPacket(
     }
 
     const RudpReceivePipelineResult result = mapPeerResult(peer->receive(datagram));
+    if (result == RudpReceivePipelineResult::kAckOnly) {
+        outDelivery.endpoint = datagram.endpoint;
+        outDelivery.header = datagram.header;
+        outDelivery.payload = datagram.payload;
+        outDelivery.peer = peer;
+        return result;
+    }
     if (result != RudpReceivePipelineResult::kDeliver) {
         return result;
     }

@@ -4,19 +4,30 @@
 #include <array>
 #include <chrono>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "Core/RudpInputCommandRoomEventTranslator.hpp"
 #include "Core/Session.hpp"
 #include "Game/RoomActor.hpp"
 #include "Net/RudpBattleStartPayload.hpp"
 #include "Net/RudpGameEventPayload.hpp"
 #include "Net/RudpHelloPayload.hpp"
 #include "Net/RudpInputCommandPayload.hpp"
+#include "Net/RudpStateSnapshotPayload.hpp"
 #include "Net/TcpPacket.hpp"
 #include "Util/Time.hpp"
+#if defined(__linux__)
+#include <errno.h>
+#include <sys/eventfd.h>
+#include <sys/timerfd.h>
+#include <unistd.h>
+
+#include "Platform/Linux/EpollEventLoop.hpp"
+#endif
 
 namespace {
 constexpr std::chrono::milliseconds kSessionTimeout(10000);
@@ -24,6 +35,15 @@ constexpr std::chrono::milliseconds kLoopSleep(1);
 constexpr size_t kReceiveBufferSize = 512;
 constexpr size_t kRudpMaxPacketsPerTick = 64;
 constexpr size_t kServerRoomEventQueueCapacity = 128;
+constexpr size_t kTcpOutboundPendingLimit = 256 * 1024;
+constexpr std::chrono::milliseconds kRudpSnapshotInterval(100);
+constexpr uint64_t kTcpListenerGeneration = 1;
+#if defined(__linux__)
+constexpr uint64_t kUdpSocketGeneration = 2;
+constexpr uint64_t kRuntimeTimerGeneration = 3;
+constexpr uint64_t kRuntimeWakeupGeneration = 4;
+constexpr std::chrono::milliseconds kLinuxEpollWaitForever(-1);
+#endif
 
 uint64_t currentUnixTimeMs() {
     return static_cast<uint64_t>(
@@ -83,6 +103,53 @@ std::string lootResolvedLogicalKey(
     const Net::RudpLootResolvedGameEventPayload& payload) {
     return "LootResolved:" + std::to_string(payload.roomId) + ":" +
         std::to_string(payload.dropId);
+}
+
+bool buildRudpReliableEventPacket(
+    const Net::RudpReliableEventDescriptor& descriptor,
+    uint32_t sequence,
+    const std::vector<uint8_t>& payloadBytes,
+    std::vector<uint8_t>& outPacket) {
+    Net::RudpPacketHeader header;
+    header.flags = Net::kRudpFlagReliable;
+    header.channelId = descriptor.channelId;
+    header.packetType = descriptor.packetType;
+    header.sequence = sequence;
+    header.ack = 0;
+    header.ackBits = 0;
+    return Net::serializeRudpPacket(header, payloadBytes, outPacket);
+}
+
+bool buildRudpUnreliableSnapshotPacket(
+    uint32_t sequence,
+    const std::vector<uint8_t>& payloadBytes,
+    std::vector<uint8_t>& outPacket) {
+    Net::RudpPacketHeader header;
+    header.flags = 0;
+    header.channelId = static_cast<uint8_t>(Net::RudpChannelId::kSnapshot);
+    header.packetType = static_cast<uint16_t>(Net::RudpPacketType::kStateSnapshot);
+    header.sequence = sequence;
+    header.ack = 0;
+    header.ackBits = 0;
+    return Net::serializeRudpPacket(header, payloadBytes, outPacket);
+}
+
+uint32_t elapsedMillisClamped(Util::TimePoint previous, Util::TimePoint current) {
+    if (current <= previous) {
+        return 0;
+    }
+
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(current - previous);
+    if (elapsed.count() <= 0) {
+        return 0;
+    }
+
+    const uint64_t elapsedMs = static_cast<uint64_t>(elapsed.count());
+    if (elapsedMs > std::numeric_limits<uint32_t>::max()) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return static_cast<uint32_t>(elapsedMs);
 }
 
 std::vector<Net::TcpDropEntry> toTcpDropEntries(const std::vector<Game::Drop>& drops) {
@@ -220,6 +287,80 @@ Game::RoomCommandResult roomCommandResultFromOutboundEnvelope(
     result.inventory = envelope.inventory;
     return result;
 }
+
+Net::NetworkEventMask tcpClientInterestMask(bool writable) {
+    Net::NetworkEventMask mask =
+        Net::NetworkEventMask::kReadable |
+        Net::NetworkEventMask::kError |
+        Net::NetworkEventMask::kHangup;
+    if (writable) {
+        mask |= Net::NetworkEventMask::kWritable;
+    }
+    return mask;
+}
+
+#if defined(__linux__)
+timespec toTimespec(std::chrono::milliseconds duration) {
+    const auto nanoseconds =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
+    timespec spec{};
+    spec.tv_sec = static_cast<time_t>(
+        nanoseconds.count() / 1000000000LL);
+    spec.tv_nsec = static_cast<long>(
+        nanoseconds.count() % 1000000000LL);
+    return spec;
+}
+
+bool armPeriodicTimerFd(int timerFd, std::chrono::milliseconds interval) {
+    if (timerFd < 0 || interval.count() <= 0) {
+        return false;
+    }
+
+    itimerspec timerSpec{};
+    timerSpec.it_value = toTimespec(interval);
+    timerSpec.it_interval = toTimespec(interval);
+    return ::timerfd_settime(timerFd, 0, &timerSpec, nullptr) == 0;
+}
+
+bool drainCounterFd(int fd) {
+    uint64_t value = 0;
+    while (true) {
+        const ssize_t received = ::read(fd, &value, sizeof(value));
+        if (received == static_cast<ssize_t>(sizeof(value))) {
+            continue;
+        }
+        if (received < 0 && errno == EINTR) {
+            continue;
+        }
+        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return true;
+        }
+        return false;
+    }
+}
+
+void writeCounterFd(int fd) {
+    if (fd < 0) {
+        return;
+    }
+
+    const uint64_t value = 1;
+    while (true) {
+        const ssize_t sent = ::write(fd, &value, sizeof(value));
+        if (sent == static_cast<ssize_t>(sizeof(value))) {
+            return;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+        }
+        return;
+    }
+}
+
+#endif
 }  // namespace
 
 namespace Core {
@@ -265,6 +406,12 @@ Server::Server(uint16_t port, std::chrono::milliseconds rudpPeerTimeout)
       rudpBindingInputSequenceStaleRejected_(0),
       rudpBindingInputSequenceAmbiguousRejected_(0),
       rudpBindingInputSequenceInvalidSessionRejected_(0),
+      rudpBindingInputNoRoomRejected_(0),
+      rudpBindingMoveAccepted_(0),
+      rudpBindingMoveDispatched_(0),
+      rudpBindingMoveApplyRejected_(0),
+      rudpBindingMoveInvalidReservedFlagsRejected_(0),
+      rudpBindingMoveRateLimitedRejected_(0),
       rudpBindingCountSnapshot_(0),
       rudpReliableEventTracked_(0),
       rudpReliableEventDuplicateSequence_(0),
@@ -280,6 +427,14 @@ Server::Server(uint16_t port, std::chrono::milliseconds rudpPeerTimeout)
       rudpMetaResponseRetryIgnoredAfterCompletion_(0),
       rudpMetaResponseInvalidPayload_(0),
       rudpMetaResponseEnqueued_(0),
+      rudpSnapshotBuilt_(0),
+      rudpSnapshotSent_(0),
+      rudpSnapshotSendErrors_(0),
+      rudpSnapshotSkippedNoBoundEndpoint_(0),
+      rudpSnapshotSerializeFailed_(0),
+      networkEventLoop_(nullptr),
+      nextTcpFdGeneration_(1),
+      linuxWakeupFd_(-1),
       running_(false),
       port_(port) {}
 
@@ -297,6 +452,14 @@ bool Server::start() {
 }
 
 void Server::run() {
+#if defined(__linux__)
+    runLinuxEpollLoop();
+#else
+    runTickLoop();
+#endif
+}
+
+void Server::runTickLoop() {
     while (running_.load()) {
         tickOnce();
         std::this_thread::sleep_for(kLoopSleep);
@@ -306,8 +469,208 @@ void Server::run() {
     udpSocket_.close();
 }
 
+#if defined(__linux__)
+void Server::runLinuxEpollLoop() {
+    Net::EpollEventLoop eventLoop;
+    networkEventLoop_ = &eventLoop;
+
+    const int timerFd = ::timerfd_create(
+        CLOCK_MONOTONIC,
+        TFD_NONBLOCK | TFD_CLOEXEC);
+    const int wakeupFd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (timerFd < 0 || wakeupFd < 0 ||
+        !armPeriodicTimerFd(timerFd, kLoopSleep)) {
+        running_.store(false);
+    }
+    linuxWakeupFd_.store(wakeupFd, std::memory_order_release);
+
+    const Net::NetworkEventLoopStatus listenerStatus = eventLoop.registerFd(
+        Net::NetworkFdToken{listener_.fd(), kTcpListenerGeneration},
+        Net::NetworkEventRole::kTcpListener,
+        tcpClientInterestMask(false));
+    if (listenerStatus != Net::NetworkEventLoopStatus::kOk) {
+        running_.store(false);
+    }
+
+    const Net::NetworkEventLoopStatus udpStatus = eventLoop.registerFd(
+        Net::NetworkFdToken{udpSocket_.fd(), kUdpSocketGeneration},
+        Net::NetworkEventRole::kUdpSocket,
+        Net::NetworkEventMask::kReadable |
+            Net::NetworkEventMask::kError |
+            Net::NetworkEventMask::kHangup);
+    if (udpStatus != Net::NetworkEventLoopStatus::kOk) {
+        running_.store(false);
+    }
+
+    const Net::NetworkEventLoopStatus timerStatus = eventLoop.registerFd(
+        Net::NetworkFdToken{timerFd, kRuntimeTimerGeneration},
+        Net::NetworkEventRole::kTimer,
+        Net::NetworkEventMask::kReadable |
+            Net::NetworkEventMask::kError |
+            Net::NetworkEventMask::kHangup);
+    if (timerStatus != Net::NetworkEventLoopStatus::kOk) {
+        running_.store(false);
+    }
+
+    const Net::NetworkEventLoopStatus wakeupStatus = eventLoop.registerFd(
+        Net::NetworkFdToken{wakeupFd, kRuntimeWakeupGeneration},
+        Net::NetworkEventRole::kWakeup,
+        Net::NetworkEventMask::kReadable |
+            Net::NetworkEventMask::kError |
+            Net::NetworkEventMask::kHangup);
+    if (wakeupStatus != Net::NetworkEventLoopStatus::kOk) {
+        running_.store(false);
+    }
+
+    while (running_.load()) {
+        std::vector<Net::NetworkEvent> events;
+        const Net::NetworkEventLoopWaitStatus waitStatus =
+            eventLoop.wait(kLinuxEpollWaitForever, events);
+        const Util::TimePoint now = Util::now();
+
+        if (waitStatus == Net::NetworkEventLoopWaitStatus::kReady) {
+            processLinuxEpollEvents(events, now);
+        } else if (waitStatus == Net::NetworkEventLoopWaitStatus::kClosed ||
+                   waitStatus == Net::NetworkEventLoopWaitStatus::kBackendError) {
+            running_.store(false);
+        }
+    }
+
+    closeAllConnections();
+    linuxWakeupFd_.store(-1, std::memory_order_release);
+    eventLoop.close();
+    if (timerFd >= 0) {
+        ::close(timerFd);
+    }
+    if (wakeupFd >= 0) {
+        ::close(wakeupFd);
+    }
+    udpSocket_.close();
+    networkEventLoop_ = nullptr;
+}
+
+void Server::processLinuxEpollEvents(
+    const std::vector<Net::NetworkEvent>& events,
+    Util::TimePoint now) {
+    std::vector<int> disconnectedClients;
+    bool roomListChanged = false;
+
+    auto isDisconnectPending = [&disconnectedClients](int clientFd) {
+        return std::find(
+                   disconnectedClients.begin(),
+                   disconnectedClients.end(),
+                   clientFd) != disconnectedClients.end();
+    };
+
+    for (const Net::NetworkEvent& event : events) {
+        if (event.role == Net::NetworkEventRole::kTcpListener) {
+            if (Net::hasAnyNetworkEventMask(
+                    event.readyMask,
+                    Net::NetworkEventMask::kError |
+                        Net::NetworkEventMask::kHangup)) {
+                running_.store(false);
+                continue;
+            }
+            if (Net::hasAnyNetworkEventMask(event.readyMask, Net::NetworkEventMask::kReadable)) {
+                acceptNewClients(now);
+            }
+            continue;
+        }
+
+        if (event.role == Net::NetworkEventRole::kUdpSocket) {
+            if (Net::hasAnyNetworkEventMask(
+                    event.readyMask,
+                    Net::NetworkEventMask::kError |
+                        Net::NetworkEventMask::kHangup)) {
+                running_.store(false);
+                continue;
+            }
+            if (Net::hasAnyNetworkEventMask(event.readyMask, Net::NetworkEventMask::kReadable)) {
+                processRudpSocket(now);
+            }
+            continue;
+        }
+
+        if (event.role == Net::NetworkEventRole::kTimer) {
+            if (Net::hasAnyNetworkEventMask(
+                    event.readyMask,
+                    Net::NetworkEventMask::kError |
+                        Net::NetworkEventMask::kHangup) ||
+                !drainCounterFd(event.token.fd)) {
+                running_.store(false);
+                continue;
+            }
+            if (Net::hasAnyNetworkEventMask(event.readyMask, Net::NetworkEventMask::kReadable)) {
+                processRuntimeTimerMaintenance(now);
+            }
+            continue;
+        }
+
+        if (event.role == Net::NetworkEventRole::kWakeup) {
+            if (Net::hasAnyNetworkEventMask(
+                    event.readyMask,
+                    Net::NetworkEventMask::kError |
+                        Net::NetworkEventMask::kHangup) ||
+                !drainCounterFd(event.token.fd)) {
+                running_.store(false);
+            }
+            continue;
+        }
+
+        if (event.role != Net::NetworkEventRole::kTcpClient) {
+            continue;
+        }
+
+        auto connectionIt = connections_.find(event.token.fd);
+        if (connectionIt == connections_.end() ||
+            connectionIt->second->fdGeneration() != event.token.generation) {
+            continue;
+        }
+
+        ClientConnection& connection = *connectionIt->second;
+        if (Net::hasAnyNetworkEventMask(
+                event.readyMask,
+                Net::NetworkEventMask::kError |
+                    Net::NetworkEventMask::kHangup)) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            continue;
+        }
+
+        if (Net::hasAnyNetworkEventMask(event.readyMask, Net::NetworkEventMask::kReadable)) {
+            processReadableTcpClient(
+                connection,
+                now,
+                disconnectedClients,
+                roomListChanged,
+                true);
+        }
+
+        if (!isDisconnectPending(connection.clientFd()) &&
+            Net::hasAnyNetworkEventMask(event.readyMask, Net::NetworkEventMask::kWritable)) {
+            flushTcpOutbound(connection, disconnectedClients);
+        }
+    }
+
+    bool roomChangedByDisconnect = false;
+    for (int clientFd : disconnectedClients) {
+        roomChangedByDisconnect = disconnectClient(clientFd) || roomChangedByDisconnect;
+    }
+
+    if (!disconnectedClients.empty() || roomListChanged || roomChangedByDisconnect) {
+        broadcastStateSnapshots(
+            !disconnectedClients.empty(),
+            roomListChanged || roomChangedByDisconnect);
+    }
+}
+#endif
+
 void Server::requestStop() {
-    running_.store(false);
+    const bool wasRunning = running_.exchange(false);
+#if defined(__linux__)
+    if (wasRunning) {
+        writeCounterFd(linuxWakeupFd_.load(std::memory_order_acquire));
+    }
+#endif
 }
 
 uint16_t Server::boundPort() const {
@@ -386,6 +749,18 @@ RudpServerBindingStats Server::rudpBindingStats() const {
         rudpBindingInputSequenceAmbiguousRejected_.load(std::memory_order_relaxed);
     stats.inputSequenceInvalidSessionRejected =
         rudpBindingInputSequenceInvalidSessionRejected_.load(std::memory_order_relaxed);
+    stats.inputNoRoomRejected =
+        rudpBindingInputNoRoomRejected_.load(std::memory_order_relaxed);
+    stats.moveAccepted =
+        rudpBindingMoveAccepted_.load(std::memory_order_relaxed);
+    stats.moveDispatched =
+        rudpBindingMoveDispatched_.load(std::memory_order_relaxed);
+    stats.moveApplyRejected =
+        rudpBindingMoveApplyRejected_.load(std::memory_order_relaxed);
+    stats.moveInvalidReservedFlagsRejected =
+        rudpBindingMoveInvalidReservedFlagsRejected_.load(std::memory_order_relaxed);
+    stats.moveRateLimitedRejected =
+        rudpBindingMoveRateLimitedRejected_.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -423,6 +798,18 @@ RudpServerMetaResponseStats Server::rudpMetaResponseStats() const {
     return stats;
 }
 
+RudpServerSnapshotStats Server::rudpSnapshotStats() const {
+    RudpServerSnapshotStats stats;
+    stats.built = rudpSnapshotBuilt_.load(std::memory_order_relaxed);
+    stats.sent = rudpSnapshotSent_.load(std::memory_order_relaxed);
+    stats.sendErrors = rudpSnapshotSendErrors_.load(std::memory_order_relaxed);
+    stats.skippedNoBoundEndpoint =
+        rudpSnapshotSkippedNoBoundEndpoint_.load(std::memory_order_relaxed);
+    stats.serializeFailed =
+        rudpSnapshotSerializeFailed_.load(std::memory_order_relaxed);
+    return stats;
+}
+
 size_t Server::rudpPeerCount() const {
     return rudpPeerCountSnapshot_.load(std::memory_order_relaxed);
 }
@@ -439,15 +826,26 @@ void Server::tickOnce() {
     Util::TimePoint now = Util::now();
     acceptNewClients(now);
     processActiveConnections(now);
+    processRuntimeMaintenance(now);
+}
+
+void Server::processRuntimeMaintenance(Util::TimePoint now) {
     processRudpSocket(now);
+    processRuntimeTimerMaintenance(now);
+}
+
+void Server::processRuntimeTimerMaintenance(Util::TimePoint now) {
     processRudpPeerLifecycle(now);
     processRudpRetransmissions(now);
+    processRudpReliableEventRetransmissions(now);
+    processRudpMovementSnapshots(now);
     sessionManager_.tick(now);
     sessionCountSnapshot_.store(sessionManager_.size(), std::memory_order_relaxed);
 }
 
 void Server::acceptNewClients(Util::TimePoint now) {
     bool membershipChanged = false;
+    std::vector<int> disconnectedClients;
 
     while (true) {
         int clientFd = -1;
@@ -470,83 +868,53 @@ void Server::acceptNewClients(Util::TimePoint now) {
         std::array<uint8_t, Net::kWelcomePacketSize> welcomePacket{};
         session->updateLastHeard(now);
         Net::serializeWelcomePacket(session->sessionId(), welcomePacket);
-        if (!listener_.sendToClient(clientFd, welcomePacket.data(), welcomePacket.size())) {
-            listener_.closeClient(clientFd);
-            sessionManager_.remove(remoteKey);
-            sessionCountSnapshot_.store(sessionManager_.size(), std::memory_order_relaxed);
+
+        auto connection = std::make_unique<ClientConnection>(
+            clientFd,
+            session->sessionId(),
+            remoteKey,
+            now);
+        connection->setFdGeneration(allocateTcpFdGeneration());
+        ClientConnection& storedConnection = *connection;
+        connections_.emplace(clientFd, std::move(connection));
+        activeConnectionCount_.store(connections_.size(), std::memory_order_relaxed);
+        sessionCountSnapshot_.store(sessionManager_.size(), std::memory_order_relaxed);
+
+        if (!registerTcpClientWithEventLoop(storedConnection) ||
+            !sendPacketToClient(
+                clientFd,
+                welcomePacket.data(),
+                welcomePacket.size(),
+                disconnectedClients)) {
+            markClientForDisconnect(disconnectedClients, clientFd);
             continue;
         }
 
-        connections_.emplace(
-            clientFd,
-            std::make_unique<ClientConnection>(clientFd, session->sessionId(), remoteKey, now));
-        activeConnectionCount_.store(connections_.size(), std::memory_order_relaxed);
-        sessionCountSnapshot_.store(sessionManager_.size(), std::memory_order_relaxed);
         membershipChanged = true;
     }
 
-    if (membershipChanged) {
-        broadcastStateSnapshots(true, false);
+    bool roomChangedByDisconnect = false;
+    for (int clientFd : disconnectedClients) {
+        roomChangedByDisconnect = disconnectClient(clientFd) || roomChangedByDisconnect;
+    }
+
+    if (membershipChanged || roomChangedByDisconnect) {
+        sessionCountSnapshot_.store(sessionManager_.size(), std::memory_order_relaxed);
+        broadcastStateSnapshots(true, roomChangedByDisconnect);
     }
 }
 
 void Server::processActiveConnections(Util::TimePoint now) {
-    std::array<uint8_t, kReceiveBufferSize> buffer{};   // 소켓에서 읽은 원시 byte를 담을 임시 버퍼
     std::vector<int> disconnectedClients;
-    std::vector<uint8_t> framedPacket;  // 프레이밍이 끝난 완전한 패킷
-    bool roomListChanged = false;   // 이번 틱 동안 룸 목록이 바뀌었는지(create, join, leave) 기록하는 flag
+    bool roomListChanged = false;
 
     for (const auto& entry : connections_) {
-        ClientConnection& connection = *entry.second;
-        size_t received = 0;
-        Net::ReceiveStatus status = listener_.receiveFromClient(
-            connection.clientFd(),
-            buffer.data(),
-            buffer.size(),
-            received);
-
-        if (status == Net::ReceiveStatus::kWouldBlock) {
-            continue;
-        }
-
-        if (status == Net::ReceiveStatus::kClosed || status == Net::ReceiveStatus::kError) {
-            disconnectedClients.push_back(connection.clientFd());
-            continue;
-        }
-
-        connection.updateLastHeard(now);
-        auto session = sessionManager_.find(connection.remoteKey());
-        if (!session) {
-            markClientForDisconnect(disconnectedClients, connection.clientFd());
-            continue;
-        }
-        session->updateLastHeard(now);
-
-        if (!connection.packetReader().appendBytes(buffer.data(), received)) {
-            markClientForDisconnect(disconnectedClients, connection.clientFd());
-            continue;
-        }
-
-        while (true) {
-            Net::TcpPacketReadResult readResult =
-                connection.packetReader().tryReadPacket(framedPacket);
-            if (readResult == Net::TcpPacketReadResult::kNeedMoreData) {
-                break;
-            }
-
-            if (readResult == Net::TcpPacketReadResult::kInvalidPacket) {
-                markClientForDisconnect(disconnectedClients, connection.clientFd());
-                break;
-            }
-
-            if (!handleRoomPacket(
-                    connection,
-                    framedPacket,
-                    disconnectedClients,
-                    roomListChanged)) {
-                break;
-            }
-        }
+        processReadableTcpClient(
+            *entry.second,
+            now,
+            disconnectedClients,
+            roomListChanged,
+            false);
     }
 
     bool roomChangedByDisconnect = false;
@@ -561,10 +929,78 @@ void Server::processActiveConnections(Util::TimePoint now) {
     }
 }
 
+void Server::processReadableTcpClient(
+    ClientConnection& connection,
+    Util::TimePoint now,
+    std::vector<int>& disconnectedClients,
+    bool& outRoomListChanged,
+    bool drainUntilWouldBlock) {
+    std::array<uint8_t, kReceiveBufferSize> buffer{};
+    std::vector<uint8_t> framedPacket;
+
+    while (true) {
+        size_t received = 0;
+        Net::ReceiveStatus status = listener_.receiveFromClient(
+            connection.clientFd(),
+            buffer.data(),
+            buffer.size(),
+            received);
+
+        if (status == Net::ReceiveStatus::kWouldBlock) {
+            return;
+        }
+
+        if (status == Net::ReceiveStatus::kClosed || status == Net::ReceiveStatus::kError) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return;
+        }
+
+        connection.updateLastHeard(now);
+        auto session = sessionManager_.find(connection.remoteKey());
+        if (!session) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return;
+        }
+        session->updateLastHeard(now);
+
+        if (!connection.packetReader().appendBytes(buffer.data(), received)) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return;
+        }
+
+        while (true) {
+            Net::TcpPacketReadResult readResult =
+                connection.packetReader().tryReadPacket(framedPacket);
+            if (readResult == Net::TcpPacketReadResult::kNeedMoreData) {
+                break;
+            }
+
+            if (readResult == Net::TcpPacketReadResult::kInvalidPacket) {
+                markClientForDisconnect(disconnectedClients, connection.clientFd());
+                return;
+            }
+
+            if (!handleRoomPacket(
+                    connection,
+                    framedPacket,
+                    disconnectedClients,
+                    outRoomListChanged)) {
+                return;
+            }
+        }
+
+        if (!drainUntilWouldBlock) {
+            return;
+        }
+    }
+}
+
 void Server::processRudpSocket(Util::TimePoint now) {
     const Net::RudpSocketDrainSummary summary =
         Net::drainRudpSocket(udpSocket_, rudpPeerRegistry_, now, kRudpMaxPacketsPerTick);
     accumulateRudpDrainStats(summary);
+    processRudpReliableEventAcks(summary.ackOnlyDeliveries);
+    processRudpReliableEventAcks(summary.deliveries);
     processRudpDeliveries(summary.deliveries, now);
 }
 
@@ -574,14 +1010,16 @@ void Server::processRudpDeliveries(
     for (const Net::RudpPacketDelivery& delivery : deliveries) {
         if (delivery.header.packetType != static_cast<uint16_t>(Net::RudpPacketType::kHello)) {
             rudpBindingIgnoredNonHello_.fetch_add(1, std::memory_order_relaxed);
-            processRudpAdapterGate(delivery);
+            processRudpAdapterGate(delivery, now);
             continue;
         }
         processRudpHelloDelivery(delivery, now);
     }
 }
 
-void Server::processRudpAdapterGate(const Net::RudpPacketDelivery& delivery) {
+void Server::processRudpAdapterGate(
+    const Net::RudpPacketDelivery& delivery,
+    Util::TimePoint now) {
     if (delivery.header.packetType !=
         static_cast<uint16_t>(Net::RudpPacketType::kInputCommand)) {
         rudpBindingUnsupportedPacketIgnored_.fetch_add(1, std::memory_order_relaxed);
@@ -617,22 +1055,158 @@ void Server::processRudpAdapterGate(const Net::RudpPacketDelivery& delivery) {
         rudpBindingInputSequenceDuplicateRejected_.fetch_add(
             1,
             std::memory_order_relaxed);
-        break;
+        return;
     case Net::RudpInputCommandSequenceResult::kStale:
         rudpBindingInputSequenceStaleRejected_.fetch_add(
             1,
             std::memory_order_relaxed);
-        break;
+        return;
     case Net::RudpInputCommandSequenceResult::kAmbiguous:
         rudpBindingInputSequenceAmbiguousRejected_.fetch_add(
             1,
             std::memory_order_relaxed);
-        break;
+        return;
     case Net::RudpInputCommandSequenceResult::kInvalidSession:
         rudpBindingInputSequenceInvalidSessionRejected_.fetch_add(
             1,
             std::memory_order_relaxed);
-        break;
+        return;
+    }
+
+    const std::optional<uint32_t> roomId =
+        roomManager_.findRoomIdForSession(*sessionId);
+    if (!roomId.has_value()) {
+        rudpBindingInputNoRoomRejected_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    if (input.op == Net::RudpInputCommandOp::kMove) {
+        const Net::RudpMoveInputGuardResult moveGuardResult =
+            rudpMoveInputGuard_.record(*sessionId, input.move, now);
+        switch (moveGuardResult) {
+        case Net::RudpMoveInputGuardResult::kAccepted:
+            rudpBindingMoveAccepted_.fetch_add(1, std::memory_order_relaxed);
+            dispatchRudpMoveInput(*sessionId, input.move, now);
+            return;
+        case Net::RudpMoveInputGuardResult::kInvalidReservedFlags:
+            rudpBindingMoveInvalidReservedFlagsRejected_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            return;
+        case Net::RudpMoveInputGuardResult::kRateLimited:
+            rudpBindingMoveRateLimitedRejected_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            return;
+        case Net::RudpMoveInputGuardResult::kInvalidSession:
+            rudpBindingInputSequenceInvalidSessionRejected_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            return;
+        }
+    }
+
+    const RudpInputCommandRoomEventTranslateResult translateResult =
+        translateRudpInputCommandToRoomEvent(*sessionId, *roomId, input);
+    if (translateResult.status !=
+            RudpInputCommandRoomEventTranslateStatus::kTranslated ||
+        !translateResult.event.has_value()) {
+        return;
+    }
+
+    dispatchRudpRoomEvent(*translateResult.event, now);
+}
+
+void Server::dispatchRudpMoveInput(
+    uint64_t sessionId,
+    const Net::RudpInputCommandMoveArgs& move,
+    Util::TimePoint now) {
+    auto stateIt = rudpMoveDispatchStateBySession_.find(sessionId);
+    if (stateIt == rudpMoveDispatchStateBySession_.end()) {
+        const Game::MovementCommandResult result =
+            roomManager_.applyMovement(sessionId, move.dirX, move.dirY, 0);
+        if (!result.ok) {
+            rudpBindingMoveApplyRejected_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        rudpMoveDispatchStateBySession_.emplace(
+            sessionId,
+            RudpMoveDispatchState{now, move.dirX, move.dirY});
+        rudpBindingMoveDispatched_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    if (!integrateRudpMoveInput(sessionId, now)) {
+        rudpBindingMoveApplyRejected_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    stateIt = rudpMoveDispatchStateBySession_.find(sessionId);
+    if (stateIt == rudpMoveDispatchStateBySession_.end()) {
+        rudpBindingMoveApplyRejected_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    RudpMoveDispatchState& state = stateIt->second;
+    state.currentDirX = move.dirX;
+    state.currentDirY = move.dirY;
+    rudpBindingMoveDispatched_.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool Server::integrateRudpMoveInput(uint64_t sessionId, Util::TimePoint now) {
+    auto stateIt = rudpMoveDispatchStateBySession_.find(sessionId);
+    if (stateIt == rudpMoveDispatchStateBySession_.end()) {
+        return false;
+    }
+
+    if (!roomManager_.findRoomIdForSession(sessionId).has_value()) {
+        rudpMoveDispatchStateBySession_.erase(stateIt);
+        return false;
+    }
+
+    RudpMoveDispatchState& state = stateIt->second;
+    const uint32_t elapsedMs = elapsedMillisClamped(state.lastIntegratedAt, now);
+    const Game::MovementCommandResult result = roomManager_.applyMovement(
+        sessionId,
+        state.currentDirX,
+        state.currentDirY,
+        elapsedMs);
+    if (!result.ok) {
+        rudpMoveDispatchStateBySession_.erase(sessionId);
+        return false;
+    }
+
+    state.lastIntegratedAt = now;
+    return true;
+}
+
+void Server::integrateRudpMoveInputsForRoom(uint32_t roomId, Util::TimePoint now) {
+    for (auto stateIt = rudpMoveDispatchStateBySession_.begin();
+         stateIt != rudpMoveDispatchStateBySession_.end();) {
+        const uint64_t sessionId = stateIt->first;
+        ++stateIt;
+
+        const std::optional<uint32_t> sessionRoomId =
+            roomManager_.findRoomIdForSession(sessionId);
+        if (!sessionRoomId.has_value()) {
+            rudpMoveDispatchStateBySession_.erase(sessionId);
+            continue;
+        }
+        if (*sessionRoomId == roomId) {
+            integrateRudpMoveInput(sessionId, now);
+        }
+    }
+}
+
+void Server::pruneRudpMoveInputsWithoutRoom() {
+    for (auto stateIt = rudpMoveDispatchStateBySession_.begin();
+         stateIt != rudpMoveDispatchStateBySession_.end();) {
+        if (!roomManager_.findRoomIdForSession(stateIt->first).has_value()) {
+            stateIt = rudpMoveDispatchStateBySession_.erase(stateIt);
+        } else {
+            ++stateIt;
+        }
     }
 }
 
@@ -718,6 +1292,38 @@ RudpServerReliableEventTrackResult Server::trackRudpReliableEventForSession(
     return RudpServerReliableEventTrackResult::kInvalidDescriptor;
 }
 
+RudpServerReliableEventTrackResult Server::trackAndSendRudpReliableEventForSession(
+    uint64_t sessionId,
+    const Net::RudpReliableEventDescriptor& descriptor,
+    uint32_t sequence,
+    const std::vector<uint8_t>& packetBytes,
+    Util::TimePoint now) {
+    if (sessionId == 0) {
+        rudpReliableEventInvalidSession_.fetch_add(1, std::memory_order_relaxed);
+        return RudpServerReliableEventTrackResult::kInvalidSession;
+    }
+
+    const std::optional<Net::UdpEndpoint> endpoint =
+        findBoundRudpEndpointForSession(sessionId);
+    if (!endpoint.has_value()) {
+        return RudpServerReliableEventTrackResult::kNoBoundEndpoint;
+    }
+
+    const RudpServerReliableEventTrackResult trackResult =
+        trackRudpReliableEventForSession(
+            sessionId,
+            descriptor,
+            sequence,
+            packetBytes,
+            now);
+    if (trackResult != RudpServerReliableEventTrackResult::kTracked) {
+        return trackResult;
+    }
+
+    udpSocket_.sendTo(packetBytes.data(), packetBytes.size(), *endpoint);
+    return RudpServerReliableEventTrackResult::kTracked;
+}
+
 void Server::enqueueRudpBattleStartEvent(
     const Game::RoomCommandResult& result,
     Util::TimePoint now) {
@@ -738,11 +1344,25 @@ void Server::enqueueRudpBattleStartEvent(
         static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
 
     for (uint64_t sessionId : result.playerSessionIds) {
-        trackRudpReliableEventForSession(
+        if (!findBoundRudpEndpointForSession(sessionId).has_value()) {
+            continue;
+        }
+
+        const uint32_t sequence = nextRudpOutboundSequenceForSession(sessionId);
+        std::vector<uint8_t> packetBytes;
+        if (!buildRudpReliableEventPacket(
+                descriptor,
+                sequence,
+                payloadBytes,
+                packetBytes)) {
+            continue;
+        }
+
+        trackAndSendRudpReliableEventForSession(
             sessionId,
             descriptor,
-            nextRudpReliableEventSequenceForSession(sessionId),
-            payloadBytes,
+            sequence,
+            packetBytes,
             now);
     }
 }
@@ -766,11 +1386,25 @@ void Server::enqueueRudpMonsterDeathEvent(
         static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
 
     for (uint64_t sessionId : result.playerSessionIds) {
-        trackRudpReliableEventForSession(
+        if (!findBoundRudpEndpointForSession(sessionId).has_value()) {
+            continue;
+        }
+
+        const uint32_t sequence = nextRudpOutboundSequenceForSession(sessionId);
+        std::vector<uint8_t> packetBytes;
+        if (!buildRudpReliableEventPacket(
+                descriptor,
+                sequence,
+                payloadBytes,
+                packetBytes)) {
+            continue;
+        }
+
+        trackAndSendRudpReliableEventForSession(
             sessionId,
             descriptor,
-            nextRudpReliableEventSequenceForSession(sessionId),
-            payloadBytes,
+            sequence,
+            packetBytes,
             now);
     }
 }
@@ -797,11 +1431,25 @@ void Server::enqueueRudpLootResolvedEvent(
         static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
 
     for (uint64_t sessionId : result.playerSessionIds) {
-        trackRudpReliableEventForSession(
+        if (!findBoundRudpEndpointForSession(sessionId).has_value()) {
+            continue;
+        }
+
+        const uint32_t sequence = nextRudpOutboundSequenceForSession(sessionId);
+        std::vector<uint8_t> packetBytes;
+        if (!buildRudpReliableEventPacket(
+                descriptor,
+                sequence,
+                payloadBytes,
+                packetBytes)) {
+            continue;
+        }
+
+        trackAndSendRudpReliableEventForSession(
             sessionId,
             descriptor,
-            nextRudpReliableEventSequenceForSession(sessionId),
-            payloadBytes,
+            sequence,
+            packetBytes,
             now);
     }
 }
@@ -857,12 +1505,23 @@ bool Server::observeRudpMetaResponseForSession(
         static_cast<uint16_t>(Net::RudpPacketType::kMetaResponse),
         static_cast<uint8_t>(Net::RudpChannelId::kControl)};
 
+    const uint32_t sequence = nextRudpOutboundSequenceForSession(sessionId);
+    std::vector<uint8_t> packetBytes;
+    if (!buildRudpReliableEventPacket(
+            descriptor,
+            sequence,
+            payloadBytes,
+            packetBytes)) {
+        rudpMetaResponseInvalidPayload_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
     const RudpServerReliableEventTrackResult trackResult =
         trackRudpReliableEventForSession(
             sessionId,
             descriptor,
-            nextRudpReliableEventSequenceForSession(sessionId),
-            payloadBytes,
+            sequence,
+            packetBytes,
             now);
     if (trackResult != RudpServerReliableEventTrackResult::kTracked) {
         return false;
@@ -872,8 +1531,8 @@ bool Server::observeRudpMetaResponseForSession(
     return true;
 }
 
-uint32_t Server::nextRudpReliableEventSequenceForSession(uint64_t sessionId) {
-    uint32_t& nextSequence = rudpReliableEventNextSequenceBySession_[sessionId];
+uint32_t Server::nextRudpOutboundSequenceForSession(uint64_t sessionId) {
+    uint32_t& nextSequence = rudpOutboundNextSequenceBySession_[sessionId];
     if (nextSequence == 0) {
         nextSequence = 1;
     }
@@ -888,7 +1547,71 @@ uint32_t Server::nextRudpReliableEventSequenceForSession(uint64_t sessionId) {
 
 void Server::clearRudpReliableEventsForSession(uint64_t sessionId) {
     rudpReliableEventQueues_.erase(sessionId);
-    rudpReliableEventNextSequenceBySession_.erase(sessionId);
+    rudpReliableEventPendingCountSnapshot_.store(
+        calculateRudpReliableEventPendingCount(),
+        std::memory_order_relaxed);
+}
+
+void Server::clearRudpOutboundSequenceForSession(uint64_t sessionId) {
+    rudpOutboundNextSequenceBySession_.erase(sessionId);
+}
+
+std::optional<Net::UdpEndpoint> Server::findBoundRudpEndpointForSession(
+    uint64_t sessionId) const {
+    if (sessionId == 0) {
+        return std::nullopt;
+    }
+
+    std::optional<Net::UdpEndpoint> endpoint;
+    rudpPeerRegistry_.forEachPeer(
+        [this, sessionId, &endpoint](
+            const Net::UdpEndpoint& candidate,
+            const Net::RudpPeer&) {
+            if (endpoint.has_value()) {
+                return;
+            }
+
+            const std::optional<uint64_t> boundSessionId =
+                rudpSessionBinder_.findSessionId(candidate);
+            if (boundSessionId.has_value() && *boundSessionId == sessionId) {
+                endpoint = candidate;
+            }
+        });
+    return endpoint;
+}
+
+void Server::processRudpReliableEventAcks(
+    const std::vector<Net::RudpPacketDelivery>& deliveries) {
+    for (const Net::RudpPacketDelivery& delivery : deliveries) {
+        consumeRudpReliableEventAck(
+            delivery.endpoint,
+            delivery.header.ack,
+            delivery.header.ackBits);
+    }
+}
+
+void Server::consumeRudpReliableEventAck(
+    const Net::UdpEndpoint& endpoint,
+    uint32_t ack,
+    uint32_t ackBits) {
+    const std::optional<uint64_t> sessionId =
+        rudpSessionBinder_.findSessionId(endpoint);
+    if (!sessionId.has_value()) {
+        return;
+    }
+
+    auto queueIt = rudpReliableEventQueues_.find(*sessionId);
+    if (queueIt == rudpReliableEventQueues_.end()) {
+        return;
+    }
+
+    if (queueIt->second.consumeAck(ack, ackBits) == 0) {
+        return;
+    }
+
+    if (queueIt->second.pendingCount() == 0) {
+        rudpReliableEventQueues_.erase(queueIt);
+    }
     rudpReliableEventPendingCountSnapshot_.store(
         calculateRudpReliableEventPendingCount(),
         std::memory_order_relaxed);
@@ -948,6 +1671,174 @@ void Server::processRudpRetransmissions(Util::TimePoint now) {
     const Net::RudpRetransmissionFlushSummary summary =
         Net::flushRudpRetransmissions(udpSocket_, rudpPeerRegistry_, now);
     accumulateRudpRetransmissionStats(summary);
+}
+
+void Server::processRudpReliableEventRetransmissions(Util::TimePoint now) {
+    for (auto queueIt = rudpReliableEventQueues_.begin();
+         queueIt != rudpReliableEventQueues_.end();) {
+        const uint64_t sessionId = queueIt->first;
+        Net::RudpReliableEventSendQueue& queue = queueIt->second;
+
+        const std::vector<uint32_t> expiredSequences =
+            queue.expiredSequences(now);
+        for (uint32_t sequence : expiredSequences) {
+            if (queue.remove(sequence)) {
+                rudpRetransmissionExpired_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        const std::optional<Net::UdpEndpoint> endpoint =
+            findBoundRudpEndpointForSession(sessionId);
+        const std::vector<uint32_t> dueSequences =
+            queue.dueForRetransmission(now);
+        for (uint32_t sequence : dueSequences) {
+            rudpRetransmissionDue_.fetch_add(1, std::memory_order_relaxed);
+            const std::vector<uint8_t>* packetBytes = queue.packetBytes(sequence);
+            if (!endpoint.has_value() ||
+                packetBytes == nullptr ||
+                packetBytes->empty()) {
+                rudpRetransmissionSendErrors_.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+                continue;
+            }
+
+            if (!udpSocket_.sendTo(
+                    packetBytes->data(),
+                    packetBytes->size(),
+                    *endpoint)) {
+                rudpRetransmissionSendErrors_.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+                continue;
+            }
+
+            if (!queue.markRetransmitted(sequence, now)) {
+                rudpRetransmissionSendErrors_.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+                continue;
+            }
+
+            rudpRetransmissionResent_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        if (queue.pendingCount() == 0) {
+            queueIt = rudpReliableEventQueues_.erase(queueIt);
+        } else {
+            ++queueIt;
+        }
+    }
+
+    rudpReliableEventPendingCountSnapshot_.store(
+        calculateRudpReliableEventPendingCount(),
+        std::memory_order_relaxed);
+}
+
+void Server::processRudpMovementSnapshots(Util::TimePoint now) {
+    const std::vector<Game::RoomSummary> roomSummaries = roomManager_.roomList();
+    pruneRudpMoveInputsWithoutRoom();
+
+    for (auto stateIt = rudpSnapshotStateByRoom_.begin();
+         stateIt != rudpSnapshotStateByRoom_.end();) {
+        const uint32_t roomId = stateIt->first;
+        const bool roomStillExists = std::any_of(
+            roomSummaries.begin(),
+            roomSummaries.end(),
+            [roomId](const Game::RoomSummary& summary) {
+                return summary.roomId == roomId;
+            });
+        if (!roomStillExists) {
+            stateIt = rudpSnapshotStateByRoom_.erase(stateIt);
+        } else {
+            ++stateIt;
+        }
+    }
+
+    struct SnapshotRecipient {
+        uint64_t sessionId{0};
+        Net::UdpEndpoint endpoint{};
+    };
+
+    for (const Game::RoomSummary& summary : roomSummaries) {
+        const Game::Room* room = roomManager_.findRoom(summary.roomId);
+        if (room == nullptr || room->movementSnapshots().empty()) {
+            continue;
+        }
+
+        const std::vector<Game::MovementSnapshot>& movements =
+            room->movementSnapshots();
+        std::vector<SnapshotRecipient> recipients;
+        recipients.reserve(movements.size());
+        for (const Game::MovementSnapshot& movement : movements) {
+            const std::optional<Net::UdpEndpoint> endpoint =
+                findBoundRudpEndpointForSession(movement.sessionId);
+            if (endpoint.has_value()) {
+                recipients.push_back(SnapshotRecipient{movement.sessionId, *endpoint});
+            }
+        }
+
+        if (recipients.empty()) {
+            rudpSnapshotSkippedNoBoundEndpoint_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+            continue;
+        }
+
+        RudpSnapshotRoomState& state = rudpSnapshotStateByRoom_[summary.roomId];
+        if (state.hasSent && now - state.lastSentAt < kRudpSnapshotInterval) {
+            continue;
+        }
+
+        integrateRudpMoveInputsForRoom(summary.roomId, now);
+        room = roomManager_.findRoom(summary.roomId);
+        if (room == nullptr || room->movementSnapshots().empty()) {
+            continue;
+        }
+        const std::vector<Game::MovementSnapshot>& updatedMovements =
+            room->movementSnapshots();
+
+        Net::RudpStateSnapshotPayload snapshot;
+        snapshot.roomId = room->roomId();
+        snapshot.serverTick = state.serverTick + 1;
+        snapshot.players.reserve(updatedMovements.size());
+        for (const Game::MovementSnapshot& movement : updatedMovements) {
+            snapshot.players.push_back(Net::RudpStateSnapshotPlayer{
+                movement.sessionId,
+                movement.position.x,
+                movement.position.y});
+        }
+
+        std::vector<uint8_t> payloadBytes;
+        if (!Net::serializeRudpStateSnapshotPayload(snapshot, payloadBytes)) {
+            rudpSnapshotSerializeFailed_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        state.serverTick = snapshot.serverTick;
+        state.lastSentAt = now;
+        state.hasSent = true;
+        rudpSnapshotBuilt_.fetch_add(1, std::memory_order_relaxed);
+
+        for (const SnapshotRecipient& recipient : recipients) {
+            const uint32_t sequence =
+                nextRudpOutboundSequenceForSession(recipient.sessionId);
+            std::vector<uint8_t> packetBytes;
+            if (!buildRudpUnreliableSnapshotPacket(
+                    sequence,
+                    payloadBytes,
+                    packetBytes) ||
+                !udpSocket_.sendTo(
+                    packetBytes.data(),
+                    packetBytes.size(),
+                    recipient.endpoint)) {
+                rudpSnapshotSendErrors_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            rudpSnapshotSent_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 void Server::accumulateRudpDrainStats(const Net::RudpSocketDrainSummary& summary) {
@@ -1124,6 +2015,8 @@ bool Server::handleRoomPacket(
                 disconnectedClients);
         }
 
+        rudpMoveDispatchStateBySession_.erase(session->sessionId());
+
         std::array<uint8_t, Net::kRoomIdPacketSize> responsePacket{};
         Net::serializeLeaveRoomResponsePacket(result.room.roomId, responsePacket);
         if (!sendPacketToClient(
@@ -1222,6 +2115,47 @@ bool Server::handleRoomPacket(
             disconnectedClients);
     }
 
+    case Net::TcpPacketType::kSmokeCreateCenterDropRequest: {
+        if (!Net::parseSmokeCreateCenterDropRequestPacket(packet.data(), packet.size(), header)) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return false;
+        }
+
+        const Game::RoomCommandResult result =
+            roomManager_.createCenterDropForSmoke(session->sessionId());
+        if (!result.ok) {
+            return sendTcpError(
+                connection.clientFd(),
+                Net::TcpPacketType::kSmokeCreateCenterDropRequest,
+                toTcpErrorCode(result.error),
+                disconnectedClients);
+        }
+
+        return broadcastDropListSnapshot(result, disconnectedClients);
+    }
+
+    case Net::TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest: {
+        if (!Net::parseSmokePlacePlayersAroundCenterDropRequestPacket(
+                packet.data(),
+                packet.size(),
+                header)) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return false;
+        }
+
+        const Game::SmokePlayerPlacementResult result =
+            roomManager_.placePlayersAroundCenterDropForSmoke(session->sessionId());
+        if (!result.ok) {
+            return sendTcpError(
+                connection.clientFd(),
+                Net::TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest,
+                toTcpErrorCode(result.error),
+                disconnectedClients);
+        }
+
+        return true;
+    }
+
     case Net::TcpPacketType::kFinishSessionRequest: {
         if (!Net::parseFinishSessionRequestPacket(packet.data(), packet.size(), header)) {
             markClientForDisconnect(disconnectedClients, connection.clientFd());
@@ -1281,6 +2215,18 @@ bool Server::dispatchTcpRoomEvent(
     return drainInlineRoomEvents(disconnectedClients);
 }
 
+bool Server::dispatchRudpRoomEvent(
+    const Game::RoomEvent& event,
+    Util::TimePoint now) {
+    const Game::RoomEventDispatcherEnqueueResult enqueueResult =
+        roomEventDispatcher_.enqueue(event);
+    if (enqueueResult.status != Game::RoomEventDispatcherEnqueueStatus::kEnqueued) {
+        return false;
+    }
+
+    return drainInlineRudpRoomEvents(now);
+}
+
 bool Server::drainInlineRoomEvents(std::vector<int>& disconnectedClients) {
     bool allSucceeded = true;
     uint32_t roomId = 0;
@@ -1288,6 +2234,22 @@ bool Server::drainInlineRoomEvents(std::vector<int>& disconnectedClients) {
         Game::RoomEvent event;
         while (roomEventDispatcher_.tryDequeueRoomEvent(roomId, event)) {
             if (!applyInlineRoomEvent(roomId, event, disconnectedClients)) {
+                allSucceeded = false;
+            }
+        }
+        roomEventDispatcher_.completeRoomProcessing(roomId);
+    }
+
+    return allSucceeded;
+}
+
+bool Server::drainInlineRudpRoomEvents(Util::TimePoint now) {
+    bool allSucceeded = true;
+    uint32_t roomId = 0;
+    while (roomEventDispatcher_.tryPopActiveRoom(roomId)) {
+        Game::RoomEvent event;
+        while (roomEventDispatcher_.tryDequeueRoomEvent(roomId, event)) {
+            if (!applyInlineRudpRoomEvent(roomId, event, now)) {
                 allSucceeded = false;
             }
         }
@@ -1332,11 +2294,49 @@ bool Server::applyInlineRoomEvent(
     return flushOutboundQueue(disconnectedClients);
 }
 
+bool Server::applyInlineRudpRoomEvent(
+    uint32_t roomId,
+    const Game::RoomEvent& event,
+    Util::TimePoint now) {
+    Game::RoomActor actor(roomId);
+    const Game::RoomEventApplyResult result = actor.apply(roomManager_, event);
+    roomEventMetrics_.recordProcessed();
+
+    if (result.status == Game::RoomEventApplyStatus::kInvalidEvent ||
+        result.status == Game::RoomEventApplyStatus::kRoomMismatch) {
+        return true;
+    }
+
+    outboundSendQueue_.enqueueFromRoomEventApplyResult(event, result);
+    if (result.status == Game::RoomEventApplyStatus::kApplied &&
+        result.commandResult.battleJustStarted) {
+        const Game::RoomCommandResult spawnResult =
+            roomManager_.spawnMonster(result.commandResult.room.roomId);
+        if (spawnResult.ok && spawnResult.monsterJustSpawned) {
+            outboundSendQueue_.enqueueRoomCommandBroadcasts(spawnResult);
+        }
+    }
+
+    return flushRudpOutboundQueue(now);
+}
+
 bool Server::flushOutboundQueue(std::vector<int>& disconnectedClients) {
     bool allSucceeded = true;
     Game::OutboundEnvelope envelope;
     while (outboundSendQueue_.tryPop(envelope)) {
         if (!flushOutboundEnvelope(envelope, disconnectedClients)) {
+            allSucceeded = false;
+        }
+    }
+
+    return allSucceeded;
+}
+
+bool Server::flushRudpOutboundQueue(Util::TimePoint now) {
+    bool allSucceeded = true;
+    Game::OutboundEnvelope envelope;
+    while (outboundSendQueue_.tryPop(envelope)) {
+        if (!flushRudpOutboundEnvelope(envelope, now)) {
             allSucceeded = false;
         }
     }
@@ -1404,6 +2404,32 @@ bool Server::flushOutboundEnvelope(
     return false;
 }
 
+bool Server::flushRudpOutboundEnvelope(
+    const Game::OutboundEnvelope& envelope,
+    Util::TimePoint now) {
+    const Game::RoomCommandResult result = roomCommandResultFromOutboundEnvelope(envelope);
+    switch (envelope.message) {
+    case Game::OutboundMessageType::kBattleStart:
+        enqueueRudpBattleStartEvent(result, now);
+        return true;
+    case Game::OutboundMessageType::kMonsterDeath:
+        enqueueRudpMonsterDeathEvent(result, now);
+        return true;
+    case Game::OutboundMessageType::kLootResolved:
+        enqueueRudpLootResolvedEvent(result, now);
+        return true;
+    case Game::OutboundMessageType::kError:
+    case Game::OutboundMessageType::kReadyRoomResponse:
+    case Game::OutboundMessageType::kMonsterSpawn:
+    case Game::OutboundMessageType::kDropListSnapshot:
+    case Game::OutboundMessageType::kLootRejected:
+    case Game::OutboundMessageType::kInventorySnapshot:
+        return true;
+    }
+
+    return false;
+}
+
 bool Server::sendTcpError(
     int clientFd,
     Net::TcpPacketType failedType,
@@ -1417,11 +2443,141 @@ bool Server::sendTcpError(
     return sendPacketToClient(clientFd, packet.data(), packet.size(), disconnectedClients);
 }
 
+bool Server::flushTcpOutbound(
+    ClientConnection& connection,
+    std::vector<int>& disconnectedClients) {
+    while (connection.hasPendingOutbound()) {
+        const Net::SendResult result = listener_.sendSomeToClient(
+            connection.clientFd(),
+            connection.pendingOutboundData(),
+            connection.pendingOutboundSize());
+        if (result.status == Net::SendStatus::kSent) {
+            connection.consumeOutboundBytes(result.bytesSent);
+            continue;
+        }
+        if (result.status == Net::SendStatus::kWouldBlock) {
+            if (!setTcpClientWriteInterest(connection, true)) {
+                markClientForDisconnect(disconnectedClients, connection.clientFd());
+                return false;
+            }
+            return true;
+        }
+
+        markClientForDisconnect(disconnectedClients, connection.clientFd());
+        return false;
+    }
+
+    if (!setTcpClientWriteInterest(connection, false)) {
+        markClientForDisconnect(disconnectedClients, connection.clientFd());
+        return false;
+    }
+    return true;
+}
+
+bool Server::sendOrQueueTcpPacket(
+    ClientConnection& connection,
+    const uint8_t* data,
+    size_t size,
+    std::vector<int>& disconnectedClients) {
+    const uint8_t* pendingData = data;
+    size_t pendingSize = size;
+
+    if (!connection.hasPendingOutbound()) {
+        const Net::SendResult result =
+            listener_.sendSomeToClient(connection.clientFd(), data, size);
+        if (result.status == Net::SendStatus::kSent) {
+            if (result.bytesSent >= size) {
+                return true;
+            }
+            pendingData = data + result.bytesSent;
+            pendingSize = size - result.bytesSent;
+        } else if (result.status != Net::SendStatus::kWouldBlock) {
+            markClientForDisconnect(disconnectedClients, connection.clientFd());
+            return false;
+        }
+    }
+
+    if (!connection.enqueueOutbound(
+            pendingData,
+            pendingSize,
+            kTcpOutboundPendingLimit)) {
+        markClientForDisconnect(disconnectedClients, connection.clientFd());
+        return false;
+    }
+
+    if (!setTcpClientWriteInterest(connection, true)) {
+        markClientForDisconnect(disconnectedClients, connection.clientFd());
+        return false;
+    }
+
+    return true;
+}
+
+bool Server::registerTcpClientWithEventLoop(ClientConnection& connection) {
+    if (networkEventLoop_ == nullptr) {
+        return true;
+    }
+
+    const bool writable = connection.hasPendingOutbound();
+    const Net::NetworkEventLoopStatus status = networkEventLoop_->registerFd(
+        Net::NetworkFdToken{connection.clientFd(), connection.fdGeneration()},
+        Net::NetworkEventRole::kTcpClient,
+        tcpClientInterestMask(writable));
+    if (status != Net::NetworkEventLoopStatus::kOk) {
+        return false;
+    }
+
+    connection.setTcpWriteInterestEnabled(writable);
+    return true;
+}
+
+bool Server::setTcpClientWriteInterest(ClientConnection& connection, bool enabled) {
+    if (networkEventLoop_ == nullptr) {
+        connection.setTcpWriteInterestEnabled(false);
+        return true;
+    }
+    if (connection.tcpWriteInterestEnabled() == enabled) {
+        return true;
+    }
+
+    const Net::NetworkEventLoopStatus status = networkEventLoop_->modifyFd(
+        Net::NetworkFdToken{connection.clientFd(), connection.fdGeneration()},
+        tcpClientInterestMask(enabled));
+    if (status != Net::NetworkEventLoopStatus::kOk) {
+        return false;
+    }
+
+    connection.setTcpWriteInterestEnabled(enabled);
+    return true;
+}
+
+uint64_t Server::allocateTcpFdGeneration() {
+    const uint64_t generation = nextTcpFdGeneration_;
+    ++nextTcpFdGeneration_;
+    if (nextTcpFdGeneration_ == 0) {
+        nextTcpFdGeneration_ = 1;
+    }
+    return generation;
+}
+
 bool Server::sendPacketToClient(
     int clientFd,
     const uint8_t* data,
     size_t size,
     std::vector<int>& disconnectedClients) {
+    if (networkEventLoop_ != nullptr) {
+        auto connectionIt = connections_.find(clientFd);
+        if (connectionIt == connections_.end()) {
+            markClientForDisconnect(disconnectedClients, clientFd);
+            return false;
+        }
+        return sendOrQueueTcpPacket(
+            *connectionIt->second,
+            data,
+            size,
+            disconnectedClients);
+    }
+
     if (listener_.sendToClient(clientFd, data, size)) {
         return true;
     }
@@ -1622,20 +2778,21 @@ void Server::broadcastStateSnapshots(bool clientListChanged, bool roomListChange
         std::vector<int> failedClients;
         for (const auto& entry : connections_) {
             if (clientListChanged &&
-                !listener_.sendToClient(
+                !sendPacketToClient(
                     entry.first,
                     clientSnapshotPacket.data(),
-                    clientSnapshotPacket.size())) {
-                failedClients.push_back(entry.first);
+                    clientSnapshotPacket.size(),
+                    failedClients)) {
                 continue;
             }
 
             if (roomListChanged &&
-                !listener_.sendToClient(
+                !sendPacketToClient(
                     entry.first,
                     roomSnapshotPacket.data(),
-                    roomSnapshotPacket.size())) {
-                failedClients.push_back(entry.first);
+                    roomSnapshotPacket.size(),
+                    failedClients)) {
+                continue;
             }
         }
 
@@ -1659,9 +2816,16 @@ bool Server::disconnectClient(int clientFd) {
 
     const uint64_t sessionId = it->second->sessionId();
     const bool roomChanged = roomManager_.leaveRoom(sessionId).ok;
+    if (networkEventLoop_ != nullptr) {
+        networkEventLoop_->unregisterFd(
+            Net::NetworkFdToken{clientFd, it->second->fdGeneration()});
+    }
     rudpSessionBinder_.removeBySessionId(sessionId);
     rudpInputCommandSequenceTracker_.removeSession(sessionId);
+    rudpMoveInputGuard_.removeSession(sessionId);
+    rudpMoveDispatchStateBySession_.erase(sessionId);
     clearRudpReliableEventsForSession(sessionId);
+    clearRudpOutboundSequenceForSession(sessionId);
     rudpBindingCountSnapshot_.store(
         rudpSessionBinder_.size(),
         std::memory_order_relaxed);

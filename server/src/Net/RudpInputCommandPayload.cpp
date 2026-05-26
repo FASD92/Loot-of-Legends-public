@@ -1,6 +1,19 @@
 #include "Net/RudpInputCommandPayload.hpp"
 
 namespace {
+uint16_t readU16BE(const uint8_t* data) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) |
+        static_cast<uint16_t>(data[1]));
+}
+
+int16_t readI16BE(const uint8_t* data) {
+    const uint16_t value = readU16BE(data);
+    if (value <= 0x7FFFU) {
+        return static_cast<int16_t>(value);
+    }
+    return static_cast<int16_t>(static_cast<int32_t>(value) - 0x10000);
+}
+
 uint32_t readU32BE(const uint8_t* data) {
     return (static_cast<uint32_t>(data[0]) << 24) |
         (static_cast<uint32_t>(data[1]) << 16) |
@@ -50,6 +63,16 @@ bool parseRudpInputCommandPayload(
         }
         parsed.op = RudpInputCommandOp::kClickLoot;
         parsed.argValue = readU32BE(data + kRudpInputCommandPrefixSize);
+        break;
+    case static_cast<uint8_t>(RudpInputCommandOp::kMove):
+        if (argLen != 6) {
+            return false;
+        }
+        parsed.op = RudpInputCommandOp::kMove;
+        parsed.argValue = 0;
+        parsed.move.dirX = readI16BE(data + kRudpInputCommandPrefixSize);
+        parsed.move.dirY = readI16BE(data + kRudpInputCommandPrefixSize + 2);
+        parsed.move.inputFlags = readU16BE(data + kRudpInputCommandPrefixSize + 4);
         break;
     default:
         return false;

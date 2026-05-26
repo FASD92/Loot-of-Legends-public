@@ -96,6 +96,10 @@ const char* packetTypeName(Net::TcpPacketType type) {
             return "SettlementResult";
         case Net::TcpPacketType::kMetaResponse:
             return "MetaResponse";
+        case Net::TcpPacketType::kSmokeCreateCenterDropRequest:
+            return "SmokeCreateCenterDropRequest";
+        case Net::TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest:
+            return "SmokePlacePlayersAroundCenterDropRequest";
         case Net::TcpPacketType::kError:
             return "Error";
     }
@@ -627,6 +631,8 @@ bool applyPacketToState(
         case Net::TcpPacketType::kMonsterDeathRequest:
         case Net::TcpPacketType::kClickLootRequest:
         case Net::TcpPacketType::kFinishSessionRequest:
+        case Net::TcpPacketType::kSmokeCreateCenterDropRequest:
+        case Net::TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest:
             outOutput = alias + " ignored outbound packet echo(" + packetTypeName(header.type) + ")";
             return true;
     }

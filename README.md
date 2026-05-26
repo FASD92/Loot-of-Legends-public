@@ -4,7 +4,7 @@
 
 `C++17` · `CMake` · `POSIX/BSD Sockets` · `TCP` · `GoogleTest` · `Server Authoritative` · `Debug CLI`
 
-확장 중: `Custom RUDP` · `Room Actor / WorkerPool` · `Spring Boot Meta Server` · `MySQL / Redis Settlement`
+확장 중: `Custom RUDP Movement` · `Unity Thin Client` · `Linux Epoll Runtime` · `Spring Boot Meta Server`
 
 ---
 
@@ -25,9 +25,10 @@
 
 - 2인 Room 기반 TCP gameplay loop를 구현했습니다.
 - 서버가 Room, Monster, Drop, Loot, Inventory, SettlementResult 상태를 최종 판정합니다.
-- Debug CLI로 Unity 없이 접속, Room 생성, Ready, 몬스터 처치, 루팅 경합, 정산 흐름을 재현할 수 있습니다.
+- Debug CLI와 Unity Thin Client smoke로 접속, Room 생성, Ready, 이동, 몬스터 처치, 루팅 경합, 정산 흐름을 재현할 수 있습니다.
 - 동일 Drop 경합, 중복 클릭, 무게 제한, 반복 `finish_session` 요청을 테스트로 검증합니다.
-- RUDP, Room Actor / WorkerPool, Spring Meta 정산은 후속 확장을 위한 기반 구현과 테스트 세로 슬라이스로 포함되어 있습니다.
+- RUDP movement dispatch, StateSnapshot render, Unity item/loot manual smoke는 확장 검증 단계까지 포함되어 있습니다.
+- Spring Meta 정산과 production stress/soak는 후속 통합 범위로 분리되어 있습니다.
 
 이 프로젝트의 중심은 게임 화면이 아니라 서버 권한 판정 구조입니다. 클라이언트는 요청을 보낼 뿐이고, 실제 상태 전이와 최종 결과는 서버가 결정합니다.
 
@@ -52,6 +53,7 @@
 | Debug CLI 시연 | 서버 상태 전이를 Unity 없이 명령 단위로 재현 | `client/debug_cli/`, `tests/client/DebugCliCommandTests.cpp` |
 | SettlementResult 계약 | C++ 서버에서 정산 payload 생성과 반복 요청 멱등 응답 검증 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
 | TCP packet / session | packet framing, partial read, listener lifecycle, session id 발급 검증 | `tests/core/TcpPacketTests.cpp`, `tests/core/TcpPacketReaderTests.cpp`, `tests/core/SessionManagerTests.cpp` |
+| Unity item/loot smoke | Unity Play Mode에서 server-origin drop source, same-drop loot result, winner inventory, marker hide Full PASS 확인 | `client/unity_thin_client/Assets/Scripts/LootOfLegends/` |
 
 핵심 불변식:
 
@@ -69,9 +71,10 @@
 | 영역 | 현재 단계 | 아직 남은 것 |
 | --- | --- | --- |
 | Spring Meta Server | 별도 모듈에서 정산 API, internal token 검증, MySQL transaction/idempotency 테스트 세로 슬라이스 검증 | C++ 서버의 runtime HTTP 연동 |
-| Custom RUDP | ACK window, retransmission, Hello binding, InputCommand `cmdSeq` gate, Reliable Ordered event queue/payload/duplicate guard 검증 | 실제 UDP datagram 송신, ACK server-loop consume, gameplay transport 전환 |
-| Room Actor / WorkerPool | `RoomEvent`, bounded queue, dispatcher, actor, worker, metrics primitive와 TCP inline actor pump regression 검증 | production `Core::Server` WorkerPool thread 연결 |
-| Unity / Stress | 아직 public repo의 기준 시연 수단은 Debug CLI | Unity Thin Client, 100-client stress/soak test |
+| Custom RUDP | Hello binding, Move InputCommand dispatch, authoritative movement state, StateSnapshot payload/send/render 검증 | broader gameplay transport policy, soak/stress |
+| Room Actor / WorkerPool | `RoomEvent`, bounded queue, dispatcher, actor, worker, metrics primitive와 TCP/RUDP dispatch regression 검증 | production `Core::Server` WorkerPool thread 연결 |
+| Linux epoll runtime | `NetworkEventLoop` abstraction, Linux `EpollEventLoop`, epoll stress target 추가 | cross-platform production hardening |
+| Unity Thin Client | TCP debug session, RUDP Hello/Move, StateSnapshot render, item/loot smoke UI와 manual Full PASS evidence | automated Unity Play Mode smoke, production client UX |
 
 확장 영역은 현재 핵심 TCP gameplay path를 대체하지 않습니다. 먼저 도메인 불변식을 TCP와 테스트로 고정하고, RUDP/Actor/Meta는 통합 경계를 분리해서 확장하고 있습니다.
 
@@ -81,9 +84,9 @@
 
 - TCP gameplay path는 현재 2인 Room 기준입니다.
 - Spring Meta Server는 별도 테스트 세로 슬라이스이며 C++ runtime HTTP 연동은 후속 범위입니다.
-- RUDP는 protocol/unit layer와 Reliable Ordered event queue 중심이며 gameplay transport 전환은 후속 범위입니다.
+- RUDP는 movement dispatch와 StateSnapshot까지 연결됐지만, 전체 gameplay transport 전환과 soak/stress는 후속 범위입니다.
 - WorkerPool은 foundation/regression 단계이며 production thread 연결은 후속 범위입니다.
-- Unity Thin Client와 100-client stress/soak test는 아직 예정입니다.
+- Unity Thin Client는 manual smoke 검증 단계이며, automated Play Mode smoke와 100-client stress/soak test는 아직 예정입니다.
 
 ---
 
@@ -173,7 +176,10 @@ A print_settlement
 | Room / Battle / Loot / Settlement 도메인 | `server/src/Game/RoomManager.cpp` |
 | TCP packet framing | `server/src/Net/TcpPacketReader.cpp`, `server/src/Net/TcpPacket.cpp` |
 | Debug CLI 명령 처리 | `client/debug_cli/DebugCli.cpp`, `client/debug_cli/DebugCliCommand.cpp` |
+| Unity Thin Client smoke | `client/unity_thin_client/Assets/Scripts/LootOfLegends/ThinClientDebugUi.cs` |
 | RUDP protocol 기반 구현 | `server/src/Net/` |
+| RUDP movement dispatch | `server/src/Core/RudpInputCommandRoomEventTranslator.cpp`, `server/src/Net/RudpStateSnapshotPayload.cpp` |
+| Linux epoll runtime | `server/src/Net/NetworkEventLoop.hpp`, `server/src/Platform/Linux/EpollEventLoop.cpp` |
 | Room Actor / WorkerPool 기반 구현 | `server/src/Game/RoomEvent.hpp`, `server/src/Game/RoomActor.cpp`, `server/src/Game/WorkerPool.cpp` |
 | Meta settlement 세로 슬라이스 | `meta-server/src/main/java/com/lol/meta/settlement/` |
 

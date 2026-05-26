@@ -86,6 +86,23 @@ struct RoomCommandResult {
           drops(std::move(dropsIn)) {}
 };
 
+struct MovementCommandResult {
+    bool ok{false};
+    RoomCommandError error{RoomCommandError::kNone};
+    uint32_t roomId{0};
+    uint64_t sessionId{0};
+    MovementPosition previousPosition{};
+    MovementPosition currentPosition{};
+};
+
+struct SmokePlayerPlacementResult {
+    bool ok{false};
+    RoomCommandError error{RoomCommandError::kNone};
+    uint32_t roomId{0};
+    std::vector<uint64_t> playerSessionIds{};
+    std::vector<MovementSnapshot> movementSnapshots{};
+};
+
 enum class SettlementReason : uint16_t {
     kNormal = 0,
     kDisconnect = 1,
@@ -129,7 +146,14 @@ public:
     RoomCommandResult markReady(uint64_t sessionId);
     RoomCommandResult spawnMonster(uint32_t roomId);
     RoomCommandResult defeatMonster(uint64_t sessionId, uint32_t monsterId);
+    RoomCommandResult createCenterDropForSmoke(uint64_t sessionId);
     RoomCommandResult claimLoot(uint64_t sessionId, uint32_t dropId);
+    SmokePlayerPlacementResult placePlayersAroundCenterDropForSmoke(uint64_t sessionId);
+    MovementCommandResult applyMovement(
+        uint64_t sessionId,
+        int16_t dirX,
+        int16_t dirY,
+        uint32_t elapsedMs);
     SettlementCommandResult buildSettlementResult(uint64_t sessionId, uint64_t finishedAtUnixMs);
 
     std::optional<uint32_t> findRoomIdForSession(uint64_t sessionId) const;   // sessionId와 일치하는 세션이 없으면 std::nullopt 반환

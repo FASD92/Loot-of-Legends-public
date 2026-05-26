@@ -493,6 +493,64 @@ TEST(TcpPacketTests, SerializeAndParseFinishSessionRequestPacket) {
     EXPECT_EQ(header.size, Net::kFinishSessionRequestPacketSize);
 }
 
+TEST(TcpPacketTests, SerializeAndParseSmokeCreateCenterDropRequestPacket) {
+    static_assert(
+        static_cast<uint16_t>(Net::TcpPacketType::kSmokeCreateCenterDropRequest) == 0x0116);
+
+    std::array<uint8_t, Net::kSmokeCreateCenterDropRequestPacketSize> packet{};
+    ASSERT_TRUE(Net::serializeSmokeCreateCenterDropRequestPacket(packet));
+
+    Net::TcpPacketHeader header;
+    ASSERT_TRUE(Net::parseSmokeCreateCenterDropRequestPacket(packet.data(), packet.size(), header));
+
+    EXPECT_EQ(header.type, Net::TcpPacketType::kSmokeCreateCenterDropRequest);
+    EXPECT_EQ(header.size, Net::kTcpHeaderSize);
+}
+
+TEST(TcpPacketTests, RejectSmokeCreateCenterDropRequestWithWrongSize) {
+    std::array<uint8_t, Net::kSmokeCreateCenterDropRequestPacketSize> packet{};
+    ASSERT_TRUE(Net::serializeSmokeCreateCenterDropRequestPacket(packet));
+    std::vector<uint8_t> oversized(packet.begin(), packet.end());
+    oversized.push_back(0);
+
+    Net::TcpPacketHeader header;
+    EXPECT_FALSE(Net::parseSmokeCreateCenterDropRequestPacket(
+        oversized.data(),
+        oversized.size(),
+        header));
+}
+
+TEST(TcpPacketTests, SerializeAndParseSmokePlacePlayersAroundCenterDropRequestPacket) {
+    static_assert(
+        static_cast<uint16_t>(Net::TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest) ==
+        0x0117);
+
+    std::array<uint8_t, Net::kSmokePlacePlayersAroundCenterDropRequestPacketSize> packet{};
+    ASSERT_TRUE(Net::serializeSmokePlacePlayersAroundCenterDropRequestPacket(packet));
+
+    Net::TcpPacketHeader header;
+    ASSERT_TRUE(Net::parseSmokePlacePlayersAroundCenterDropRequestPacket(
+        packet.data(),
+        packet.size(),
+        header));
+
+    EXPECT_EQ(header.type, Net::TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest);
+    EXPECT_EQ(header.size, Net::kTcpHeaderSize);
+}
+
+TEST(TcpPacketTests, RejectSmokePlacePlayersAroundCenterDropRequestWithWrongSize) {
+    std::array<uint8_t, Net::kSmokePlacePlayersAroundCenterDropRequestPacketSize> packet{};
+    ASSERT_TRUE(Net::serializeSmokePlacePlayersAroundCenterDropRequestPacket(packet));
+    std::vector<uint8_t> oversized(packet.begin(), packet.end());
+    oversized.push_back(0);
+
+    Net::TcpPacketHeader header;
+    EXPECT_FALSE(Net::parseSmokePlacePlayersAroundCenterDropRequestPacket(
+        oversized.data(),
+        oversized.size(),
+        header));
+}
+
 TEST(TcpPacketTests, SerializeAndParseSettlementResultPacket) {
     Net::TcpSettlementResult settlement;
     settlement.settlementId = "room-42-session-1001-finish-1";

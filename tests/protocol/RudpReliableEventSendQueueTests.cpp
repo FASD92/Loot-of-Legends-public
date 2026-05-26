@@ -263,6 +263,36 @@ TEST(RudpReliableEventSendQueueTests, ConsumeAckRemovesSequenceAndEventMetadata)
         "loot-c"));
 }
 
+TEST(RudpReliableEventSendQueueTests, RemoveDropsPacketBytesAndEventMetadata) {
+    Net::RudpReliableEventSendQueue queue;
+    ASSERT_EQ(
+        queue.track(
+            descriptor(Net::RudpReliableEventKind::kBattleStart, "battle-a"),
+            10,
+            packetBytes(0x10),
+            timeAt(1000)),
+        Net::RudpReliableEventTrackResult::kTracked);
+    ASSERT_EQ(
+        queue.track(
+            descriptor(Net::RudpReliableEventKind::kMonsterDeath, "monster-b"),
+            11,
+            packetBytes(0x11),
+            timeAt(1000)),
+        Net::RudpReliableEventTrackResult::kTracked);
+
+    EXPECT_TRUE(queue.remove(10));
+    EXPECT_FALSE(queue.remove(10));
+    EXPECT_EQ(queue.pendingCount(), 1U);
+    EXPECT_EQ(queue.pendingSequences(), (std::vector<uint32_t>{11}));
+    EXPECT_EQ(queue.packetBytes(10), nullptr);
+    EXPECT_FALSE(queue.containsLogicalEvent(
+        Net::RudpReliableEventKind::kBattleStart,
+        "battle-a"));
+    EXPECT_TRUE(queue.containsLogicalEvent(
+        Net::RudpReliableEventKind::kMonsterDeath,
+        "monster-b"));
+}
+
 TEST(RudpReliableEventSendQueueTests, ConsumeAckBitsRemovesMultipleEventMetadata) {
     Net::RudpReliableEventSendQueue queue;
     ASSERT_EQ(

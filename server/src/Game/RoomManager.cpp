@@ -211,6 +211,42 @@ RoomCommandResult RoomManager::defeatMonster(uint64_t sessionId, uint32_t monste
         room.drops());
 }
 
+RoomCommandResult RoomManager::createCenterDropForSmoke(uint64_t sessionId) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    auto roomIt = rooms_.find(mappingIt->second);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    const uint32_t dropId = nextDropId_;
+    if (!room.createSmokeDrop(dropId, kDefaultDropItemId, kDefaultDropQuantity)) {
+        return RoomCommandResult(false, RoomCommandError::kNotFound, summarizeRoom(room));
+    }
+    ++nextDropId_;
+
+    return RoomCommandResult(
+        true,
+        RoomCommandError::kNone,
+        summarizeRoom(room),
+        room.playerSessionIds(),
+        false,
+        false,
+        false,
+        room.monster(),
+        room.drops());
+}
+
 RoomCommandResult RoomManager::claimLoot(uint64_t sessionId, uint32_t dropId) {
     auto mappingIt = sessionToRoomId_.find(sessionId);
     if (mappingIt == sessionToRoomId_.end()) {
@@ -255,6 +291,79 @@ RoomCommandResult RoomManager::claimLoot(uint64_t sessionId, uint32_t dropId) {
         forgetSettlement(sessionId);
     }
     return result;
+}
+
+SmokePlayerPlacementResult RoomManager::placePlayersAroundCenterDropForSmoke(uint64_t sessionId) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return SmokePlayerPlacementResult{false, RoomCommandError::kNotInRoom};
+    }
+
+    const uint32_t roomId = mappingIt->second;
+    auto roomIt = rooms_.find(roomId);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return SmokePlayerPlacementResult{false, RoomCommandError::kNotFound, roomId};
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return SmokePlayerPlacementResult{false, RoomCommandError::kNotInRoom, roomId};
+    }
+
+    if (!room.battleStarted() || room.drops().size() != 1 || room.drops()[0].claimed) {
+        return SmokePlayerPlacementResult{false, RoomCommandError::kNotFound, roomId};
+    }
+
+    if (!room.placePlayersAroundSmokeCenter()) {
+        return SmokePlayerPlacementResult{false, RoomCommandError::kNotFound, roomId};
+    }
+
+    return SmokePlayerPlacementResult{
+        true,
+        RoomCommandError::kNone,
+        room.roomId(),
+        room.playerSessionIds(),
+        room.movementSnapshots()};
+}
+
+MovementCommandResult RoomManager::applyMovement(
+    uint64_t sessionId,
+    int16_t dirX,
+    int16_t dirY,
+    uint32_t elapsedMs) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return MovementCommandResult{false, RoomCommandError::kNotInRoom, 0, sessionId};
+    }
+
+    const uint32_t roomId = mappingIt->second;
+    auto roomIt = rooms_.find(roomId);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return MovementCommandResult{false, RoomCommandError::kNotFound, roomId, sessionId};
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return MovementCommandResult{false, RoomCommandError::kNotInRoom, roomId, sessionId};
+    }
+
+    const MovementApplyResult applied =
+        room.applyMovement(sessionId, dirX, dirY, elapsedMs);
+    if (applied.status != MovementApplyStatus::kApplied) {
+        return MovementCommandResult{false, RoomCommandError::kNotInRoom, roomId, sessionId};
+    }
+
+    return MovementCommandResult{
+        true,
+        RoomCommandError::kNone,
+        roomId,
+        sessionId,
+        applied.previousPosition,
+        applied.currentPosition};
 }
 
 SettlementCommandResult RoomManager::buildSettlementResult(

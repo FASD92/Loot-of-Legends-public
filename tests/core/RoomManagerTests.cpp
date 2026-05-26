@@ -11,6 +11,27 @@ uint64_t currentUnixTimeMs() {
             std::chrono::system_clock::now().time_since_epoch())
             .count());
 }
+
+void expectPosition(
+    const Game::MovementPosition* position,
+    int32_t expectedX,
+    int32_t expectedY) {
+    ASSERT_NE(position, nullptr);
+    EXPECT_EQ(position->x, expectedX);
+    EXPECT_EQ(position->y, expectedY);
+}
+
+const Game::MovementPosition* findSnapshotPosition(
+    const std::vector<Game::MovementSnapshot>& snapshots,
+    uint64_t sessionId) {
+    for (const Game::MovementSnapshot& snapshot : snapshots) {
+        if (snapshot.sessionId == sessionId) {
+            return &snapshot.position;
+        }
+    }
+
+    return nullptr;
+}
 }  // namespace
 
 TEST(RoomManagerTests, CreateRoomAssignsUniqueRoomIds) {
@@ -42,6 +63,154 @@ TEST(RoomManagerTests, JoinRoomAllowsTwoPlayersAndRejectsThirdPlayer) {
     const Game::Room* room = manager.findRoom(created.room.roomId);
     ASSERT_NE(room, nullptr);
     EXPECT_EQ(room->playerCount(), 2);
+}
+
+TEST(RoomManagerTests, MovementStateUsesDeterministicSlotSpawnAndLeaveCleanup) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    ASSERT_EQ(room->movementSnapshots().size(), 2u);
+    expectPosition(room->findMovementPosition(10), -1000, 0);
+    expectPosition(room->findMovementPosition(20), 1000, 0);
+
+    const Game::RoomCommandResult left = manager.leaveRoom(20);
+    ASSERT_TRUE(left.ok);
+
+    room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    ASSERT_EQ(room->movementSnapshots().size(), 1u);
+    expectPosition(room->findMovementPosition(10), -1000, 0);
+    EXPECT_EQ(room->findMovementPosition(20), nullptr);
+}
+
+TEST(RoomManagerTests, BattleStartResetsMovementPositionsToSlotSpawn) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+
+    ASSERT_TRUE(manager.applyMovement(10, 1000, 0, 1000).ok);
+    ASSERT_TRUE(manager.applyMovement(20, -1000, 0, 500).ok);
+    const Game::Room* movedRoom = manager.findRoom(created.room.roomId);
+    ASSERT_NE(movedRoom, nullptr);
+    expectPosition(movedRoom->findMovementPosition(10), 0, 0);
+    expectPosition(movedRoom->findMovementPosition(20), 500, 0);
+
+    ASSERT_TRUE(manager.markReady(10).ok);
+    const Game::RoomCommandResult started = manager.markReady(20);
+    ASSERT_TRUE(started.ok);
+    ASSERT_TRUE(started.battleJustStarted);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), -1000, 0);
+    expectPosition(room->findMovementPosition(20), 1000, 0);
+}
+
+TEST(RoomManagerTests, ApplyMovementUsesServerSpeedAndElapsedTime) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+
+    const Game::MovementCommandResult moved = manager.applyMovement(10, 1000, 0, 500);
+    ASSERT_TRUE(moved.ok);
+    EXPECT_EQ(moved.roomId, created.room.roomId);
+    EXPECT_EQ(moved.previousPosition.x, -1000);
+    EXPECT_EQ(moved.previousPosition.y, 0);
+    EXPECT_EQ(moved.currentPosition.x, -500);
+    EXPECT_EQ(moved.currentPosition.y, 0);
+
+    const Game::MovementCommandResult noElapsed = manager.applyMovement(10, 1000, 0, 0);
+    ASSERT_TRUE(noElapsed.ok);
+    EXPECT_EQ(noElapsed.previousPosition.x, -500);
+    EXPECT_EQ(noElapsed.currentPosition.x, -500);
+}
+
+TEST(RoomManagerTests, ApplyMovementAcceptsZeroVectorAsStopIntent) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+
+    const Game::MovementCommandResult stopped = manager.applyMovement(10, 0, 0, 1000);
+    ASSERT_TRUE(stopped.ok);
+    EXPECT_EQ(stopped.previousPosition.x, -1000);
+    EXPECT_EQ(stopped.previousPosition.y, 0);
+    EXPECT_EQ(stopped.currentPosition.x, -1000);
+    EXPECT_EQ(stopped.currentPosition.y, 0);
+}
+
+TEST(RoomManagerTests, ApplyMovementNormalizesDirectionWithoutUsingClientMagnitudeAsSpeed) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+
+    const Game::MovementCommandResult axis = manager.applyMovement(10, 32767, 0, 1000);
+    ASSERT_TRUE(axis.ok);
+    EXPECT_EQ(axis.currentPosition.x, 0);
+    EXPECT_EQ(axis.currentPosition.y, 0);
+
+    const Game::MovementCommandResult diagonal =
+        manager.applyMovement(20, 32767, 32767, 1000);
+    ASSERT_TRUE(diagonal.ok);
+    EXPECT_EQ(diagonal.currentPosition.x, 1707);
+    EXPECT_EQ(diagonal.currentPosition.y, 707);
+}
+
+TEST(RoomManagerTests, ApplyMovementClampsToRoomBounds) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+
+    const Game::MovementCommandResult minClamped =
+        manager.applyMovement(10, -1000, 0, 100000);
+    ASSERT_TRUE(minClamped.ok);
+    EXPECT_EQ(minClamped.currentPosition.x, Game::Room::kMovementMinPosition);
+    EXPECT_EQ(minClamped.currentPosition.y, 0);
+
+    const Game::MovementCommandResult maxClamped =
+        manager.applyMovement(10, 1000, 1000, 200000);
+    ASSERT_TRUE(maxClamped.ok);
+    EXPECT_EQ(maxClamped.currentPosition.x, Game::Room::kMovementMaxPosition);
+    EXPECT_EQ(maxClamped.currentPosition.y, Game::Room::kMovementMaxPosition);
+}
+
+TEST(RoomManagerTests, ApplyMovementRejectsSessionOutsideRoomWithoutMutating) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), -1000, 0);
+
+    const Game::MovementCommandResult rejected = manager.applyMovement(999, 1000, 0, 1000);
+    EXPECT_FALSE(rejected.ok);
+    EXPECT_EQ(rejected.error, Game::RoomCommandError::kNotInRoom);
+
+    room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), -1000, 0);
+}
+
+TEST(RoomManagerTests, RoomRejectsUnknownPlayerMovementWithoutMutatingState) {
+    Game::Room room(1);
+    ASSERT_TRUE(room.addPlayer(10));
+
+    const Game::MovementApplyResult rejected = room.applyMovement(20, 1000, 0, 1000);
+    EXPECT_EQ(rejected.status, Game::MovementApplyStatus::kNoPlayer);
+    expectPosition(room.findMovementPosition(10), -1000, 0);
+    EXPECT_EQ(room.findMovementPosition(20), nullptr);
 }
 
 TEST(RoomManagerTests, CreateRoomRejectsSessionAlreadyInRoom) {
@@ -264,6 +433,316 @@ TEST(RoomManagerTests, DefeatMonsterRejectsWrongOrAlreadyDeadMonster) {
     const Game::RoomCommandResult alreadyDead = manager.defeatMonster(20, spawned.monster.monsterId);
     EXPECT_FALSE(alreadyDead.ok);
     EXPECT_EQ(alreadyDead.error, Game::RoomCommandError::kNotFound);
+}
+
+TEST(RoomManagerTests, CreateCenterDropForSmokeCreatesServerAssignedDrop) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+    const Game::RoomCommandResult spawned = manager.spawnMonster(created.room.roomId);
+    ASSERT_TRUE(spawned.ok);
+
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    EXPECT_FALSE(dropped.monsterJustDefeated);
+    EXPECT_FALSE(dropped.lootJustClaimed);
+    EXPECT_FALSE(dropped.lootRejected);
+    EXPECT_EQ(dropped.playerSessionIds, (std::vector<uint64_t>{10, 20}));
+    ASSERT_EQ(dropped.drops.size(), 1u);
+    EXPECT_EQ(dropped.drops[0].dropId, 1u);
+    EXPECT_EQ(dropped.drops[0].itemId, 1001u);
+    EXPECT_EQ(dropped.drops[0].quantity, 1u);
+    EXPECT_FALSE(dropped.drops[0].claimed);
+    EXPECT_EQ(dropped.drops[0].ownerSessionId, 0u);
+    EXPECT_TRUE(dropped.monster.alive);
+    EXPECT_EQ(dropped.monster.monsterId, spawned.monster.monsterId);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_TRUE(room->hasAliveMonster());
+    ASSERT_EQ(room->drops().size(), 1u);
+    EXPECT_EQ(room->drops()[0].dropId, dropped.drops[0].dropId);
+}
+
+TEST(RoomManagerTests, CreateCenterDropForSmokeRejectsSessionOutsideRoomWithoutConsumingDropId) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult rejected = manager.createCenterDropForSmoke(999);
+    EXPECT_FALSE(rejected.ok);
+    EXPECT_EQ(rejected.error, Game::RoomCommandError::kNotInRoom);
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    ASSERT_EQ(dropped.drops.size(), 1u);
+    EXPECT_EQ(dropped.drops[0].dropId, 1u);
+}
+
+TEST(RoomManagerTests, CreateCenterDropForSmokeRejectsBeforeBattleStartWithoutConsumingDropId) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+
+    const Game::RoomCommandResult rejected = manager.createCenterDropForSmoke(10);
+    EXPECT_FALSE(rejected.ok);
+    EXPECT_EQ(rejected.error, Game::RoomCommandError::kNotFound);
+    EXPECT_FALSE(rejected.room.battleStarted);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_TRUE(room->drops().empty());
+
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    ASSERT_EQ(dropped.drops.size(), 1u);
+    EXPECT_EQ(dropped.drops[0].dropId, 1u);
+}
+
+TEST(RoomManagerTests, CreateCenterDropForSmokeRejectsExistingDropWithoutConsumingDropId) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult roomA = manager.createRoom(10);
+    ASSERT_TRUE(roomA.ok);
+    ASSERT_TRUE(manager.joinRoom(20, roomA.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+
+    const Game::RoomCommandResult firstDrop = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(firstDrop.ok);
+    ASSERT_EQ(firstDrop.drops.size(), 1u);
+    EXPECT_EQ(firstDrop.drops[0].dropId, 1u);
+
+    const Game::RoomCommandResult duplicateDrop = manager.createCenterDropForSmoke(20);
+    EXPECT_FALSE(duplicateDrop.ok);
+    EXPECT_EQ(duplicateDrop.error, Game::RoomCommandError::kNotFound);
+
+    const Game::RoomCommandResult roomB = manager.createRoom(30);
+    ASSERT_TRUE(roomB.ok);
+    ASSERT_TRUE(manager.joinRoom(40, roomB.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(30).ok);
+    ASSERT_TRUE(manager.markReady(40).ok);
+
+    const Game::RoomCommandResult secondRoomDrop = manager.createCenterDropForSmoke(30);
+    ASSERT_TRUE(secondRoomDrop.ok);
+    ASSERT_EQ(secondRoomDrop.drops.size(), 1u);
+    EXPECT_EQ(secondRoomDrop.drops[0].dropId, 2u);
+}
+
+TEST(RoomManagerTests, CreateCenterDropForSmokeUsesExistingClaimLootAuthority) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    ASSERT_EQ(dropped.drops.size(), 1u);
+
+    const Game::RoomCommandResult claimed = manager.claimLoot(10, dropped.drops[0].dropId);
+    ASSERT_TRUE(claimed.ok);
+    EXPECT_TRUE(claimed.lootJustClaimed);
+    EXPECT_FALSE(claimed.lootRejected);
+    EXPECT_EQ(claimed.winnerSessionId, 10u);
+    EXPECT_TRUE(claimed.drop.claimed);
+    EXPECT_EQ(claimed.drop.ownerSessionId, 10u);
+    EXPECT_EQ(claimed.inventory.sessionId, 10u);
+    EXPECT_EQ(claimed.inventory.currentWeight, 1u);
+    ASSERT_EQ(claimed.inventory.entries.size(), 1u);
+    EXPECT_EQ(claimed.inventory.entries[0].itemId, 1001u);
+    EXPECT_EQ(claimed.inventory.entries[0].quantity, 1u);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    const Game::InventorySnapshot* loserInventory = room->findInventory(20);
+    ASSERT_NE(loserInventory, nullptr);
+    EXPECT_EQ(loserInventory->currentWeight, 0u);
+    EXPECT_TRUE(loserInventory->entries.empty());
+}
+
+TEST(RoomManagerTests, PlacePlayersAroundCenterDropForSmokePlacesAroundCenterDrop) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+    ASSERT_TRUE(manager.createCenterDropForSmoke(10).ok);
+
+    const Game::SmokePlayerPlacementResult placed =
+        manager.placePlayersAroundCenterDropForSmoke(10);
+    ASSERT_TRUE(placed.ok);
+    EXPECT_EQ(placed.error, Game::RoomCommandError::kNone);
+    EXPECT_EQ(placed.roomId, created.room.roomId);
+    EXPECT_EQ(placed.playerSessionIds, (std::vector<uint64_t>{10, 20}));
+    ASSERT_EQ(placed.movementSnapshots.size(), 2u);
+    expectPosition(findSnapshotPosition(placed.movementSnapshots, 10), -1000, 0);
+    expectPosition(findSnapshotPosition(placed.movementSnapshots, 20), 1000, 0);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), -1000, 0);
+    expectPosition(room->findMovementPosition(20), 1000, 0);
+    ASSERT_EQ(room->drops().size(), 1u);
+    EXPECT_FALSE(room->drops()[0].claimed);
+}
+
+TEST(RoomManagerTests, PlacePlayersAroundCenterDropForSmokeOverwritesMovedPositions) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+    ASSERT_TRUE(manager.createCenterDropForSmoke(10).ok);
+    ASSERT_TRUE(manager.applyMovement(10, 1000, 1000, 1000).ok);
+    ASSERT_TRUE(manager.applyMovement(20, -1000, 1000, 1000).ok);
+
+    const Game::Room* movedRoom = manager.findRoom(created.room.roomId);
+    ASSERT_NE(movedRoom, nullptr);
+    EXPECT_NE(movedRoom->findMovementPosition(10)->x, -1000);
+    EXPECT_NE(movedRoom->findMovementPosition(20)->x, 1000);
+
+    const Game::SmokePlayerPlacementResult placed =
+        manager.placePlayersAroundCenterDropForSmoke(20);
+    ASSERT_TRUE(placed.ok);
+    expectPosition(findSnapshotPosition(placed.movementSnapshots, 10), -1000, 0);
+    expectPosition(findSnapshotPosition(placed.movementSnapshots, 20), 1000, 0);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), -1000, 0);
+    expectPosition(room->findMovementPosition(20), 1000, 0);
+}
+
+TEST(RoomManagerTests, PlacePlayersAroundCenterDropForSmokeRejectsNoRoomWithoutMutating) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+    ASSERT_TRUE(manager.createCenterDropForSmoke(10).ok);
+    ASSERT_TRUE(manager.applyMovement(10, 1000, 0, 1000).ok);
+
+    const Game::SmokePlayerPlacementResult rejected =
+        manager.placePlayersAroundCenterDropForSmoke(999);
+    EXPECT_FALSE(rejected.ok);
+    EXPECT_EQ(rejected.error, Game::RoomCommandError::kNotInRoom);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), 0, 0);
+    expectPosition(room->findMovementPosition(20), 1000, 0);
+}
+
+TEST(RoomManagerTests, PlacePlayersAroundCenterDropForSmokeRejectsBeforeBattleStartWithoutMutating) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.applyMovement(10, 1000, 0, 1000).ok);
+
+    const Game::SmokePlayerPlacementResult rejected =
+        manager.placePlayersAroundCenterDropForSmoke(10);
+    EXPECT_FALSE(rejected.ok);
+    EXPECT_EQ(rejected.error, Game::RoomCommandError::kNotFound);
+    EXPECT_EQ(rejected.roomId, created.room.roomId);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), 0, 0);
+    expectPosition(room->findMovementPosition(20), 1000, 0);
+}
+
+TEST(RoomManagerTests, PlacePlayersAroundCenterDropForSmokeRequiresUnclaimedDrop) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+
+    const Game::SmokePlayerPlacementResult noDrop =
+        manager.placePlayersAroundCenterDropForSmoke(10);
+    EXPECT_FALSE(noDrop.ok);
+    EXPECT_EQ(noDrop.error, Game::RoomCommandError::kNotFound);
+
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    ASSERT_EQ(dropped.drops.size(), 1u);
+    ASSERT_TRUE(manager.claimLoot(10, dropped.drops[0].dropId).ok);
+    ASSERT_TRUE(manager.applyMovement(10, 1000, 0, 1000).ok);
+
+    const Game::SmokePlayerPlacementResult claimedDrop =
+        manager.placePlayersAroundCenterDropForSmoke(20);
+    EXPECT_FALSE(claimedDrop.ok);
+    EXPECT_EQ(claimedDrop.error, Game::RoomCommandError::kNotFound);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    expectPosition(room->findMovementPosition(10), 0, 0);
+    expectPosition(room->findMovementPosition(20), 1000, 0);
+    ASSERT_EQ(room->drops().size(), 1u);
+    EXPECT_TRUE(room->drops()[0].claimed);
+    EXPECT_EQ(room->drops()[0].ownerSessionId, 10u);
+}
+
+TEST(RoomManagerTests, PlacePlayersAroundCenterDropForSmokeDoesNotChangeLootOrMonsterState) {
+    Game::RoomManager manager;
+
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    ASSERT_TRUE(manager.markReady(10).ok);
+    ASSERT_TRUE(manager.markReady(20).ok);
+    const Game::RoomCommandResult spawned = manager.spawnMonster(created.room.roomId);
+    ASSERT_TRUE(spawned.ok);
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+    ASSERT_EQ(dropped.drops.size(), 1u);
+
+    const Game::SmokePlayerPlacementResult placed =
+        manager.placePlayersAroundCenterDropForSmoke(10);
+    ASSERT_TRUE(placed.ok);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_TRUE(room->hasAliveMonster());
+    EXPECT_EQ(room->monster().monsterId, spawned.monster.monsterId);
+    ASSERT_EQ(room->drops().size(), 1u);
+    EXPECT_EQ(room->drops()[0].dropId, dropped.drops[0].dropId);
+    EXPECT_FALSE(room->drops()[0].claimed);
+    EXPECT_EQ(room->drops()[0].ownerSessionId, 0u);
+
+    const Game::InventorySnapshot* inventoryA = room->findInventory(10);
+    ASSERT_NE(inventoryA, nullptr);
+    EXPECT_EQ(inventoryA->currentWeight, 0u);
+    EXPECT_TRUE(inventoryA->entries.empty());
+    const Game::InventorySnapshot* inventoryB = room->findInventory(20);
+    ASSERT_NE(inventoryB, nullptr);
+    EXPECT_EQ(inventoryB->currentWeight, 0u);
+    EXPECT_TRUE(inventoryB->entries.empty());
 }
 
 TEST(RoomManagerTests, RoomRejectsDefeatMonsterWithZeroQuantityDrop) {

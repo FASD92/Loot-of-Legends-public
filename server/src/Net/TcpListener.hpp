@@ -25,6 +25,18 @@ enum class ReceiveStatus {
     kError,
 };
 
+enum class SendStatus {
+    kSent,
+    kWouldBlock,
+    kClosed,
+    kError,
+};
+
+struct SendResult {
+    SendStatus status{SendStatus::kError};
+    size_t bytesSent{0};
+};
+
 class TcpListener {
 public:
     TcpListener();
@@ -39,6 +51,7 @@ public:
         uint8_t* buffer,
         size_t bufferSize,
         size_t& outReceived);
+    SendResult sendSomeToClient(int clientFd, const uint8_t* data, size_t size);
     bool sendToClient(int clientFd, const uint8_t* data, size_t size);
     void closeClient(int clientFd);
 

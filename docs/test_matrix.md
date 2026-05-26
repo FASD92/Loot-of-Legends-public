@@ -38,6 +38,9 @@
 | receive pipeline / socket drain | `tests/protocol/RudpReceivePipelineTests.cpp`, `tests/protocol/RudpSocketDrainTests.cpp` |
 | Hello session binding | `tests/protocol/RudpHelloPayloadTests.cpp`, `tests/protocol/RudpSessionBinderTests.cpp` |
 | InputCommand payload와 `cmdSeq` gate | `tests/protocol/RudpInputCommandPayloadTests.cpp`, `tests/protocol/RudpInputCommandSequenceTrackerTests.cpp` |
+| Move InputCommand guard | `tests/protocol/RudpMoveInputGuardTests.cpp` |
+| RUDP `InputCommand -> RoomEvent` translation | `tests/core/RudpInputCommandRoomEventTranslatorTests.cpp` |
+| StateSnapshot payload | `tests/protocol/RudpStateSnapshotPayloadTests.cpp` |
 | Reliable Ordered event payload | `tests/protocol/RudpBattleStartPayloadTests.cpp`, `tests/protocol/RudpGameEventPayloadTests.cpp`, `tests/protocol/RudpMetaResponsePayloadTests.cpp` |
 | event idempotency / duplicate guard | `tests/protocol/RudpGameplayEventIdempotencyTrackerTests.cpp`, `tests/protocol/RudpMetaResponseIdempotencyTrackerTests.cpp`, `tests/protocol/RudpReliableEventDeliveryGuardTests.cpp` |
 | event pending queue | `tests/protocol/RudpReliableEventSendQueueTests.cpp` |
@@ -56,6 +59,25 @@
 | shutdown drain과 duplicate 방지 | `tests/core/WorkerPoolTests.cpp` |
 | queue / worker metric baseline | `tests/core/RoomEventMetricsTests.cpp`, `tests/core/WorkerPoolTests.cpp` |
 | TCP inline actor pump regression | `tests/core/ServerRoomIntegrationTests.cpp`, `tests/core/ServerIntegrationTests.cpp` |
+| RUDP movement dispatch regression | `tests/core/RudpInputCommandRoomEventTranslatorTests.cpp` |
+
+## Runtime / platform
+
+| 영역 | 대표 테스트 |
+| --- | --- |
+| `NetworkEventLoop` contract | `tests/core/NetworkEventLoopTests.cpp` |
+| Linux epoll readiness | `tests/core/EpollEventLoopTests.cpp` |
+| client connection send/close edge | `tests/core/ClientConnectionTests.cpp` |
+| Linux epoll runtime stress target | `tests/stress/EpollRuntimeStress.cpp` |
+
+## Unity Thin Client smoke
+
+| 영역 | 대표 파일 |
+| --- | --- |
+| TCP debug session / packet codec | `client/unity_thin_client/Assets/Scripts/LootOfLegends/TcpDebugSession.cs`, `client/unity_thin_client/Assets/Scripts/LootOfLegends/TcpPacketCodec.cs` |
+| RUDP Hello / Move / StateSnapshot codec | `client/unity_thin_client/Assets/Scripts/LootOfLegends/RudpHelloClient.cs`, `client/unity_thin_client/Assets/Scripts/LootOfLegends/RudpPacketCodec.cs` |
+| Room, movement, item/loot smoke UI | `client/unity_thin_client/Assets/Scripts/LootOfLegends/ThinClientDebugUi.cs` |
+| manual smoke evidence 기준 | Unity Play Mode `Connect A/B -> Create/Join -> RUDP Hello/Ready -> Drop Center Item -> Place A/B Around -> Loot A/B Simul` |
 
 ## Meta settlement
 

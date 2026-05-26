@@ -21,6 +21,7 @@ struct RudpSocketDrainSummary {
     bool stoppedByWouldBlock{false};
     bool stoppedByMaxPackets{false};
     bool stoppedBySocketError{false};
+    std::vector<RudpPacketDelivery> ackOnlyDeliveries;
     std::vector<RudpPacketDelivery> deliveries;
 };
 

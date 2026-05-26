@@ -101,6 +101,9 @@ void mergeSummary(
     for (auto& delivery : source.deliveries) {
         target.deliveries.push_back(std::move(delivery));
     }
+    for (auto& delivery : source.ackOnlyDeliveries) {
+        target.ackOnlyDeliveries.push_back(std::move(delivery));
+    }
 }
 
 Net::RudpSocketDrainSummary drainWithWaitForActivity(
@@ -255,6 +258,9 @@ TEST(RudpSocketDrainTests, NonDeliveryDatagramsAreCountedWithoutDelivery) {
     EXPECT_EQ(summary.malformed, 1U);
     EXPECT_EQ(summary.duplicate, 1U);
     EXPECT_EQ(summary.ackOnly, 1U);
+    ASSERT_EQ(summary.ackOnlyDeliveries.size(), 1U);
+    EXPECT_EQ(summary.ackOnlyDeliveries[0].header.ack, 50U);
+    EXPECT_TRUE(summary.ackOnlyDeliveries[0].payload.empty());
     EXPECT_FALSE(peer->reliableSendQueue().contains(50));
     EXPECT_EQ(registry.size(), 1U);
 }

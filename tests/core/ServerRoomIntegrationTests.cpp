@@ -403,6 +403,9 @@ bool sendFinishSessionRequestPacket(int fd) {
     return sendAll(fd, packet.data(), packet.size());
 }
 
+constexpr std::chrono::milliseconds kIntegrationReceiveTimeout(1000);
+constexpr std::chrono::milliseconds kIntegrationAcceptWaitTimeout(1000);
+
 bool setReceiveTimeout(int fd, std::chrono::milliseconds timeout) {
     const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(timeout);
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(timeout - seconds);
@@ -440,6 +443,26 @@ struct RunningServer {
     std::thread thread;
 };
 
+::testing::AssertionResult waitForAcceptedConnections(
+    const RunningServer& runningServer,
+    size_t expectedCount,
+    const char* clientLabel) {
+    if (waitUntil(
+            [&runningServer, expectedCount]() {
+                return runningServer.server.activeConnectionCount() >= expectedCount;
+            },
+            kIntegrationAcceptWaitTimeout)) {
+        return ::testing::AssertionSuccess();
+    }
+
+    return ::testing::AssertionFailure()
+           << "client " << clientLabel
+           << " connected but server accepted "
+           << runningServer.server.activeConnectionCount()
+           << "/" << expectedCount
+           << " connections before welcome";
+}
+
 struct SpawnedBattleClients {
     int clientA{-1};
     int clientB{-1};
@@ -452,13 +475,23 @@ struct SpawnedBattleClients {
 };
 
 ::testing::AssertionResult prepareTwoPlayerBattleWithMonster(
-    uint16_t port,
+    RunningServer& runningServer,
     SpawnedBattleClients& out) {
+    const uint16_t port = runningServer.server.boundPort();
+    if (port == 0) {
+        return ::testing::AssertionFailure() << "server TCP port is not bound";
+    }
+
     out.clientA = connectToServer(port);
     if (out.clientA < 0) {
         return ::testing::AssertionFailure() << "failed to connect client A";
     }
-    if (!setReceiveTimeout(out.clientA, std::chrono::milliseconds(500))) {
+    const ::testing::AssertionResult acceptedA =
+        waitForAcceptedConnections(runningServer, 1u, "A");
+    if (!acceptedA) {
+        return acceptedA;
+    }
+    if (!setReceiveTimeout(out.clientA, kIntegrationReceiveTimeout)) {
         return ::testing::AssertionFailure() << "failed to set receive timeout for client A";
     }
     if (!recvWelcomePacket(out.clientA, out.sessionA)) {
@@ -474,7 +507,12 @@ struct SpawnedBattleClients {
     if (out.clientB < 0) {
         return ::testing::AssertionFailure() << "failed to connect client B";
     }
-    if (!setReceiveTimeout(out.clientB, std::chrono::milliseconds(500))) {
+    const ::testing::AssertionResult acceptedB =
+        waitForAcceptedConnections(runningServer, 2u, "B");
+    if (!acceptedB) {
+        return acceptedB;
+    }
+    if (!setReceiveTimeout(out.clientB, kIntegrationReceiveTimeout)) {
         return ::testing::AssertionFailure() << "failed to set receive timeout for client B";
     }
     if (!recvWelcomePacket(out.clientB, out.sessionB)) {
@@ -1144,7 +1182,7 @@ TEST(ServerRoomIntegrationTests, ReproducesWeek4MonsterDropScenario) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     ASSERT_TRUE(sendMonsterDeathRequestPacket(battle.clientA, battle.monsterId));
 
@@ -1176,6 +1214,12 @@ TEST(ServerRoomIntegrationTests, ReproducesWeek4MonsterDropScenario) {
     EXPECT_EQ(dropsB[0].itemId, dropsA[0].itemId);
     EXPECT_EQ(dropsB[0].quantity, dropsA[0].quantity);
 
+    ASSERT_TRUE(setReceiveTimeout(battle.clientA, std::chrono::milliseconds(50)));
+    ASSERT_TRUE(setReceiveTimeout(battle.clientB, std::chrono::milliseconds(50)));
+    std::vector<uint8_t> unexpectedPacket;
+    EXPECT_FALSE(recvPacket(battle.clientA, unexpectedPacket));
+    EXPECT_FALSE(recvPacket(battle.clientB, unexpectedPacket));
+
     ::close(battle.clientB);
     ::close(battle.clientA);
     EXPECT_TRUE(waitUntil(
@@ -1195,7 +1239,7 @@ TEST(ServerRoomIntegrationTests, ReproducesWeek5ClickLootScenario) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     uint32_t dropId = 0;
     uint32_t itemId = 0;
@@ -1295,7 +1339,7 @@ TEST(ServerRoomIntegrationTests, FinishSessionReturnsIdempotentSettlementResult)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     uint32_t dropId = 0;
     uint32_t itemId = 0;
@@ -1607,7 +1651,7 @@ TEST(ServerRoomIntegrationTests, RejectsZeroMonsterDeathRequestInsideRoom) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     ASSERT_TRUE(sendMonsterDeathRequestPacket(battle.clientA, 0));
     Net::TcpPacketType failedType = Net::TcpPacketType::kWelcome;
@@ -1639,7 +1683,7 @@ TEST(ServerRoomIntegrationTests, RejectsZeroClickLootRequestInsideRoomWithoutCon
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     uint32_t dropId = 0;
     uint32_t itemId = 0;
@@ -1725,7 +1769,7 @@ TEST(ServerRoomIntegrationTests, ResetsLootStateWhenPlayerLeavesBeforeClick) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     uint32_t dropId = 0;
     uint32_t itemId = 0;
@@ -1872,7 +1916,7 @@ TEST(ServerRoomIntegrationTests, RejectsWrongAndAlreadyDeadMonsterDeathRequests)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     ASSERT_TRUE(sendMonsterDeathRequestPacket(battle.clientA, battle.monsterId + 1));
     Net::TcpPacketType failedType = Net::TcpPacketType::kWelcome;
@@ -1928,7 +1972,7 @@ TEST(ServerRoomIntegrationTests, ResetsMonsterStateWhenPlayerLeavesBeforeDeath) 
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     SpawnedBattleClients battle;
-    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(port, battle));
+    ASSERT_TRUE(prepareTwoPlayerBattleWithMonster(runningServer, battle));
 
     ASSERT_TRUE(sendLeaveRoomRequestPacket(battle.clientB));
     uint32_t leftRoomId = 0;

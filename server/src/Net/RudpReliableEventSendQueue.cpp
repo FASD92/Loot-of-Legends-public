@@ -70,6 +70,22 @@ size_t RudpReliableEventSendQueue::consumeAck(uint32_t ack, uint32_t ackBits) {
     return consumed;
 }
 
+bool RudpReliableEventSendQueue::remove(uint32_t sequence) {
+    if (!reliableQueue_.remove(sequence)) {
+        return false;
+    }
+
+    pendingEntries_.erase(
+        std::remove_if(
+            pendingEntries_.begin(),
+            pendingEntries_.end(),
+            [sequence](const RudpReliableEventPendingEntry& entry) {
+                return entry.sequence == sequence;
+            }),
+        pendingEntries_.end());
+    return true;
+}
+
 std::vector<uint32_t> RudpReliableEventSendQueue::dueForRetransmission(
     TimePoint now) const {
     return reliableQueue_.dueForRetransmission(now);

@@ -1,12 +1,34 @@
 # ===== macOS =====
 .DS_Store
 Icon?
+Icon?.meta
 
 # ===== Logs =====
 *.log
 
 # IDE
 .idea/
+
+# ===== Unity client generated artifacts =====
+client/unity_thin_client/[Ll]ibrary/
+client/unity_thin_client/[Tt]emp/
+client/unity_thin_client/[Oo]bj/
+client/unity_thin_client/[Bb]uild/
+client/unity_thin_client/[Bb]uilds/
+client/unity_thin_client/[Ll]ogs/
+client/unity_thin_client/[Uu]ser[Ss]ettings/
+client/unity_thin_client/MemoryCaptures/
+client/unity_thin_client/Recordings/
+client/unity_thin_client/.vs/
+client/unity_thin_client/.vscode/
+client/unity_thin_client/*.csproj
+client/unity_thin_client/*.sln
+client/unity_thin_client/*.slnx
+client/unity_thin_client/*.suo
+client/unity_thin_client/*.user
+client/unity_thin_client/*.userprefs
+client/unity_thin_client/*.pidb
+client/unity_thin_client/*.booproj
 
 # Public repository excludes
 docs/*
@@ -19,6 +41,7 @@ AGENTS.md
 
 # ===== CMake / Build artifacts =====
 build/
+build-linux-epoll/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt

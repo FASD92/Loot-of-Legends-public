@@ -45,6 +45,8 @@ constexpr size_t kLootResolvedPacketSize =
 constexpr size_t kLootRejectedPacketSize =
     kTcpHeaderSize + kRoomIdFieldSize + kDropIdFieldSize + kLootRejectReasonFieldSize;
 constexpr size_t kFinishSessionRequestPacketSize = kTcpHeaderSize;
+constexpr size_t kSmokeCreateCenterDropRequestPacketSize = kTcpHeaderSize;
+constexpr size_t kSmokePlacePlayersAroundCenterDropRequestPacketSize = kTcpHeaderSize;
 constexpr size_t kSettlementIdLengthFieldSize = 2;
 constexpr size_t kSettlementIdMaxLength = 64;
 constexpr size_t kTimestampFieldSize = 8;
@@ -90,6 +92,8 @@ enum class TcpPacketType : uint16_t {
     kFinishSessionRequest = 0x0113,
     kSettlementResult = 0x0114,
     kMetaResponse = 0x0115,
+    kSmokeCreateCenterDropRequest = 0x0116,
+    kSmokePlacePlayersAroundCenterDropRequest = 0x0117,
     kError = 0x01FF,
 };
 
@@ -252,6 +256,10 @@ bool serializeInventorySnapshotPacket(
     const std::vector<TcpInventoryEntry>& entries,
     std::vector<uint8_t>& outPacket);
 bool serializeFinishSessionRequestPacket(std::array<uint8_t, kFinishSessionRequestPacketSize>& outPacket);
+bool serializeSmokeCreateCenterDropRequestPacket(
+    std::array<uint8_t, kSmokeCreateCenterDropRequestPacketSize>& outPacket);
+bool serializeSmokePlacePlayersAroundCenterDropRequestPacket(
+    std::array<uint8_t, kSmokePlacePlayersAroundCenterDropRequestPacketSize>& outPacket);
 size_t settlementResultPacketSize(size_t settlementIdLength, size_t inventoryDeltaCount);
 bool serializeSettlementResultPacket(
     const TcpSettlementResult& settlement,
@@ -375,6 +383,14 @@ bool parseInventorySnapshotPacket(
     uint16_t& outMaxWeight,
     std::vector<TcpInventoryEntry>& outEntries);
 bool parseFinishSessionRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
+bool parseSmokeCreateCenterDropRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader);
+bool parseSmokePlacePlayersAroundCenterDropRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader);
 bool parseSettlementResultPacket(
     const uint8_t* data,
     size_t size,

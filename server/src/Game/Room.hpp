@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -32,6 +33,28 @@ struct InventorySnapshot {
     std::vector<InventoryEntry> entries{};
 };
 
+struct MovementPosition {
+    int32_t x{0};
+    int32_t y{0};
+};
+
+struct MovementSnapshot {
+    uint64_t sessionId{0};
+    MovementPosition position{};
+};
+
+enum class MovementApplyStatus : uint16_t {
+    kApplied = 0,
+    kNoPlayer = 1,
+};
+
+struct MovementApplyResult {
+    MovementApplyStatus status{MovementApplyStatus::kNoPlayer};
+    uint64_t sessionId{0};
+    MovementPosition previousPosition{};
+    MovementPosition currentPosition{};
+};
+
 enum class LootRejectReason : uint16_t {
     kNone = 0,
     kAlreadyClaimed = 1,
@@ -52,6 +75,10 @@ class Room {
 public:
     static constexpr uint16_t kDefaultMaxPlayers = 2;
     static constexpr uint16_t kDefaultMaxInventoryWeight = 10;
+    static constexpr int32_t kMovementScale = 1000;
+    static constexpr int32_t kMovementMinPosition = -50 * kMovementScale;
+    static constexpr int32_t kMovementMaxPosition = 50 * kMovementScale;
+    static constexpr int32_t kMovementSpeedPerSecond = kMovementScale;
 
     explicit Room(
         uint32_t roomId,
@@ -75,17 +102,30 @@ public:
     bool tryStartBattle();
     bool spawnMonster(uint32_t monsterId, uint32_t monsterTypeId, uint16_t maxHp);
     bool defeatMonster(uint32_t monsterId, uint32_t dropId, uint32_t itemId, uint16_t quantity);
+    bool createSmokeDrop(uint32_t dropId, uint32_t itemId, uint16_t quantity);
     LootClaimResult claimLoot(uint64_t sessionId, uint32_t dropId);
+    bool placePlayersAroundSmokeCenter();
+    MovementApplyResult applyMovement(
+        uint64_t sessionId,
+        int16_t dirX,
+        int16_t dirY,
+        uint32_t elapsedMs);
 
     const std::vector<uint64_t>& playerSessionIds() const;
     const Monster& monster() const;
     const std::vector<Drop>& drops() const;
     const InventorySnapshot* findInventory(uint64_t sessionId) const;
+    const MovementPosition* findMovementPosition(uint64_t sessionId) const;
+    const std::vector<MovementSnapshot>& movementSnapshots() const;
 
 private:
     InventorySnapshot* findMutableInventory(uint64_t sessionId);
+    MovementSnapshot* findMutableMovementSnapshot(uint64_t sessionId);
+    void resetMovementPositions();
     void resetBattleState();
     void resetGameState();
+    static MovementPosition spawnPositionForSlot(std::size_t slotIndex);
+    static int32_t clampMovementPosition(int64_t value);
 
     uint32_t roomId_;
     uint16_t maxPlayers_;
@@ -93,6 +133,7 @@ private:
     std::vector<uint64_t> playerSessionIds_;
     std::vector<uint64_t> readySessionIds_;
     std::vector<InventorySnapshot> inventories_;
+    std::vector<MovementSnapshot> movementSnapshots_;
     Monster monster_{};
     std::vector<Drop> drops_;
     bool battleStarted_{false};

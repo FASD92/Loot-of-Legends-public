@@ -8,6 +8,8 @@ add_library(
   lol_server_core
   src/Core/ClientConnection.cpp
   src/Core/ClientConnection.hpp
+  src/Core/RudpInputCommandRoomEventTranslator.cpp
+  src/Core/RudpInputCommandRoomEventTranslator.hpp
   src/Core/Server.cpp
   src/Core/Server.hpp
   src/Core/Session.cpp
@@ -50,6 +52,8 @@ add_library(
   src/Net/RudpMetaResponseIdempotencyTracker.hpp
   src/Net/RudpMetaResponsePayload.cpp
   src/Net/RudpMetaResponsePayload.hpp
+  src/Net/RudpMoveInputGuard.cpp
+  src/Net/RudpMoveInputGuard.hpp
   src/Net/RudpPacket.cpp
   src/Net/RudpPacket.hpp
   src/Net/RudpPeer.cpp
@@ -70,6 +74,9 @@ add_library(
   src/Net/RudpSessionBinder.hpp
   src/Net/RudpSocketDrain.cpp
   src/Net/RudpSocketDrain.hpp
+  src/Net/RudpStateSnapshotPayload.cpp
+  src/Net/RudpStateSnapshotPayload.hpp
+  src/Net/NetworkEventLoop.hpp
   src/Net/TcpPacket.cpp
   src/Net/TcpPacket.hpp
   src/Net/TcpPacketReader.cpp
@@ -81,6 +88,15 @@ add_library(
   src/Util/Time.cpp
   src/Util/Time.hpp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(
+    lol_server_core
+    PRIVATE
+      src/Platform/Linux/EpollEventLoop.cpp
+      src/Platform/Linux/EpollEventLoop.hpp
+  )
+endif()
 
 target_include_directories(lol_server_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_features(lol_server_core PUBLIC cxx_std_17)

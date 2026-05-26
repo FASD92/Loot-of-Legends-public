@@ -135,13 +135,36 @@ ReceiveStatus TcpListener::receiveFromClient(
     return ReceiveStatus::kReceived;
 }
 
-bool TcpListener::sendToClient(int clientFd, const uint8_t* data, size_t size) {
+SendResult TcpListener::sendSomeToClient(int clientFd, const uint8_t* data, size_t size) {
     if (clientFd < 0 || data == nullptr || size == 0) {
-        return false;
+        return SendResult{SendStatus::kError, 0};
     }
 
-    ssize_t sent = ::send(clientFd, data, size, 0);
-    return sent == static_cast<ssize_t>(size);
+    int flags = 0;
+#ifdef MSG_NOSIGNAL
+    flags |= MSG_NOSIGNAL;
+#endif
+
+    const ssize_t sent = ::send(clientFd, data, size, flags);
+    if (sent > 0) {
+        return SendResult{SendStatus::kSent, static_cast<size_t>(sent)};
+    }
+    if (sent == 0) {
+        return SendResult{SendStatus::kWouldBlock, 0};
+    }
+
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        return SendResult{SendStatus::kWouldBlock, 0};
+    }
+    if (errno == EPIPE || errno == ECONNRESET) {
+        return SendResult{SendStatus::kClosed, 0};
+    }
+    return SendResult{SendStatus::kError, 0};
+}
+
+bool TcpListener::sendToClient(int clientFd, const uint8_t* data, size_t size) {
+    const SendResult result = sendSomeToClient(clientFd, data, size);
+    return result.status == SendStatus::kSent && result.bytesSent == size;
 }
 
 void TcpListener::closeClient(int clientFd) {

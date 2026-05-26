@@ -1,6 +1,7 @@
 #include "Game/Room.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace Game {
@@ -129,6 +130,23 @@ bool Room::defeatMonster(uint32_t monsterId, uint32_t dropId, uint32_t itemId, u
     return true;
 }
 
+bool Room::createSmokeDrop(uint32_t dropId, uint32_t itemId, uint16_t quantity) {
+    if (!battleStarted_ || quantity == 0 || !drops_.empty()) {
+        return false;
+    }
+
+    const auto duplicateDropIt = std::find_if(
+        drops_.begin(),
+        drops_.end(),
+        [dropId](const Drop& drop) { return drop.dropId == dropId; });
+    if (duplicateDropIt != drops_.end()) {
+        return false;
+    }
+
+    drops_.push_back(Drop{dropId, itemId, quantity});
+    return true;
+}
+
 LootClaimResult Room::claimLoot(uint64_t sessionId, uint32_t dropId) {
     LootClaimResult result{};
     if (!contains(sessionId)) {
@@ -196,6 +214,55 @@ LootClaimResult Room::claimLoot(uint64_t sessionId, uint32_t dropId) {
     return result;
 }
 
+bool Room::placePlayersAroundSmokeCenter() {
+    if (playerSessionIds_.size() != 2 || movementSnapshots_.size() != playerSessionIds_.size()) {
+        return false;
+    }
+
+    MovementSnapshot* first = findMutableMovementSnapshot(playerSessionIds_[0]);
+    MovementSnapshot* second = findMutableMovementSnapshot(playerSessionIds_[1]);
+    if (first == nullptr || second == nullptr) {
+        return false;
+    }
+
+    first->position = MovementPosition{-kMovementScale, 0};
+    second->position = MovementPosition{kMovementScale, 0};
+    return true;
+}
+
+MovementApplyResult Room::applyMovement(
+    uint64_t sessionId,
+    int16_t dirX,
+    int16_t dirY,
+    uint32_t elapsedMs) {
+    MovementSnapshot* movement = findMutableMovementSnapshot(sessionId);
+    if (movement == nullptr) {
+        return MovementApplyResult{MovementApplyStatus::kNoPlayer, sessionId};
+    }
+
+    const MovementPosition previous = movement->position;
+    MovementPosition current = previous;
+    if (elapsedMs != 0 && (dirX != 0 || dirY != 0)) {
+        const double x = static_cast<double>(dirX);
+        const double y = static_cast<double>(dirY);
+        const double length = std::sqrt((x * x) + (y * y));
+        const double distance =
+            (static_cast<double>(kMovementSpeedPerSecond) * static_cast<double>(elapsedMs)) /
+            1000.0;
+        const int64_t deltaX = static_cast<int64_t>(std::llround((x / length) * distance));
+        const int64_t deltaY = static_cast<int64_t>(std::llround((y / length) * distance));
+        current.x = clampMovementPosition(static_cast<int64_t>(previous.x) + deltaX);
+        current.y = clampMovementPosition(static_cast<int64_t>(previous.y) + deltaY);
+        movement->position = current;
+    }
+
+    return MovementApplyResult{
+        MovementApplyStatus::kApplied,
+        sessionId,
+        previous,
+        current};
+}
+
 const std::vector<uint64_t>& Room::playerSessionIds() const {
     return playerSessionIds_;
 }
@@ -222,6 +289,24 @@ const InventorySnapshot* Room::findInventory(uint64_t sessionId) const {
     return &(*it);
 }
 
+const MovementPosition* Room::findMovementPosition(uint64_t sessionId) const {
+    auto it = std::find_if(
+        movementSnapshots_.begin(),
+        movementSnapshots_.end(),
+        [sessionId](const MovementSnapshot& movement) {
+            return movement.sessionId == sessionId;
+        });
+    if (it == movementSnapshots_.end()) {
+        return nullptr;
+    }
+
+    return &it->position;
+}
+
+const std::vector<MovementSnapshot>& Room::movementSnapshots() const {
+    return movementSnapshots_;
+}
+
 InventorySnapshot* Room::findMutableInventory(uint64_t sessionId) {
     auto it = std::find_if(
         inventories_.begin(),
@@ -234,6 +319,29 @@ InventorySnapshot* Room::findMutableInventory(uint64_t sessionId) {
     }
 
     return &(*it);
+}
+
+MovementSnapshot* Room::findMutableMovementSnapshot(uint64_t sessionId) {
+    auto it = std::find_if(
+        movementSnapshots_.begin(),
+        movementSnapshots_.end(),
+        [sessionId](const MovementSnapshot& movement) {
+            return movement.sessionId == sessionId;
+        });
+    if (it == movementSnapshots_.end()) {
+        return nullptr;
+    }
+
+    return &(*it);
+}
+
+void Room::resetMovementPositions() {
+    movementSnapshots_.clear();
+    movementSnapshots_.reserve(playerSessionIds_.size());
+    for (std::size_t index = 0; index < playerSessionIds_.size(); ++index) {
+        movementSnapshots_.push_back(
+            MovementSnapshot{playerSessionIds_[index], spawnPositionForSlot(index)});
+    }
 }
 
 void Room::resetBattleState() {
@@ -249,5 +357,23 @@ void Room::resetGameState() {
         inventory.currentWeight = 0;
         inventory.entries.clear();
     }
+    resetMovementPositions();
+}
+
+MovementPosition Room::spawnPositionForSlot(std::size_t slotIndex) {
+    const int32_t slotDistance =
+        static_cast<int32_t>((slotIndex / 2U) + 1U) * kMovementScale;
+    const int32_t signedX = (slotIndex % 2U == 0U) ? -slotDistance : slotDistance;
+    return MovementPosition{clampMovementPosition(signedX), 0};
+}
+
+int32_t Room::clampMovementPosition(int64_t value) {
+    if (value < kMovementMinPosition) {
+        return kMovementMinPosition;
+    }
+    if (value > kMovementMaxPosition) {
+        return kMovementMaxPosition;
+    }
+    return static_cast<int32_t>(value);
 }
 }  // namespace Game

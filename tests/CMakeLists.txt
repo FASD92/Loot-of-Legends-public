@@ -25,11 +25,14 @@ add_executable(
   core/RoomEventQueueTests.cpp
   core/RoomEventTests.cpp
   core/RoomManagerTests.cpp
+  core/ClientConnectionTests.cpp
+  core/RudpInputCommandRoomEventTranslatorTests.cpp
   core/WorkerPoolTests.cpp
   core/ServerRoomIntegrationTests.cpp
   core/TcpPacketTests.cpp
   core/TcpPacketReaderTests.cpp
   core/SessionManagerTests.cpp
+  core/NetworkEventLoopTests.cpp
   core/TcpListenerTests.cpp
   core/UdpSocketTests.cpp
   core/ServerIntegrationTests.cpp
@@ -44,6 +47,7 @@ add_executable(
   protocol/RudpInputCommandSequenceTrackerTests.cpp
   protocol/RudpMetaResponseIdempotencyTrackerTests.cpp
   protocol/RudpMetaResponsePayloadTests.cpp
+  protocol/RudpMoveInputGuardTests.cpp
   protocol/PacketParserTests.cpp
   protocol/PacketSerializerTests.cpp
   protocol/RudpPeerReceiveTests.cpp
@@ -52,12 +56,21 @@ add_executable(
   protocol/RudpReliableEventDeliveryGuardTests.cpp
   protocol/RudpReliableEventSendQueueTests.cpp
   protocol/RudpSocketDrainTests.cpp
+  protocol/RudpStateSnapshotPayloadTests.cpp
   protocol/ReliableSendQueueTests.cpp
   protocol/RudpRetransmissionFlushTests.cpp
   protocol/RudpRetransmissionScanTests.cpp
   protocol/RudpSessionBinderTests.cpp
   protocol/DispatcherTests.cpp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(lol_tests PRIVATE core/EpollEventLoopTests.cpp)
+
+  add_executable(lol_epoll_stress stress/EpollRuntimeStress.cpp)
+  target_compile_features(lol_epoll_stress PRIVATE cxx_std_17)
+  target_link_libraries(lol_epoll_stress PRIVATE lol_server_core)
+endif()
 
 target_compile_features(lol_tests PRIVATE cxx_std_17)
 #add_subdirectory(../server server_build)

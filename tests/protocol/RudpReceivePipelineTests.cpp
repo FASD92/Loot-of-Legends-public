@@ -187,7 +187,11 @@ TEST(RudpReceivePipelineTests, AckOnlyConsumesPendingQueueWithoutDelivery) {
         Net::processRudpPacket(datagram, registry, timeAt(1), delivery),
         Net::RudpReceivePipelineResult::kAckOnly);
     EXPECT_FALSE(peer->reliableSendQueue().contains(20));
-    EXPECT_EQ(delivery.peer, nullptr);
+    EXPECT_EQ(delivery.endpoint.addrLen, endpoint.addrLen);
+    EXPECT_EQ(delivery.header.ack, 20U);
+    EXPECT_EQ(delivery.header.ackBits, 0U);
+    EXPECT_TRUE(delivery.payload.empty());
+    EXPECT_EQ(delivery.peer, peer);
 }
 
 TEST(RudpReceivePipelineTests, InvalidEndpointReturnsInvalidEndpoint) {

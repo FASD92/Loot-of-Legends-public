@@ -458,6 +458,19 @@ bool serializeFinishSessionRequestPacket(std::array<uint8_t, kFinishSessionReque
     writePacketHeader(TcpPacketType::kFinishSessionRequest, outPacket);
     return true;
 }
+
+bool serializeSmokeCreateCenterDropRequestPacket(
+    std::array<uint8_t, kSmokeCreateCenterDropRequestPacketSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kSmokeCreateCenterDropRequest, outPacket);
+    return true;
+}
+
+bool serializeSmokePlacePlayersAroundCenterDropRequestPacket(
+    std::array<uint8_t, kSmokePlacePlayersAroundCenterDropRequestPacketSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest, outPacket);
+    return true;
+}
+
 // settlementResult는 가변 길이 패킷이라 실제 직렬화 전에 크기를 계산해야만 한다.
 // settlementIdLength와 inventoryDeltaCount가 가변.
 size_t settlementResultPacketSize(size_t settlementIdLength, size_t inventoryDeltaCount) {
@@ -962,6 +975,26 @@ bool parseInventorySnapshotPacket(
 bool parseFinishSessionRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader) {
     return parseExactPacketType(data, size, TcpPacketType::kFinishSessionRequest, outHeader) &&
            size == kFinishSessionRequestPacketSize;
+}
+
+bool parseSmokeCreateCenterDropRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader) {
+    return parseExactPacketType(data, size, TcpPacketType::kSmokeCreateCenterDropRequest, outHeader) &&
+           size == kSmokeCreateCenterDropRequestPacketSize;
+}
+
+bool parseSmokePlacePlayersAroundCenterDropRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader) {
+    return parseExactPacketType(
+               data,
+               size,
+               TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest,
+               outHeader) &&
+           size == kSmokePlacePlayersAroundCenterDropRequestPacketSize;
 }
 
 bool parseSettlementResultPacket(
