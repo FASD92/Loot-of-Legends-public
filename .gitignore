@@ -30,12 +30,36 @@ client/unity_thin_client/*.userprefs
 client/unity_thin_client/*.pidb
 client/unity_thin_client/*.booproj
 
+client/unity_player_client/[Ll]ibrary/
+client/unity_player_client/[Tt]emp/
+client/unity_player_client/[Oo]bj/
+client/unity_player_client/[Bb]uild/
+client/unity_player_client/[Bb]uilds/
+client/unity_player_client/[Ll]ogs/
+client/unity_player_client/[Uu]ser[Ss]ettings/
+client/unity_player_client/MemoryCaptures/
+client/unity_player_client/Recordings/
+client/unity_player_client/.vs/
+client/unity_player_client/.vscode/
+client/unity_player_client/*.csproj
+client/unity_player_client/*.sln
+client/unity_player_client/*.slnx
+client/unity_player_client/*.suo
+client/unity_player_client/*.user
+client/unity_player_client/*.userprefs
+client/unity_player_client/*.pidb
+client/unity_player_client/*.booproj
+client/unity_player_client/*.app/
+client/unity_player_client/*_BurstDebugInformation_DoNotShip/
+
 # Public repository excludes
 docs/*
 !docs/
 !docs/architecture.md
 !docs/test_matrix.md
 !docs/roadmap.md
+!docs/media/
+!docs/media/*.png
 experimental/
 AGENTS.md
 

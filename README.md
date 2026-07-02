@@ -1,194 +1,137 @@
 # Loot of Legends
 
-> 클라이언트 입력을 신뢰하지 않고, 서버가 Room 상태와 루팅 소유권을 최종 판정하는 C++ 실시간 게임 서버 포트폴리오입니다.
+> 클라이언트 입력을 신뢰하지 않고, 서버가 Room 상태와 루팅 결과를 최종 판정하는 C++ 실시간 멀티플레이 서버 포트폴리오입니다.
 
-`C++17` · `CMake` · `POSIX/BSD Sockets` · `TCP` · `GoogleTest` · `Server Authoritative` · `Debug CLI`
-
-확장 중: `Custom RUDP Movement` · `Unity Thin Client` · `Linux Epoll Runtime` · `Spring Boot Meta Server`
-
----
-
-## 목차
-
-- [요약](#요약)
-- [검증 완료된 핵심](#검증-완료된-핵심)
-- [확장 중인 영역](#확장-중인-영역)
-- [현재 한계 요약](#현재-한계-요약)
-- [실행 / 테스트](#실행--테스트)
-- [Debug CLI 시연](#debug-cli-시연)
-- [코드 읽기 가이드](#코드-읽기-가이드)
-- [자세한 문서](#자세한-문서)
-
----
+`C++17` · `CMake` · `POSIX/BSD Sockets` · `TCP/UDP` · `Custom RUDP` · `GoogleTest` · `Java 21` · `Spring Boot` · `MySQL/Redis` · `Unity Player Client`
 
 ## 요약
 
-- 2인 Room 기반 TCP gameplay loop를 구현했습니다.
-- 서버가 Room, Monster, Drop, Loot, Inventory, SettlementResult 상태를 최종 판정합니다.
-- Debug CLI와 Unity Thin Client smoke로 접속, Room 생성, Ready, 이동, 몬스터 처치, 루팅 경합, 정산 흐름을 재현할 수 있습니다.
-- 동일 Drop 경합, 중복 클릭, 무게 제한, 반복 `finish_session` 요청을 테스트로 검증합니다.
-- RUDP movement dispatch, StateSnapshot render, Unity item/loot manual smoke는 확장 검증 단계까지 포함되어 있습니다.
-- Spring Meta 정산과 production stress/soak는 후속 통합 범위로 분리되어 있습니다.
+- C++ 서버가 로그인 이후 game session, Room, Ready, Monster, Drop, Loot, Inventory, SettlementResult 흐름을 권위적으로 처리합니다.
+- Unity Player Client는 서버가 확정한 상태만 표시하고, Room/Loot/RUDP 입력은 intent로만 전송합니다.
+- Custom RUDP는 `Hello`, `InputCommand`, `ACK`, reliable ordered server event, `StateSnapshot`까지 source/test 범위에 포함합니다.
+- Spring Meta Server는 OAuth/account, admission/queue, game-session token, settlement idempotency 경계를 담당합니다.
+- 100-session handoff harness, Release1 capacity report gate, 1,200+ regression test case marker를 공개 소스에서 확인할 수 있습니다.
 
-이 프로젝트의 중심은 게임 화면이 아니라 서버 권한 판정 구조입니다. 클라이언트는 요청을 보낼 뿐이고, 실제 상태 전이와 최종 결과는 서버가 결정합니다.
+이 프로젝트에서 보여주고 싶은 핵심은 화면 연출보다 서버의 판정 구조입니다. 같은 Drop을 여러 클라이언트가 동시에 클릭해도 서버는 한 명에게만 소유권을 확정하고, 나머지 요청은 기존 결과를 바꾸지 않습니다.
 
-```text
-여러 플레이어가 같은 Drop을 클릭한다.
-        ↓
-서버가 Room / Drop / Inventory 상태로 승자를 확정한다.
-        ↓
-승자에게 LootResolved + InventorySnapshot을 보낸다.
-패자에게 LootRejected를 보낸다.
-        ↓
-세션 종료 시 SettlementResult로 정산 경계를 넘긴다.
-```
+## 한눈에 보는 서버 구조
 
----
+![Loot of Legends server architecture](docs/media/architecture-overview.png)
 
-## 검증 완료된 핵심
-
-| 영역 | 검증 수준 | 대표 파일 |
+| 경계 | 역할 | 대표 코드 |
 | --- | --- | --- |
-| TCP Room / Loot 서버 | production 기준 gameplay 경로에서 Room 생성, Ready, Monster, Drop, ClickLoot, Inventory 흐름 검증 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
-| Debug CLI 시연 | 서버 상태 전이를 Unity 없이 명령 단위로 재현 | `client/debug_cli/`, `tests/client/DebugCliCommandTests.cpp` |
-| SettlementResult 계약 | C++ 서버에서 정산 payload 생성과 반복 요청 멱등 응답 검증 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
-| TCP packet / session | packet framing, partial read, listener lifecycle, session id 발급 검증 | `tests/core/TcpPacketTests.cpp`, `tests/core/TcpPacketReaderTests.cpp`, `tests/core/SessionManagerTests.cpp` |
-| Unity item/loot smoke | Unity Play Mode에서 server-origin drop source, same-drop loot result, winner inventory, marker hide Full PASS 확인 | `client/unity_thin_client/Assets/Scripts/LootOfLegends/` |
+| Unity Player Client | 로그인, 로비, Room, RUDP movement, loot result 표시 | `client/unity_player_client/Assets/Scripts/LootOfLegends/` |
+| C++ Game Server | TCP/RUDP packet 처리, Room 권위 상태, loot 판정, metrics 출력 | `server/src/Core/Server.cpp`, `server/src/Game/RoomManager.cpp` |
+| Room Actor foundation | 같은 Room event를 single-writer 경계로 순차 처리하는 기반 | `server/src/Game/RoomActor.cpp`, `server/src/Game/WorkerPool.cpp` |
+| Spring Meta Server | OAuth, admission queue, game session token, settlement API | `meta-server/src/main/java/com/lol/meta/` |
+| Capacity / Stability harness | handoff, capacity gate, latency/delivery/resource report contract | `scripts/release0/`, `scripts/release1/` |
 
-핵심 불변식:
+## Playable Demo
 
-- 한 세션은 동시에 하나의 Room에만 속합니다.
-- Room 멤버가 모두 Ready 상태가 되었을 때 `BattleStart`는 한 번만 발생합니다.
-- 동일 Drop은 한 번만 소유권이 확정됩니다.
-- 이미 획득된 Drop을 다시 클릭해도 기존 소유자는 바뀌지 않습니다.
-- 무게 제한 초과 루팅은 Drop 소유권을 확정하지 않습니다.
-- 반복 `finish_session` 요청은 같은 서버 프로세스 안에서 동일한 `SettlementResult` payload를 반환합니다.
+현재 public repo에는 실행 파일을 직접 올리지 않고, 데모 클라이언트 소스와 패키징 스크립트만 둡니다.
 
----
+- Unity Player Client source: `client/unity_player_client/`
+- client config 기본값: `client/unity_player_client/Assets/StreamingAssets/Release0ClientConfig.json`
+- standalone package helper: `scripts/release0/unity_standalone_package.py`
 
-## 확장 중인 영역
+데모 링크를 공개할 때는 이 섹션에 빌드 파일 URL과 실행 조건만 짧게 추가하면 됩니다. 지금 README는 source mirror 기준입니다.
 
-| 영역 | 현재 단계 | 아직 남은 것 |
+## Custom RUDP
+
+![Custom RUDP recovery flow](docs/media/rudp-recovery-flow.png)
+
+| 구성 | 현재 포함된 범위 | 대표 파일 |
 | --- | --- | --- |
-| Spring Meta Server | 별도 모듈에서 정산 API, internal token 검증, MySQL transaction/idempotency 테스트 세로 슬라이스 검증 | C++ 서버의 runtime HTTP 연동 |
-| Custom RUDP | Hello binding, Move InputCommand dispatch, authoritative movement state, StateSnapshot payload/send/render 검증 | broader gameplay transport policy, soak/stress |
-| Room Actor / WorkerPool | `RoomEvent`, bounded queue, dispatcher, actor, worker, metrics primitive와 TCP/RUDP dispatch regression 검증 | production `Core::Server` WorkerPool thread 연결 |
-| Linux epoll runtime | `NetworkEventLoop` abstraction, Linux `EpollEventLoop`, epoll stress target 추가 | cross-platform production hardening |
-| Unity Thin Client | TCP debug session, RUDP Hello/Move, StateSnapshot render, item/loot smoke UI와 manual Full PASS evidence | automated Unity Play Mode smoke, production client UX |
+| Packet surface | `Hello`, `InputCommand`, `ACK`, `BattleStart`, `GameEvent`, `MetaResponse`, `StateSnapshot` payload codec | `server/src/Net/RudpPacket.cpp`, `server/src/Net/Rudp*Payload.cpp` |
+| Session binding | UDP endpoint를 TCP session id와 연결 | `server/src/Net/RudpSessionBinder.cpp` |
+| Input ordering | `cmdSeq` 기반 stale/duplicate input guard | `server/src/Net/RudpInputCommandSequenceTracker.cpp`, `server/src/Net/RudpMoveInputGuard.cpp` |
+| Reliable send | pending ACK metadata, retransmission scan/flush, send queue | `server/src/Net/RudpReliableSendQueue.cpp`, `server/src/Net/RudpRetransmissionScan.cpp` |
+| Reliable ordered event | server-origin event idempotency, duplicate delivery guard, reliable event queue | `server/src/Net/RudpReliableEventSendQueue.cpp`, `server/src/Net/RudpGameplayEventIdempotencyTracker.cpp` |
+| Room dispatch | RUDP input을 RoomEvent 경계로 변환 | `server/src/Core/RudpInputCommandRoomEventTranslator.cpp` |
 
-확장 영역은 현재 핵심 TCP gameplay path를 대체하지 않습니다. 먼저 도메인 불변식을 TCP와 테스트로 고정하고, RUDP/Actor/Meta는 통합 경계를 분리해서 확장하고 있습니다.
+RUDP를 “UDP로 보냈다” 수준으로 적지 않기 위해 packet codec, ordering, ACK, retransmission, duplicate guard를 분리했습니다. 다만 모든 gameplay result가 RUDP로 전환됐다는 뜻은 아닙니다. public 기준으로는 TCP gameplay path가 여전히 기준 경로이고, RUDP는 movement/reliable event foundation과 테스트 범위까지 공개합니다.
 
----
+## 서버 권한 Gameplay
 
-## 현재 한계 요약
+| 불변식 | 검증 위치 |
+| --- | --- |
+| 한 세션은 동시에 하나의 Room에만 속한다 | `tests/core/RoomManagerTests.cpp` |
+| Ready가 모두 모였을 때 BattleStart는 한 번만 발생한다 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
+| 같은 Drop은 한 명만 claim할 수 있다 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
+| 이미 claim된 Drop은 owner를 바꾸지 않는다 | `tests/core/RoomManagerTests.cpp` |
+| 무게 제한 초과 loot는 Drop/Inventory를 변경하지 않는다 | `tests/core/RoomManagerTests.cpp` |
+| 반복 finish session은 같은 settlement payload를 반환한다 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
 
-- TCP gameplay path는 현재 2인 Room 기준입니다.
-- Spring Meta Server는 별도 테스트 세로 슬라이스이며 C++ runtime HTTP 연동은 후속 범위입니다.
-- RUDP는 movement dispatch와 StateSnapshot까지 연결됐지만, 전체 gameplay transport 전환과 soak/stress는 후속 범위입니다.
-- WorkerPool은 foundation/regression 단계이며 production thread 연결은 후속 범위입니다.
-- Unity Thin Client는 manual smoke 검증 단계이며, automated Play Mode smoke와 100-client stress/soak test는 아직 예정입니다.
+## Capacity / Stability 검증
 
----
+| 근거 | 의미 | 위치 |
+| --- | --- | --- |
+| 100-session handoff harness | 100개 active session 이후 queue promotion과 game-session authentication handoff를 검증하는 harness | `scripts/release0/handoff_100_sessions_harness.py` |
+| Release1 capacity report gate | latency, delivery, tick/stability, resource gate를 PASS/FAIL/INVALID/ABORTED로 판정하는 report contract | `scripts/release1/capacity_report.py`, `scripts/release1/gate_config.json` |
+| 670-session local diagnostic | safe capacity 숫자가 아니라 failure stage와 backlog를 분리하기 위한 로컬 진단 기준 | `docs/test_matrix.md` |
+| 1,200+ regression cases | C++/Meta/Unity test marker 기준 공개 소스의 회귀 검증 밀도 | `tests/`, `meta-server/src/test/`, `client/unity_player_client/Assets/Tests/EditMode/` |
 
-## 실행 / 테스트
+capacity 숫자는 최대 동접 홍보 문구로 쓰지 않습니다. 이 repo에서는 어떤 gate로 측정하고, 어떤 단계가 PASS/FAIL/INVALID인지 구분하는 구조를 더 중요하게 둡니다.
 
-요구 환경:
+## 코드 읽기 가이드
 
-- CMake 3.20+
-- C++17 compiler
-- POSIX/BSD socket 사용 가능 환경
-- GoogleTest
-- Java 21
-- Docker 실행 가능 환경
+| 목적 | 시작 파일 |
+| --- | --- |
+| 서버 lifecycle / TCP-RUDP runtime | `server/src/Core/Server.cpp` |
+| Room, Monster, Drop, Loot, Inventory | `server/src/Game/RoomManager.cpp`, `server/src/Game/Room.cpp` |
+| Room Actor / WorkerPool foundation | `server/src/Game/RoomEvent.hpp`, `server/src/Game/RoomActor.cpp`, `server/src/Game/WorkerPool.cpp` |
+| TCP packet contract | `server/src/Net/TcpPacket.cpp`, `server/src/Net/TcpPacketReader.cpp` |
+| Custom RUDP packet / recovery | `server/src/Net/RudpPacket.cpp`, `server/src/Net/RudpReliableEventSendQueue.cpp` |
+| Meta auth/admission/session | `meta-server/src/main/java/com/lol/meta/auth/`, `meta-server/src/main/java/com/lol/meta/admission/` |
+| Meta settlement | `meta-server/src/main/java/com/lol/meta/settlement/` |
+| Unity Player Client runtime | `client/unity_player_client/Assets/Scripts/LootOfLegends/PlayerNetworkSession.cs` |
 
-C++ 서버/CLI 빌드:
+## 빠른 검증
+
+C++ server/tests:
 
 ```bash
 cmake -S . -B build
 cmake --build build
-```
-
-서버 실행:
-
-```bash
-./build/server/lol_server 40000
-```
-
-Debug CLI 실행:
-
-```bash
-./build/client/lol_debug_cli
-```
-
-C++ 테스트:
-
-```bash
 ctest --test-dir build --output-on-failure
 ```
 
-Meta Server 테스트:
+Meta Server:
 
 ```bash
 cd meta-server
 ./gradlew test
 ```
 
----
+Python capacity/report helpers:
 
-## Debug CLI 시연
-
-```text
-connect A 127.0.0.1 40000
-connect B 127.0.0.1 40000
-
-A create_room
-B join_room <roomId>
-
-A ready
-B ready
-
-A debug_defeat_monster <monsterId>
-
-A click_loot <dropId>
-B click_loot <dropId>
-
-A print_inventory
-B print_inventory
-
-A finish_session
-A print_settlement
+```bash
+python3 -m unittest \
+  scripts.release0.test_handoff_100_sessions_harness \
+  scripts.release1.test_capacity_report \
+  scripts.release1.test_concurrent_capacity_probe
 ```
 
-기대 결과:
+Unity Player Client tests는 Unity Test Runner에서 `client/unity_player_client/Assets/Tests/EditMode/`를 실행합니다.
 
-- A 또는 B 중 한 명만 `LootResolved`를 받습니다.
-- 승자는 `InventorySnapshot`에서 아이템과 무게가 갱신됩니다.
-- 나머지 클라이언트는 `LootRejected(reason=AlreadyClaimed)`를 받습니다.
-- `finish_session` 이후 `SettlementResult`가 출력됩니다.
+## 공개 범위
 
----
+이 저장소는 public portfolio mirror입니다.
 
-## 코드 읽기 가이드
+포함:
 
-| 목적 | 시작 파일 |
-| --- | --- |
-| 서버 lifecycle과 TCP 처리 흐름 | `server/src/Core/Server.cpp` |
-| Room / Battle / Loot / Settlement 도메인 | `server/src/Game/RoomManager.cpp` |
-| TCP packet framing | `server/src/Net/TcpPacketReader.cpp`, `server/src/Net/TcpPacket.cpp` |
-| Debug CLI 명령 처리 | `client/debug_cli/DebugCli.cpp`, `client/debug_cli/DebugCliCommand.cpp` |
-| Unity Thin Client smoke | `client/unity_thin_client/Assets/Scripts/LootOfLegends/ThinClientDebugUi.cs` |
-| RUDP protocol 기반 구현 | `server/src/Net/` |
-| RUDP movement dispatch | `server/src/Core/RudpInputCommandRoomEventTranslator.cpp`, `server/src/Net/RudpStateSnapshotPayload.cpp` |
-| Linux epoll runtime | `server/src/Net/NetworkEventLoop.hpp`, `server/src/Platform/Linux/EpollEventLoop.cpp` |
-| Room Actor / WorkerPool 기반 구현 | `server/src/Game/RoomEvent.hpp`, `server/src/Game/RoomActor.cpp`, `server/src/Game/WorkerPool.cpp` |
-| Meta settlement 세로 슬라이스 | `meta-server/src/main/java/com/lol/meta/settlement/` |
+- `README.md`, public docs, architecture images
+- `server/`
+- `meta-server/`
+- `client/unity_player_client/`
+- `tests/`
+- `scripts/release0`, `scripts/release1`의 실행 가능한 source/test/schema
 
----
+제외:
 
-## 자세한 문서
+- 내부 ADR, planning, review trace, agent workflow 문서
+- deploy workflow와 OCI 세부 배포 파일
+- raw experiment logs와 private closeout 문서
+- Unity build output, generated artifacts, third-party asset package
 
-- [아키텍처와 경계](docs/architecture.md)
-- [테스트 매트릭스](docs/test_matrix.md)
-- [로드맵과 현재 한계](docs/roadmap.md)
-
-이 저장소는 포트폴리오 검토를 위한 공개용 소스 미러입니다. 내부 설계 로그, 작업 계획, 사적인 검토 문서는 포함하지 않습니다.
+자세한 보강 문서는 [아키텍처](docs/architecture.md), [테스트 매트릭스](docs/test_matrix.md), [로드맵](docs/roadmap.md)에만 둡니다.

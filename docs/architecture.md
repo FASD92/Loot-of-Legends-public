@@ -1,131 +1,95 @@
-# 아키텍처와 경계
+# 아키텍처
 
-이 문서는 public README에서 줄인 구조 설명을 보완하기 위한 공개용 요약입니다. 내부 작업 로그가 아니라, 현재 공개 소스가 어떤 경계로 동작하고 어디까지 검증됐는지 설명합니다.
+이 문서는 README의 구조도를 보완하는 public 전용 설명입니다. 내부 설계 로그가 아니라, 현재 공개 소스가 어떤 runtime 경계와 검증 경계를 갖는지 요약합니다.
 
-## 기준 경로
-
-현재 검증 중심은 C++ TCP gameplay path입니다.
+## 기준 구조
 
 ```text
-Debug CLI / TCP client
-  -> Core::Server
-  -> TcpPacketReader
-  -> SessionManager
-  -> RoomManager
-  -> Room / Drop / Inventory / SettlementResult
-  -> TCP response / broadcast
+Unity Player Client
+  -> TCP gameplay command / RUDP input
+  -> C++ Core::Server
+  -> Session / Room / RUDP peer state
+  -> RoomManager / RoomActor foundation
+  -> Loot / Inventory / SettlementResult
+  -> TCP response, RUDP event, StateSnapshot
+
+Spring Meta Server
+  -> OAuth / account
+  -> admission queue
+  -> game session token
+  -> settlement API
+  -> MySQL / Redis
 ```
 
-클라이언트는 `ready`, `debug_defeat_monster`, `click_loot`, `finish_session` 같은 요청을 보냅니다. 서버는 Room 상태, Drop 상태, Inventory 무게, SettlementResult cache를 기준으로 최종 결과를 결정합니다.
+핵심 기준은 단순합니다. 클라이언트는 intent를 보내고, 서버가 상태를 확정합니다. 이동, 공격, 루팅, 정산 모두 이 경계를 흐리지 않도록 구성했습니다.
 
-Unity Thin Client는 같은 서버 권한 결과를 화면에서 관측하기 위한 smoke client입니다. TCP debug session으로 Room/loot smoke 요청을 보내고, RUDP Hello/Move와 StateSnapshot으로 이동 상태를 확인합니다.
+## C++ Game Server
 
-## 서버 권한 gameplay 흐름
+| 모듈 | 책임 |
+| --- | --- |
+| `Core::Server` | TCP listener, UDP/RUDP receive path, session lifecycle, room command routing |
+| `SessionManager` | session id 발급과 연결 생명주기 |
+| `RoomManager` / `Room` | Room membership, Ready, BattleStart, MonsterDeath, Drop, Loot, Inventory, SettlementResult |
+| `RoomActor` / `WorkerPool` | RoomEvent single-writer foundation과 병렬 처리 기반 |
+| `OutboundSendQueue` | response/broadcast envelope를 Room 처리와 전송 경계에서 분리 |
+| `PrometheusTextfileWriter` | capacity/stability 측정용 metrics textfile 출력 |
+
+현재 production path에서 모든 Room 처리가 완전한 multi-worker runtime으로 전환됐다는 뜻은 아닙니다. public 기준으로는 TCP gameplay path와 inline actor pump regression, WorkerPool foundation을 함께 보여줍니다.
+
+## Meta Server
+
+Spring Meta Server는 게임 루프의 hot path가 아니라 account/session/settlement boundary입니다.
+
+| 영역 | 책임 |
+| --- | --- |
+| Auth | OAuth account resolution, principal normalization |
+| Admission | active session capacity, queue, reservation, CSRF boundary |
+| Session token | C++ server가 game-session authentication에 사용할 claim/renew/release contract |
+| Settlement | settlement idempotency, request hash, rollback invariant, processing guard |
+| Storage | MySQL schema, Redis processing/session guard |
+
+이 경계는 C++ gameplay hot path에 DB transaction을 섞지 않기 위한 분리입니다.
+
+## Custom RUDP
+
+RUDP는 “UDP socket을 열었다”가 아니라 다음 레이어로 나눠 구현했습니다.
+
+| 레이어 | 설명 |
+| --- | --- |
+| Packet codec | packet type, sequence, ack, payload encode/decode |
+| Hello binding | UDP endpoint를 TCP-authenticated session과 연결 |
+| Input command | movement/attack/loot intent payload와 `cmdSeq` gate |
+| ACK/retransmission | pending packet metadata, deadline scan, resend flush |
+| Reliable ordered event | server-origin event id, pending ACK, duplicate delivery guard |
+| Room dispatch | validated input을 RoomEvent 경계로 변환 |
+| StateSnapshot | 서버 권위 위치 상태를 client render surface로 전달 |
+
+현재 README에서 RUDP를 강조하는 이유는 프로토콜을 직접 구성한 흔적을 보여주기 위해서입니다. 다만 전체 gameplay transport가 RUDP로 완전히 이전됐다는 주장은 하지 않습니다.
+
+## 서버 권한 루팅 흐름
 
 ```text
-Connect
-  -> Welcome(sessionId)
-  -> CreateRoom / JoinRoom
-  -> Ready
-  -> BattleStart
-  -> MonsterSpawn
-  -> MonsterDeath
-  -> DropListSnapshot
-  -> ClickLoot race
-  -> LootResolved or LootRejected
-  -> InventorySnapshot
-  -> FinishSessionRequest
-  -> SettlementResult
+MonsterDeath
+  -> server creates Drop
+  -> clients receive DropListSnapshot
+  -> multiple clients send ClickLoot
+  -> server checks Room membership, drop state, inventory weight
+  -> one client receives LootResolved
+  -> others receive LootRejected
+  -> winner receives InventorySnapshot
 ```
 
-핵심은 같은 Drop에 대한 경쟁 요청입니다. 여러 클라이언트가 같은 Drop을 클릭해도 서버는 한 명에게만 소유권을 확정하고, 나머지 요청은 기존 소유자를 바꾸지 않고 거절합니다.
+중요한 점은 `ClickLoot` 순서가 client 주장으로 결정되지 않는다는 것입니다. 서버가 Drop 상태와 Inventory 상태를 기준으로 결과를 확정합니다.
 
-## Meta settlement 경계
+## Capacity / Stability 경계
 
-C++ 서버는 `SettlementResult` payload를 생성하고, 같은 세션의 반복 `finish_session` 요청에 동일 payload를 반환합니다. 이 멱등성은 C++ 서버 프로세스 메모리 기준입니다.
+capacity 관련 코드는 결과 숫자를 크게 보이게 하려는 목적보다, “무엇을 PASS로 볼 것인가”를 분리하기 위한 목적이 큽니다.
 
-Spring Meta Server는 별도 모듈로 다음을 검증합니다.
+| 경계 | 의미 |
+| --- | --- |
+| 100-session handoff | active session capacity와 queue promotion, game-session authentication handoff 검증 |
+| Release1 capacity report | latency, delivery, tick/stability, resource gate를 판정하는 artifact contract |
+| 670 local diagnostic | safe capacity claim이 아니라 failure stage, backlog, errno/latency 해석을 위한 로컬 진단 |
+| Prometheus textfile | runtime metric을 report script가 읽을 수 있는 형태로 출력 |
 
-- internal token 검증
-- settlement request validation
-- MySQL `settlementId` 기반 중복 방어
-- transaction rollback invariant
-- Redis 기반 processing guard
-
-아직 C++ 서버가 Spring Meta Server를 runtime HTTP로 호출하지는 않습니다. 현재 public repo에서 두 영역은 계약과 테스트 세로 슬라이스로 분리되어 있습니다.
-
-## RUDP 경계
-
-RUDP는 TCP gameplay path 전체를 대체하지 않습니다. 다만 movement와 StateSnapshot smoke는 server-authoritative transport path까지 연결됐습니다.
-
-현재 포함된 범위:
-
-- packet parser / serializer
-- ACK window
-- reliable send queue
-- retransmission scan / flush
-- UDP socket drain
-- Hello session binding
-- InputCommand payload와 `cmdSeq` gate
-- Reliable Ordered event payload / queue / duplicate guard
-- Move InputCommand guard와 `RoomEvent` translation
-- authoritative movement state
-- server-origin `StateSnapshot` payload / send path
-- Unity StateSnapshot decode / render
-
-후속 범위:
-
-- movement 외 broader gameplay transport 전환
-- RUDP result surface 확대
-- soak/stress 기준의 loss / jitter / reorder 검증
-- outbound transport policy hardening
-
-## Room Actor / WorkerPool 경계
-
-Room Actor / WorkerPool 영역은 같은 Room을 한 writer가 순차 처리하고, 서로 다른 Room은 병렬 처리할 수 있게 만들기 위한 foundation입니다.
-
-현재 포함된 범위:
-
-- `RoomEvent`
-- bounded `RoomEventQueue`
-- `RoomActor`
-- `RoomEventDispatcher`
-- `OutboundSendQueue`
-- `WorkerPool`
-- `RoomEventMetrics`
-- TCP `Ready`, `MonsterDeath`, `ClickLoot` inline actor pump regression
-
-현재 production `Core::Server`는 TCP `Ready`, `MonsterDeath`, `ClickLoot`를 inline actor pump로 처리합니다. RUDP movement dispatch도 내부 `RoomEvent` 경계를 사용합니다. production WorkerPool thread를 `Core::Server` runtime에 연결하는 것은 후속 범위입니다.
-
-## Unity Thin Client smoke
-
-Unity Thin Client는 production client가 아니라 smoke/evidence client입니다.
-
-현재 포함된 범위:
-
-- TCP debug connection
-- RUDP Hello
-- RUDP Move sender
-- RUDP StateSnapshot decoder / render
-- center drop smoke UI
-- A/B placement smoke UI
-- same-drop `ClickLootRequest` A then B smoke UI
-- server-origin `LootResolved + LootRejected(AlreadyClaimed) + winner InventorySnapshot` result summary
-
-Item/Loot manual Unity smoke는 `Drop Center Item -> Place A/B Around -> Loot A/B Simul` 흐름에서 Full PASS evidence를 기록했습니다. Full PASS는 button send log가 아니라 server-origin same-drop result visibility 기준입니다.
-
-## Linux epoll runtime
-
-Linux runtime 준비를 위해 `NetworkEventLoop` abstraction과 Linux `EpollEventLoop` backend가 추가됐습니다. epoll stress target은 Linux 환경에서 runtime readiness를 검증하기 위한 별도 target입니다.
-
-이 범위는 macOS Debug CLI 시연을 대체하지 않으며, cross-platform production hardening을 위한 기반입니다.
-
-## 변경하지 않은 public 계약
-
-다음 계약은 확장 작업 중에도 유지합니다.
-
-- TCP packet schema
-- Debug CLI 기준 시연 흐름
-- `CreateRoom`, `JoinRoom`, `LeaveRoom`의 기존 RoomManager 경로
-- `FinishSessionRequest` / `SettlementResult` 계약
-- C++ gameplay hot path와 DB write path의 분리
+public repo에는 raw private experiment log를 넣지 않습니다. 대신 source, test, schema, report evaluator만 공개합니다.
