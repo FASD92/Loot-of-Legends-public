@@ -32,6 +32,30 @@ TEST(RoomEventTests, CreatesClickLootRoomEvent) {
     EXPECT_TRUE(Game::isValidRoomEvent(event));
 }
 
+TEST(RoomEventTests, CreatesAttackRoomEventWithOptionalTargetHint) {
+    const Game::RoomEvent event = Game::makeAttackRoomEvent(10, 2, 0);
+
+    EXPECT_EQ(event.type, Game::RoomEventType::kAttack);
+    EXPECT_EQ(event.sessionId, 10u);
+    EXPECT_EQ(event.roomId, 2u);
+    EXPECT_EQ(event.argument, 0u);
+    EXPECT_TRUE(Game::isValidRoomEvent(event));
+
+    const Game::RoomEvent targetHint = Game::makeAttackRoomEvent(10, 2, 7);
+    EXPECT_EQ(targetHint.argument, 7u);
+    EXPECT_TRUE(Game::isValidRoomEvent(targetHint));
+}
+
+TEST(RoomEventTests, CreatesSpaceLootRoomEventWithoutArgument) {
+    const Game::RoomEvent event = Game::makeSpaceLootRoomEvent(10, 2);
+
+    EXPECT_EQ(event.type, Game::RoomEventType::kSpaceLoot);
+    EXPECT_EQ(event.sessionId, 10u);
+    EXPECT_EQ(event.roomId, 2u);
+    EXPECT_EQ(event.argument, 0u);
+    EXPECT_TRUE(Game::isValidRoomEvent(event));
+}
+
 TEST(RoomEventTests, RejectsZeroSessionOrRoom) {
     EXPECT_FALSE(Game::isValidRoomEvent(Game::makeReadyRoomEvent(0, 2)));
     EXPECT_FALSE(Game::isValidRoomEvent(Game::makeReadyRoomEvent(10, 0)));
@@ -49,4 +73,10 @@ TEST(RoomEventTests, RejectsActionWithoutArgument) {
 
     EXPECT_FALSE(Game::isValidRoomEvent(monsterDeath));
     EXPECT_FALSE(Game::isValidRoomEvent(clickLoot));
+}
+
+TEST(RoomEventTests, RejectsSpaceLootWithArgument) {
+    const Game::RoomEvent event{Game::RoomEventType::kSpaceLoot, 10, 2, 7};
+
+    EXPECT_FALSE(Game::isValidRoomEvent(event));
 }

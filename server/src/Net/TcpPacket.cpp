@@ -59,6 +59,52 @@ int32_t readI32BE(const uint8_t* data) {
     return static_cast<int32_t>(readU32BE(data));
 }
 
+bool isValidBattleStartRoster(uint32_t roomId, const std::vector<uint64_t>& playerSessionIds) {
+    if (roomId == 0 ||
+        playerSessionIds.size() < Net::kBattleStartRosterMinPlayers ||
+        playerSessionIds.size() > Net::kBattleStartRosterMaxPlayers) {
+        return false;
+    }
+
+    for (size_t i = 0; i < playerSessionIds.size(); ++i) {
+        if (playerSessionIds[i] == 0) {
+            return false;
+        }
+        for (size_t j = i + 1; j < playerSessionIds.size(); ++j) {
+            if (playerSessionIds[i] == playerSessionIds[j]) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool isValidBattleLoadEntry(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    const std::vector<uint64_t>& playerSessionIds) {
+    if (roomId == 0 ||
+        battleInstanceId == 0 ||
+        playerSessionIds.size() < Net::kBattleLoadEntryMinPlayers ||
+        playerSessionIds.size() > Net::kBattleLoadEntryMaxPlayers) {
+        return false;
+    }
+
+    for (size_t i = 0; i < playerSessionIds.size(); ++i) {
+        if (playerSessionIds[i] == 0) {
+            return false;
+        }
+        for (size_t j = i + 1; j < playerSessionIds.size(); ++j) {
+            if (playerSessionIds[i] == playerSessionIds[j]) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 template <size_t PacketSize>
 void writePacketHeader(Net::TcpPacketType type, std::array<uint8_t, PacketSize>& outPacket) {
     writeU16BE(static_cast<uint16_t>(PacketSize), outPacket.data());
@@ -89,6 +135,33 @@ bool parseRoomIdPacket(
     }
 
     outRoomId = readU32BE(data + Net::kTcpHeaderSize);
+    return true;
+}
+
+bool parseRoomBattleInstancePacket(
+    const uint8_t* data,
+    size_t size,
+    Net::TcpPacketType expectedType,
+    size_t expectedSize,
+    Net::TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId) {
+    outRoomId = 0;
+    outBattleInstanceId = 0;
+    if (!parseExactPacketType(data, size, expectedType, outHeader) ||
+        size != expectedSize) {
+        return false;
+    }
+
+    const uint32_t roomId = readU32BE(data + Net::kTcpHeaderSize);
+    const uint64_t battleInstanceId =
+        readU64BE(data + Net::kTcpHeaderSize + Net::kRoomIdFieldSize);
+    if (roomId == 0 || battleInstanceId == 0) {
+        return false;
+    }
+
+    outRoomId = roomId;
+    outBattleInstanceId = battleInstanceId;
     return true;
 }
 
@@ -143,6 +216,227 @@ bool isValidSettlementId(const std::string& settlementId) {
 
     return true;
 }
+
+bool isPrintableAsciiText(const std::string& value) {
+    for (const unsigned char ch : value) {
+        if (ch < 0x20 || ch > 0x7E) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool decodeNextUtf8CodePoint(std::string_view value, size_t& offset, uint32_t& outCodePoint) {
+    const unsigned char first = static_cast<unsigned char>(value[offset]);
+    if (first <= 0x7F) {
+        outCodePoint = first;
+        ++offset;
+        return true;
+    }
+
+    size_t length = 0;
+    uint32_t codePoint = 0;
+    if (first >= 0xC2 && first <= 0xDF) {
+        length = 2;
+        codePoint = first & 0x1F;
+    } else if (first >= 0xE0 && first <= 0xEF) {
+        length = 3;
+        codePoint = first & 0x0F;
+    } else if (first >= 0xF0 && first <= 0xF4) {
+        length = 4;
+        codePoint = first & 0x07;
+    } else {
+        return false;
+    }
+
+    if (offset + length > value.size()) {
+        return false;
+    }
+
+    for (size_t i = 1; i < length; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(value[offset + i]);
+        if ((ch & 0xC0) != 0x80) {
+            return false;
+        }
+        codePoint = (codePoint << 6) | (ch & 0x3F);
+    }
+
+    if ((length == 3 && codePoint < 0x800) ||
+        (length == 4 && codePoint < 0x10000) ||
+        codePoint > 0x10FFFF ||
+        (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+        return false;
+    }
+
+    offset += length;
+    outCodePoint = codePoint;
+    return true;
+}
+
+bool isDisallowedControlCodePoint(uint32_t codePoint) {
+    return codePoint < 0x20 || (codePoint >= 0x7F && codePoint <= 0x9F);
+}
+
+bool isWhitespaceCodePoint(uint32_t codePoint) {
+    return codePoint == 0x20 || codePoint == 0x09 || codePoint == 0x0A ||
+           codePoint == 0x0D || codePoint == 0x0B || codePoint == 0x0C ||
+           codePoint == 0x85 || codePoint == 0xA0 || codePoint == 0x1680 ||
+           (codePoint >= 0x2000 && codePoint <= 0x200A) ||
+           codePoint == 0x2028 || codePoint == 0x2029 ||
+           codePoint == 0x202F || codePoint == 0x205F ||
+           codePoint == 0x3000;
+}
+
+bool isValidRoomTitleUtf8(std::string_view roomTitle) {
+    if (roomTitle.empty() || roomTitle.size() > Net::kRoomTitleMaxLength) {
+        return false;
+    }
+
+    size_t offset = 0;
+    size_t visibleCharacters = 0;
+    bool previousWhitespace = false;
+    bool firstCharacter = true;
+    while (offset < roomTitle.size()) {
+        uint32_t codePoint = 0;
+        if (!decodeNextUtf8CodePoint(roomTitle, offset, codePoint) ||
+            isDisallowedControlCodePoint(codePoint)) {
+            return false;
+        }
+
+        const bool whitespace = isWhitespaceCodePoint(codePoint);
+        if ((firstCharacter && whitespace) || (previousWhitespace && whitespace)) {
+            return false;
+        }
+
+        previousWhitespace = whitespace;
+        firstCharacter = false;
+        ++visibleCharacters;
+        if (visibleCharacters > Net::kRoomTitleMaxVisibleCharacters) {
+            return false;
+        }
+    }
+
+    return visibleCharacters > 0 && !previousWhitespace;
+}
+
+bool isValidCreateRoomCapacity(uint8_t maxPlayers) {
+    return maxPlayers >= Net::kCreateRoomMinCapacity &&
+           maxPlayers <= Net::kCreateRoomMaxCapacity;
+}
+
+bool isValidRoomTitle(const std::string& roomTitle) {
+    return isValidRoomTitleUtf8(roomTitle);
+}
+
+bool isValidNickname(const std::string& nickname) {
+    return !nickname.empty() &&
+           nickname.size() <= Net::kNicknameMaxLength &&
+           isPrintableAsciiText(nickname);
+}
+
+bool isValidRoomStatus(Net::TcpRoomStatus status) {
+    return status == Net::TcpRoomStatus::kOpen ||
+           status == Net::TcpRoomStatus::kInProgress;
+}
+
+bool isValidRoomStatusValue(uint8_t value) {
+    return value == static_cast<uint8_t>(Net::TcpRoomStatus::kOpen) ||
+           value == static_cast<uint8_t>(Net::TcpRoomStatus::kInProgress);
+}
+
+bool isValidLobbyReturnReason(Net::TcpLobbyReturnReason reason) {
+    return reason == Net::TcpLobbyReturnReason::kNone ||
+           reason == Net::TcpLobbyReturnReason::kArenaLoadTimeout ||
+           reason == Net::TcpLobbyReturnReason::kArenaLoadMinimumFailure ||
+           reason == Net::TcpLobbyReturnReason::kHostKick ||
+           reason == Net::TcpLobbyReturnReason::kResultGenerationFailure;
+}
+
+bool isValidLobbyReturnReasonValue(uint8_t value) {
+    return value == static_cast<uint8_t>(Net::TcpLobbyReturnReason::kNone) ||
+           value == static_cast<uint8_t>(Net::TcpLobbyReturnReason::kArenaLoadTimeout) ||
+           value == static_cast<uint8_t>(Net::TcpLobbyReturnReason::kArenaLoadMinimumFailure) ||
+           value == static_cast<uint8_t>(Net::TcpLobbyReturnReason::kHostKick) ||
+           value == static_cast<uint8_t>(Net::TcpLobbyReturnReason::kResultGenerationFailure);
+}
+
+bool isValidReadyStateValue(uint8_t value) {
+    return value == 0 || value == 1;
+}
+
+bool containsSessionId(const std::vector<uint64_t>& sessionIds, uint64_t sessionId) {
+    return std::find(sessionIds.begin(), sessionIds.end(), sessionId) != sessionIds.end();
+}
+
+bool isValidBattleFinalRanking(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    const std::vector<Net::BattleFinalRankingEntry>& rankings) {
+    if (roomId == 0 ||
+        battleInstanceId == 0 ||
+        rankings.size() < Net::kBattleFinalRankingMinRows ||
+        rankings.size() > Net::kBattleFinalRankingMaxRows) {
+        return false;
+    }
+
+    std::vector<uint64_t> sessionIds;
+    sessionIds.reserve(rankings.size());
+    for (const Net::BattleFinalRankingEntry& ranking : rankings) {
+        if (ranking.rank == 0 ||
+            ranking.sessionId == 0 ||
+            ranking.totalAssetValue < 0 ||
+            !isValidNickname(ranking.nickname) ||
+            containsSessionId(sessionIds, ranking.sessionId)) {
+            return false;
+        }
+        sessionIds.push_back(ranking.sessionId);
+    }
+
+    return true;
+}
+
+bool isValidRoomDetailState(const Net::TcpRoomDetailState& detail) {
+    if (detail.roomId == 0 ||
+        !isValidRoomStatus(detail.roomStatus) ||
+        !isValidRoomTitle(detail.roomTitle) ||
+        !isValidCreateRoomCapacity(detail.maxPlayers) ||
+        detail.members.empty() ||
+        detail.members.size() > Net::kRoomDetailMaxMembers ||
+        detail.members.size() > detail.maxPlayers ||
+        detail.targetActions.size() > std::numeric_limits<uint8_t>::max() ||
+        (detail.selfActionMask & ~Net::kTcpRoomActionMaskAll) != 0) {
+        return false;
+    }
+
+    std::vector<uint64_t> memberIds;
+    memberIds.reserve(detail.members.size());
+    for (const Net::TcpRoomMemberEntry& member : detail.members) {
+        if (member.sessionId == 0 ||
+            member.sessionId > std::numeric_limits<uint32_t>::max() ||
+            !isValidNickname(member.nickname) ||
+            containsSessionId(memberIds, member.sessionId)) {
+            return false;
+        }
+        memberIds.push_back(member.sessionId);
+    }
+
+    std::vector<uint64_t> targetIds;
+    targetIds.reserve(detail.targetActions.size());
+    for (const Net::TcpTargetActionEntry& action : detail.targetActions) {
+        if (action.targetSessionId == 0 ||
+            action.targetSessionId > std::numeric_limits<uint32_t>::max() ||
+            action.targetActionMask == 0 ||
+            (action.targetActionMask & ~Net::kTcpTargetActionMaskAll) != 0 ||
+            !containsSessionId(memberIds, action.targetSessionId) ||
+            containsSessionId(targetIds, action.targetSessionId)) {
+            return false;
+        }
+        targetIds.push_back(action.targetSessionId);
+    }
+
+    return true;
+}
 }  // namespace
 
 namespace Net {
@@ -152,8 +446,70 @@ bool serializeWelcomePacket(uint64_t sessionId, std::array<uint8_t, kWelcomePack
     return true;
 }
 
-bool serializeCreateRoomRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket) {
-    writePacketHeader(TcpPacketType::kCreateRoomRequest, outPacket);
+bool serializeAuthenticateGameSessionPacket(std::string_view token, std::vector<uint8_t>& outPacket) {
+    outPacket.clear();
+    if (token.empty() || token.size() > kGameSessionTokenMaxLength) {
+        return false;
+    }
+
+    const size_t packetSize =
+        kTcpHeaderSize + kGameSessionTokenLengthFieldSize + token.size();
+    if (packetSize > kMaxTcpPacketSize) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(
+        static_cast<uint16_t>(TcpPacketType::kAuthenticateGameSession),
+        outPacket.data() + 2);
+    writeU16BE(static_cast<uint16_t>(token.size()), outPacket.data() + kTcpHeaderSize);
+    std::copy(
+        token.begin(),
+        token.end(),
+        outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(
+                                kTcpHeaderSize + kGameSessionTokenLengthFieldSize));
+    return true;
+}
+
+bool serializeSessionReplacedPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kSessionReplaced, outPacket);
+    return true;
+}
+
+bool serializeHeartbeatRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kHeartbeatRequest, outPacket);
+    return true;
+}
+
+bool serializeCreateRoomRequestPacket(
+    std::string_view roomTitle,
+    uint8_t maxPlayers,
+    std::vector<uint8_t>& outPacket) {
+    outPacket.clear();
+    if (!isValidRoomTitleUtf8(roomTitle) || !isValidCreateRoomCapacity(maxPlayers)) {
+        return false;
+    }
+
+    const size_t packetSize =
+        kTcpHeaderSize + kRoomTitleLengthFieldSize + roomTitle.size() +
+        kCreateRoomCapacityFieldSize;
+    if (packetSize > kMaxTcpPacketSize) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(
+        static_cast<uint16_t>(TcpPacketType::kCreateRoomRequest),
+        outPacket.data() + 2);
+    outPacket[kTcpHeaderSize] = static_cast<uint8_t>(roomTitle.size());
+    std::copy(
+        roomTitle.begin(),
+        roomTitle.end(),
+        outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(
+                                kTcpHeaderSize + kRoomTitleLengthFieldSize));
+    outPacket.back() = maxPlayers;
     return true;
 }
 
@@ -196,10 +552,48 @@ bool serializeReadyRoomRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPac
     return true;
 }
 
+bool serializeUnreadyRoomRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kUnreadyRoomRequest, outPacket);
+    return true;
+}
+
+bool serializeHostStartBattleRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kHostStartBattleRequest, outPacket);
+    return true;
+}
+
 bool serializeLeaveRoomResponsePacket(
     uint32_t roomId,
     std::array<uint8_t, kRoomIdPacketSize>& outPacket) {
+    if (roomId == 0) {
+        return false;
+    }
+
     writePacketHeader(TcpPacketType::kLeaveRoomResponse, outPacket);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    return true;
+}
+
+bool serializeUnreadyRoomResponsePacket(
+    uint32_t roomId,
+    std::array<uint8_t, kRoomIdPacketSize>& outPacket) {
+    if (roomId == 0) {
+        return false;
+    }
+
+    writePacketHeader(TcpPacketType::kUnreadyRoomResponse, outPacket);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    return true;
+}
+
+bool serializeHostStartBattleResponsePacket(
+    uint32_t roomId,
+    std::array<uint8_t, kRoomIdPacketSize>& outPacket) {
+    if (roomId == 0) {
+        return false;
+    }
+
+    writePacketHeader(TcpPacketType::kHostStartBattleResponse, outPacket);
     writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
     return true;
 }
@@ -209,12 +603,56 @@ bool serializeReadyRoomResponsePacket(
     uint16_t readyPlayerCount,
     uint16_t totalPlayerCount,
     std::array<uint8_t, kReadyRoomStatusPacketSize>& outPacket) {
+    if (roomId == 0) {
+        return false;
+    }
+
     writePacketHeader(TcpPacketType::kReadyRoomResponse, outPacket);
     writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
     writeU16BE(readyPlayerCount, outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
     writeU16BE(
         totalPlayerCount,
         outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize + kPlayerCountFieldSize);
+    return true;
+}
+
+bool serializeHostKickRequestPacket(
+    uint32_t targetSessionId,
+    std::array<uint8_t, kHostKickRequestPacketSize>& outPacket) {
+    if (targetSessionId == 0) {
+        return false;
+    }
+
+    writePacketHeader(TcpPacketType::kHostKickRequest, outPacket);
+    writeU32BE(targetSessionId, outPacket.data() + kTcpHeaderSize);
+    return true;
+}
+
+bool serializeHostKickResponsePacket(
+    uint32_t roomId,
+    uint32_t targetSessionId,
+    std::array<uint8_t, kHostKickResponsePacketSize>& outPacket) {
+    if (roomId == 0 || targetSessionId == 0) {
+        return false;
+    }
+
+    writePacketHeader(TcpPacketType::kHostKickResponse, outPacket);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    writeU32BE(targetSessionId, outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
+    return true;
+}
+
+bool serializeLobbyReturnVisibilityPacket(
+    uint32_t previousRoomId,
+    TcpLobbyReturnReason reason,
+    std::array<uint8_t, kLobbyReturnVisibilityPacketSize>& outPacket) {
+    if (previousRoomId == 0 || !isValidLobbyReturnReason(reason)) {
+        return false;
+    }
+
+    writePacketHeader(TcpPacketType::kLobbyReturnVisibility, outPacket);
+    writeU32BE(previousRoomId, outPacket.data() + kTcpHeaderSize);
+    outPacket[kTcpHeaderSize + kRoomIdFieldSize] = static_cast<uint8_t>(reason);
     return true;
 }
 
@@ -248,15 +686,30 @@ bool serializeClientListSnapshotPacket(
 }
 
 size_t roomListSnapshotPacketSize(size_t roomCount) {
-    return kTcpHeaderSize + kRoomListCountFieldSize + (roomCount * kRoomEntrySize);
+    return kTcpHeaderSize + kRoomListCountFieldSize + (roomCount * kRoomListEntryMinSize);
+}
+
+size_t roomListSnapshotPacketSize(const std::vector<TcpRoomEntry>& rooms) {
+    size_t packetSize = kTcpHeaderSize + kRoomListCountFieldSize;
+    for (const TcpRoomEntry& room : rooms) {
+        packetSize += kRoomListEntryMinSize + room.title.size();
+    }
+    return packetSize;
 }
 
 bool serializeRoomListSnapshotPacket(const std::vector<TcpRoomEntry>& rooms, std::vector<uint8_t>& outPacket) {
     if (rooms.size() > std::numeric_limits<uint16_t>::max()) {
         return false;
     }
+    for (const TcpRoomEntry& room : rooms) {
+        if (!isValidRoomStatus(room.roomStatus) ||
+            room.title.size() > kRoomTitleMaxLength ||
+            (!room.title.empty() && !isValidRoomTitleUtf8(room.title))) {
+            return false;
+        }
+    }
 
-    const size_t packetSize = roomListSnapshotPacketSize(rooms.size());
+    const size_t packetSize = roomListSnapshotPacketSize(rooms);
     if (packetSize > kMaxTcpPacketSize) {
         return false;
     }
@@ -266,12 +719,101 @@ bool serializeRoomListSnapshotPacket(const std::vector<TcpRoomEntry>& rooms, std
     writeU16BE(static_cast<uint16_t>(TcpPacketType::kRoomListSnapshot), outPacket.data() + 2);
     writeU16BE(static_cast<uint16_t>(rooms.size()), outPacket.data() + kTcpHeaderSize);
 
-    uint8_t* payload = outPacket.data() + kTcpHeaderSize + kRoomListCountFieldSize;
+    size_t offset = kTcpHeaderSize + kRoomListCountFieldSize;
     for (size_t i = 0; i < rooms.size(); ++i) {
-        uint8_t* entry = payload + (i * kRoomEntrySize);
+        uint8_t* entry = outPacket.data() + offset;
         writeU32BE(rooms[i].roomId, entry);
         writeU16BE(rooms[i].playerCount, entry + kRoomIdFieldSize);
         writeU16BE(rooms[i].maxPlayers, entry + kRoomIdFieldSize + kPlayerCountFieldSize);
+        entry[kRoomIdFieldSize + (2 * kPlayerCountFieldSize)] =
+            static_cast<uint8_t>(rooms[i].roomStatus);
+        offset += kRoomEntrySize;
+
+        outPacket[offset] = static_cast<uint8_t>(rooms[i].title.size());
+        ++offset;
+        std::copy(
+            rooms[i].title.begin(),
+            rooms[i].title.end(),
+            outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset));
+        offset += rooms[i].title.size();
+    }
+
+    return true;
+}
+
+size_t roomDetailStatePacketSize(const TcpRoomDetailState& detail) {
+    size_t packetSize =
+        kTcpHeaderSize + kRoomIdFieldSize + kRoomStatusFieldSize +
+        kRoomTitleLengthFieldSize + detail.roomTitle.size() + 1 + 1 +
+        kRoomActionMaskFieldSize + kTargetActionCountFieldSize;
+
+    for (const TcpRoomMemberEntry& member : detail.members) {
+        packetSize +=
+            kRoomMemberSessionIdFieldSize + kNicknameLengthFieldSize +
+            member.nickname.size() + kReadyStateFieldSize;
+    }
+    packetSize += detail.targetActions.size() * kTargetActionEntrySize;
+    return packetSize;
+}
+
+bool serializeRoomDetailStatePacket(
+    const TcpRoomDetailState& detail,
+    std::vector<uint8_t>& outPacket) {
+    outPacket.clear();
+    if (!isValidRoomDetailState(detail)) {
+        return false;
+    }
+
+    const size_t packetSize = roomDetailStatePacketSize(detail);
+    if (packetSize > kMaxTcpPacketSize ||
+        packetSize > std::numeric_limits<uint16_t>::max()) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(static_cast<uint16_t>(TcpPacketType::kRoomDetailState), outPacket.data() + 2);
+
+    size_t offset = kTcpHeaderSize;
+    writeU32BE(detail.roomId, outPacket.data() + offset);
+    offset += kRoomIdFieldSize;
+    outPacket[offset] = static_cast<uint8_t>(detail.roomStatus);
+    offset += kRoomStatusFieldSize;
+    outPacket[offset] = static_cast<uint8_t>(detail.roomTitle.size());
+    offset += kRoomTitleLengthFieldSize;
+    std::copy(
+        detail.roomTitle.begin(),
+        detail.roomTitle.end(),
+        outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset));
+    offset += detail.roomTitle.size();
+    outPacket[offset] = detail.maxPlayers;
+    offset += 1;
+    outPacket[offset] = static_cast<uint8_t>(detail.members.size());
+    offset += 1;
+
+    for (const TcpRoomMemberEntry& member : detail.members) {
+        writeU32BE(static_cast<uint32_t>(member.sessionId), outPacket.data() + offset);
+        offset += kRoomMemberSessionIdFieldSize;
+        outPacket[offset] = static_cast<uint8_t>(member.nickname.size());
+        offset += kNicknameLengthFieldSize;
+        std::copy(
+            member.nickname.begin(),
+            member.nickname.end(),
+            outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset));
+        offset += member.nickname.size();
+        outPacket[offset] = member.ready ? 1 : 0;
+        offset += kReadyStateFieldSize;
+    }
+
+    writeU16BE(detail.selfActionMask, outPacket.data() + offset);
+    offset += kRoomActionMaskFieldSize;
+    outPacket[offset] = static_cast<uint8_t>(detail.targetActions.size());
+    offset += kTargetActionCountFieldSize;
+    for (const TcpTargetActionEntry& action : detail.targetActions) {
+        writeU32BE(static_cast<uint32_t>(action.targetSessionId), outPacket.data() + offset);
+        offset += kRoomMemberSessionIdFieldSize;
+        writeU16BE(action.targetActionMask, outPacket.data() + offset);
+        offset += kRoomActionMaskFieldSize;
     }
 
     return true;
@@ -288,6 +830,174 @@ bool serializeBattleStartPacket(
     writeU64BE(
         playerBSessionId,
         outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize + kSessionIdFieldSize);
+    return true;
+}
+
+size_t battleStartRosterPacketSize(size_t playerCount) {
+    return kTcpHeaderSize + kRoomIdFieldSize + kBattleStartRosterCountFieldSize +
+        (playerCount * kBattleStartRosterEntrySize);
+}
+
+bool serializeBattleStartRosterPacket(
+    uint32_t roomId,
+    const std::vector<uint64_t>& playerSessionIds,
+    std::vector<uint8_t>& outPacket) {
+    outPacket.clear();
+    if (!isValidBattleStartRoster(roomId, playerSessionIds)) {
+        return false;
+    }
+
+    const size_t packetSize = battleStartRosterPacketSize(playerSessionIds.size());
+    if (packetSize > kMaxTcpPacketSize) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(
+        static_cast<uint16_t>(TcpPacketType::kBattleStartRoster),
+        outPacket.data() + 2);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    writeU16BE(
+        static_cast<uint16_t>(playerSessionIds.size()),
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
+
+    uint8_t* payload =
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize +
+        kBattleStartRosterCountFieldSize;
+    for (size_t i = 0; i < playerSessionIds.size(); ++i) {
+        writeU64BE(playerSessionIds[i], payload + (i * kBattleStartRosterEntrySize));
+    }
+
+    return true;
+}
+
+size_t battleLoadEntryPacketSize(size_t playerCount) {
+    return kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize +
+        kBattleLoadEntryCountFieldSize + (playerCount * kBattleLoadEntryEntrySize);
+}
+
+bool serializeBattleLoadEntryPacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    const std::vector<uint64_t>& playerSessionIds,
+    std::vector<uint8_t>& outPacket) {
+    outPacket.clear();
+    if (!isValidBattleLoadEntry(roomId, battleInstanceId, playerSessionIds)) {
+        return false;
+    }
+
+    const size_t packetSize = battleLoadEntryPacketSize(playerSessionIds.size());
+    if (packetSize > kMaxTcpPacketSize) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(
+        static_cast<uint16_t>(TcpPacketType::kBattleLoadEntry),
+        outPacket.data() + 2);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    writeU64BE(
+        battleInstanceId,
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
+    writeU16BE(
+        static_cast<uint16_t>(playerSessionIds.size()),
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize);
+
+    uint8_t* payload =
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize +
+        kBattleLoadEntryCountFieldSize;
+    for (size_t i = 0; i < playerSessionIds.size(); ++i) {
+        writeU64BE(playerSessionIds[i], payload + (i * kBattleLoadEntryEntrySize));
+    }
+
+    return true;
+}
+
+size_t battleFinalRankingPacketSize(const std::vector<BattleFinalRankingEntry>& rankings) {
+    size_t packetSize = kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize +
+        kBattleFinalRankingCountFieldSize;
+    for (const BattleFinalRankingEntry& ranking : rankings) {
+        packetSize += kBattleFinalRankingRankFieldSize + kSessionIdFieldSize +
+            kNicknameLengthFieldSize + ranking.nickname.size() + kFinalAssetValueFieldSize;
+    }
+    return packetSize;
+}
+
+bool serializeBattleFinalRankingPacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    const std::vector<BattleFinalRankingEntry>& rankings,
+    std::vector<uint8_t>& outPacket) {
+    outPacket.clear();
+    if (!isValidBattleFinalRanking(roomId, battleInstanceId, rankings)) {
+        return false;
+    }
+
+    const size_t packetSize = battleFinalRankingPacketSize(rankings);
+    if (packetSize > kMaxTcpPacketSize ||
+        packetSize > std::numeric_limits<uint16_t>::max()) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(
+        static_cast<uint16_t>(TcpPacketType::kBattleFinalRanking),
+        outPacket.data() + 2);
+    size_t offset = kTcpHeaderSize;
+    writeU32BE(roomId, outPacket.data() + offset);
+    offset += kRoomIdFieldSize;
+    writeU64BE(battleInstanceId, outPacket.data() + offset);
+    offset += kBattleInstanceIdFieldSize;
+    outPacket[offset] = static_cast<uint8_t>(rankings.size());
+    offset += kBattleFinalRankingCountFieldSize;
+
+    for (const BattleFinalRankingEntry& ranking : rankings) {
+        writeU16BE(ranking.rank, outPacket.data() + offset);
+        offset += kBattleFinalRankingRankFieldSize;
+        writeU64BE(ranking.sessionId, outPacket.data() + offset);
+        offset += kSessionIdFieldSize;
+        outPacket[offset] = static_cast<uint8_t>(ranking.nickname.size());
+        offset += kNicknameLengthFieldSize;
+        std::copy(
+            ranking.nickname.begin(),
+            ranking.nickname.end(),
+            outPacket.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset));
+        offset += ranking.nickname.size();
+        writeI64BE(ranking.totalAssetValue, outPacket.data() + offset);
+        offset += kFinalAssetValueFieldSize;
+    }
+
+    return true;
+}
+
+bool serializeArenaLoadCompletePacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    std::array<uint8_t, kArenaLoadCompletePacketSize>& outPacket) {
+    if (roomId == 0 || battleInstanceId == 0) {
+        return false;
+    }
+
+    writePacketHeader(TcpPacketType::kArenaLoadComplete, outPacket);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    writeU64BE(battleInstanceId, outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
+    return true;
+}
+
+bool serializeArenaGameplayStartPacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    std::array<uint8_t, kArenaGameplayStartPacketSize>& outPacket) {
+    if (roomId == 0 || battleInstanceId == 0) {
+        return false;
+    }
+
+    writePacketHeader(TcpPacketType::kArenaGameplayStart, outPacket);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    writeU64BE(battleInstanceId, outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
     return true;
 }
 
@@ -328,9 +1038,33 @@ bool serializeMonsterDeathPacket(
     return true;
 }
 
+bool serializeMonsterHealthSnapshotPacket(
+    uint32_t roomId,
+    uint32_t monsterId,
+    uint16_t currentHp,
+    uint16_t maxHp,
+    std::array<uint8_t, kMonsterHealthSnapshotPacketSize>& outPacket) {
+    writePacketHeader(TcpPacketType::kMonsterHealthSnapshot, outPacket);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    writeU32BE(monsterId, outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
+    writeU16BE(
+        currentHp,
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize + kMonsterIdFieldSize);
+    writeU16BE(
+        maxHp,
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize + kMonsterIdFieldSize +
+            kMonsterHpFieldSize);
+    return true;
+}
+
 size_t dropListSnapshotPacketSize(size_t dropCount) {
     return kTcpHeaderSize + kRoomIdFieldSize + kDropListCountFieldSize + (dropCount * kDropEntrySize);
 }
+
+size_t dropListSnapshotV2PacketSize(size_t dropCount) {
+    return kDropListSnapshotV2FixedPacketSize + (dropCount * kDropEntryV2Size);
+}
+
 // 가변 길이 스냅샷 serializer
 bool serializeDropListSnapshotPacket(
     uint32_t roomId,
@@ -359,6 +1093,47 @@ bool serializeDropListSnapshotPacket(
         writeU32BE(drops[i].dropId, entry);
         writeU32BE(drops[i].itemId, entry + kDropIdFieldSize);
         writeU16BE(drops[i].quantity, entry + kDropIdFieldSize + kItemIdFieldSize);
+    }
+
+    return true;
+}
+
+bool serializeDropListSnapshotV2Packet(
+    uint32_t roomId,
+    uint32_t scatterSeed,
+    const std::vector<TcpDropEntryV2>& drops,
+    std::vector<uint8_t>& outPacket) {
+    if (drops.size() > std::numeric_limits<uint16_t>::max()) {
+        return false;
+    }
+
+    const size_t packetSize = dropListSnapshotV2PacketSize(drops.size());
+    if (packetSize > kMaxTcpPacketSize) {
+        return false;
+    }
+
+    outPacket.assign(packetSize, 0);
+    writeU16BE(static_cast<uint16_t>(packetSize), outPacket.data());
+    writeU16BE(static_cast<uint16_t>(TcpPacketType::kDropListSnapshotV2), outPacket.data() + 2);
+    writeU32BE(roomId, outPacket.data() + kTcpHeaderSize);
+    writeU32BE(scatterSeed, outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize);
+    writeU16BE(
+        static_cast<uint16_t>(drops.size()),
+        outPacket.data() + kTcpHeaderSize + kRoomIdFieldSize + kScatterSeedFieldSize);
+
+    uint8_t* payload = outPacket.data() + kDropListSnapshotV2FixedPacketSize;
+    for (size_t i = 0; i < drops.size(); ++i) {
+        uint8_t* entry = payload + (i * kDropEntryV2Size);
+        writeU32BE(drops[i].dropId, entry);
+        writeU32BE(drops[i].itemId, entry + kDropIdFieldSize);
+        writeU16BE(drops[i].quantity, entry + kDropIdFieldSize + kItemIdFieldSize);
+        writeI32BE(
+            drops[i].posX,
+            entry + kDropIdFieldSize + kItemIdFieldSize + kQuantityFieldSize);
+        writeI32BE(
+            drops[i].posY,
+            entry + kDropIdFieldSize + kItemIdFieldSize + kQuantityFieldSize +
+                kPositionFieldSize);
     }
 
     return true;
@@ -618,9 +1393,70 @@ bool parseWelcomePacket(
     return true;
 }
 
-bool parseCreateRoomRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader) {
-    return parseExactPacketType(data, size, TcpPacketType::kCreateRoomRequest, outHeader) &&
+bool parseAuthenticateGameSessionPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    std::string& outToken) {
+    outToken.clear();
+    if (!parseTcpPacketHeader(data, size, outHeader)) {
+        return false;
+    }
+
+    if (outHeader.type != TcpPacketType::kAuthenticateGameSession ||
+        size < kTcpHeaderSize + kGameSessionTokenLengthFieldSize) {
+        return false;
+    }
+
+    const uint16_t tokenLen = readU16BE(data + kTcpHeaderSize);
+    if (tokenLen == 0 || tokenLen > kGameSessionTokenMaxLength) {
+        return false;
+    }
+
+    const size_t expectedSize =
+        kTcpHeaderSize + kGameSessionTokenLengthFieldSize + tokenLen;
+    if (expectedSize != size) {
+        return false;
+    }
+
+    outToken.assign(
+        reinterpret_cast<const char*>(data + kTcpHeaderSize + kGameSessionTokenLengthFieldSize),
+        reinterpret_cast<const char*>(
+            data + kTcpHeaderSize + kGameSessionTokenLengthFieldSize + tokenLen));
+    return true;
+}
+
+bool parseHeartbeatRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader) {
+    return parseExactPacketType(data, size, TcpPacketType::kHeartbeatRequest, outHeader) &&
            size == kTcpHeaderSize;
+}
+
+bool parseCreateRoomRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    std::string& outRoomTitle,
+    uint8_t& outMaxPlayers) {
+    outRoomTitle.clear();
+    outMaxPlayers = 0;
+    if (!parseExactPacketType(data, size, TcpPacketType::kCreateRoomRequest, outHeader) ||
+        size < kTcpHeaderSize + kRoomTitleLengthFieldSize + kCreateRoomCapacityFieldSize) {
+        return false;
+    }
+
+    const uint8_t roomTitleLen = data[kTcpHeaderSize];
+    const size_t expectedSize =
+        kTcpHeaderSize + kRoomTitleLengthFieldSize + roomTitleLen +
+        kCreateRoomCapacityFieldSize;
+    if (expectedSize != size) {
+        return false;
+    }
+
+    const char* titleBegin = reinterpret_cast<const char*>(
+        data + kTcpHeaderSize + kRoomTitleLengthFieldSize);
+    outRoomTitle.assign(titleBegin, titleBegin + roomTitleLen);
+    outMaxPlayers = data[size - 1];
+    return isValidRoomTitleUtf8(outRoomTitle) && isValidCreateRoomCapacity(outMaxPlayers);
 }
 
 bool parseCreateRoomResponsePacket(
@@ -671,12 +1507,40 @@ bool parseReadyRoomRequestPacket(const uint8_t* data, size_t size, TcpPacketHead
            size == kTcpHeaderSize;
 }
 
+bool parseUnreadyRoomRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader) {
+    return parseExactPacketType(data, size, TcpPacketType::kUnreadyRoomRequest, outHeader) &&
+           size == kTcpHeaderSize;
+}
+
+bool parseHostStartBattleRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader) {
+    return parseExactPacketType(data, size, TcpPacketType::kHostStartBattleRequest, outHeader) &&
+           size == kTcpHeaderSize;
+}
+
 bool parseLeaveRoomResponsePacket(
     const uint8_t* data,
     size_t size,
     TcpPacketHeader& outHeader,
     uint32_t& outRoomId) {
     return parseRoomIdPacket(data, size, TcpPacketType::kLeaveRoomResponse, outHeader, outRoomId);
+}
+
+bool parseUnreadyRoomResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId) {
+    return parseRoomIdPacket(data, size, TcpPacketType::kUnreadyRoomResponse, outHeader, outRoomId) &&
+           outRoomId != 0;
+}
+
+bool parseHostStartBattleResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId) {
+    return parseRoomIdPacket(data, size, TcpPacketType::kHostStartBattleResponse, outHeader, outRoomId) &&
+           outRoomId != 0;
 }
 
 bool parseReadyRoomResponsePacket(
@@ -742,22 +1606,197 @@ bool parseRoomListSnapshotPacket(
     }
 
     const uint16_t count = readU16BE(data + kTcpHeaderSize);
-    const size_t expectedSize = roomListSnapshotPacketSize(count);
-    if (expectedSize != size) {
-        return false;
-    }
-
     outRooms.reserve(count);
-    const uint8_t* payload = data + kTcpHeaderSize + kRoomListCountFieldSize;
+    size_t offset = kTcpHeaderSize + kRoomListCountFieldSize;
     for (uint16_t i = 0; i < count; ++i) {
-        const uint8_t* entry = payload + (static_cast<size_t>(i) * kRoomEntrySize);
+        if (offset + kRoomListEntryMinSize > size) {
+            outRooms.clear();
+            return false;
+        }
+
+        const uint8_t* entry = data + offset;
+        const uint8_t statusValue = entry[kRoomIdFieldSize + (2 * kPlayerCountFieldSize)];
+        if (!isValidRoomStatusValue(statusValue)) {
+            outRooms.clear();
+            return false;
+        }
+
+        offset += kRoomEntrySize;
+        const uint8_t titleLength = data[offset];
+        ++offset;
+        if (offset + titleLength > size) {
+            outRooms.clear();
+            return false;
+        }
+
+        std::string title(
+            reinterpret_cast<const char*>(data + offset),
+            reinterpret_cast<const char*>(data + offset + titleLength));
+        if (!title.empty() && !isValidRoomTitleUtf8(title)) {
+            outRooms.clear();
+            return false;
+        }
+        offset += titleLength;
+
         outRooms.push_back(TcpRoomEntry{
             readU32BE(entry),
             readU16BE(entry + kRoomIdFieldSize),
             readU16BE(entry + kRoomIdFieldSize + kPlayerCountFieldSize),
+            static_cast<TcpRoomStatus>(statusValue),
+            std::move(title),
         });
     }
 
+    return offset == size;
+}
+
+bool parseHostKickRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outTargetSessionId) {
+    if (!parseExactPacketType(data, size, TcpPacketType::kHostKickRequest, outHeader) ||
+        size != kHostKickRequestPacketSize) {
+        return false;
+    }
+
+    outTargetSessionId = readU32BE(data + kTcpHeaderSize);
+    return outTargetSessionId != 0;
+}
+
+bool parseHostKickResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint32_t& outTargetSessionId) {
+    if (!parseExactPacketType(data, size, TcpPacketType::kHostKickResponse, outHeader) ||
+        size != kHostKickResponsePacketSize) {
+        return false;
+    }
+
+    outRoomId = readU32BE(data + kTcpHeaderSize);
+    outTargetSessionId = readU32BE(data + kTcpHeaderSize + kRoomIdFieldSize);
+    return outRoomId != 0 && outTargetSessionId != 0;
+}
+
+bool parseLobbyReturnVisibilityPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outPreviousRoomId,
+    TcpLobbyReturnReason& outReason) {
+    if (!parseExactPacketType(data, size, TcpPacketType::kLobbyReturnVisibility, outHeader) ||
+        size != kLobbyReturnVisibilityPacketSize) {
+        return false;
+    }
+
+    const uint32_t previousRoomId = readU32BE(data + kTcpHeaderSize);
+    const uint8_t reasonValue = data[kTcpHeaderSize + kRoomIdFieldSize];
+    if (previousRoomId == 0 || !isValidLobbyReturnReasonValue(reasonValue)) {
+        return false;
+    }
+
+    outPreviousRoomId = previousRoomId;
+    outReason = static_cast<TcpLobbyReturnReason>(reasonValue);
+    return true;
+}
+
+bool parseRoomDetailStatePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    TcpRoomDetailState& outDetail) {
+    if (!parseExactPacketType(data, size, TcpPacketType::kRoomDetailState, outHeader) ||
+        size < kTcpHeaderSize + kRoomIdFieldSize + kRoomStatusFieldSize +
+                   kRoomTitleLengthFieldSize + 1 + 1 +
+                   kRoomActionMaskFieldSize + kTargetActionCountFieldSize) {
+        return false;
+    }
+
+    TcpRoomDetailState parsed;
+    size_t offset = kTcpHeaderSize;
+    parsed.roomId = readU32BE(data + offset);
+    offset += kRoomIdFieldSize;
+    const uint8_t roomStatusValue = data[offset];
+    if (!isValidRoomStatusValue(roomStatusValue)) {
+        return false;
+    }
+    parsed.roomStatus = static_cast<TcpRoomStatus>(roomStatusValue);
+    offset += kRoomStatusFieldSize;
+
+    const uint8_t roomTitleLength = data[offset];
+    offset += kRoomTitleLengthFieldSize;
+    if (offset + roomTitleLength > size) {
+        return false;
+    }
+    parsed.roomTitle = std::string(
+        reinterpret_cast<const char*>(data + offset),
+        reinterpret_cast<const char*>(data + offset + roomTitleLength));
+    offset += roomTitleLength;
+
+    if (offset + 2 > size) {
+        return false;
+    }
+    parsed.maxPlayers = data[offset];
+    offset += 1;
+    const uint8_t memberCount = data[offset];
+    offset += 1;
+
+    parsed.members.reserve(memberCount);
+    for (uint8_t i = 0; i < memberCount; ++i) {
+        if (offset + kRoomMemberSessionIdFieldSize + kNicknameLengthFieldSize > size) {
+            return false;
+        }
+
+        TcpRoomMemberEntry member;
+        member.sessionId = readU32BE(data + offset);
+        offset += kRoomMemberSessionIdFieldSize;
+        const uint8_t nicknameLength = data[offset];
+        offset += kNicknameLengthFieldSize;
+        if (offset + nicknameLength + kReadyStateFieldSize > size) {
+            return false;
+        }
+        member.nickname = std::string(
+            reinterpret_cast<const char*>(data + offset),
+            reinterpret_cast<const char*>(data + offset + nicknameLength));
+        offset += nicknameLength;
+        const uint8_t readyValue = data[offset];
+        if (!isValidReadyStateValue(readyValue)) {
+            return false;
+        }
+        member.ready = readyValue == 1;
+        offset += kReadyStateFieldSize;
+        parsed.members.push_back(std::move(member));
+    }
+
+    if (offset + kRoomActionMaskFieldSize + kTargetActionCountFieldSize > size) {
+        return false;
+    }
+    parsed.selfActionMask = readU16BE(data + offset);
+    offset += kRoomActionMaskFieldSize;
+    const uint8_t targetActionCount = data[offset];
+    offset += kTargetActionCountFieldSize;
+    if (offset + (static_cast<size_t>(targetActionCount) * kTargetActionEntrySize) != size) {
+        return false;
+    }
+
+    parsed.targetActions.reserve(targetActionCount);
+    for (uint8_t i = 0; i < targetActionCount; ++i) {
+        TcpTargetActionEntry action;
+        action.targetSessionId = readU32BE(data + offset);
+        offset += kRoomMemberSessionIdFieldSize;
+        action.targetActionMask = readU16BE(data + offset);
+        offset += kRoomActionMaskFieldSize;
+        parsed.targetActions.push_back(action);
+    }
+
+    if (!isValidRoomDetailState(parsed) ||
+        roomDetailStatePacketSize(parsed) != size) {
+        return false;
+    }
+
+    outDetail = std::move(parsed);
     return true;
 }
 
@@ -779,6 +1818,186 @@ bool parseBattleStartPacket(
     outPlayerBSessionId = readU64BE(
         data + kTcpHeaderSize + kRoomIdFieldSize + kSessionIdFieldSize);
     return true;
+}
+
+bool parseBattleStartRosterPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    std::vector<uint64_t>& outPlayerSessionIds) {
+    outRoomId = 0;
+    outPlayerSessionIds.clear();
+    if (!parseExactPacketType(data, size, TcpPacketType::kBattleStartRoster, outHeader) ||
+        size < kTcpHeaderSize + kRoomIdFieldSize + kBattleStartRosterCountFieldSize) {
+        return false;
+    }
+
+    const uint32_t roomId = readU32BE(data + kTcpHeaderSize);
+    const uint16_t playerCount =
+        readU16BE(data + kTcpHeaderSize + kRoomIdFieldSize);
+    if (size != battleStartRosterPacketSize(playerCount)) {
+        return false;
+    }
+
+    std::vector<uint64_t> playerSessionIds;
+    playerSessionIds.reserve(playerCount);
+    const uint8_t* payload =
+        data + kTcpHeaderSize + kRoomIdFieldSize + kBattleStartRosterCountFieldSize;
+    for (uint16_t i = 0; i < playerCount; ++i) {
+        playerSessionIds.push_back(readU64BE(payload + (i * kBattleStartRosterEntrySize)));
+    }
+
+    if (!isValidBattleStartRoster(roomId, playerSessionIds)) {
+        return false;
+    }
+
+    outRoomId = roomId;
+    outPlayerSessionIds = std::move(playerSessionIds);
+    return true;
+}
+
+bool parseBattleLoadEntryPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId,
+    std::vector<uint64_t>& outPlayerSessionIds) {
+    outRoomId = 0;
+    outBattleInstanceId = 0;
+    outPlayerSessionIds.clear();
+    if (!parseExactPacketType(data, size, TcpPacketType::kBattleLoadEntry, outHeader) ||
+        size < kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize +
+            kBattleLoadEntryCountFieldSize) {
+        return false;
+    }
+
+    const uint32_t roomId = readU32BE(data + kTcpHeaderSize);
+    const uint64_t battleInstanceId =
+        readU64BE(data + kTcpHeaderSize + kRoomIdFieldSize);
+    const uint16_t playerCount =
+        readU16BE(data + kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize);
+    if (size != battleLoadEntryPacketSize(playerCount)) {
+        return false;
+    }
+
+    std::vector<uint64_t> playerSessionIds;
+    playerSessionIds.reserve(playerCount);
+    const uint8_t* payload =
+        data + kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize +
+        kBattleLoadEntryCountFieldSize;
+    for (uint16_t i = 0; i < playerCount; ++i) {
+        playerSessionIds.push_back(readU64BE(payload + (i * kBattleLoadEntryEntrySize)));
+    }
+
+    if (!isValidBattleLoadEntry(roomId, battleInstanceId, playerSessionIds)) {
+        return false;
+    }
+
+    outRoomId = roomId;
+    outBattleInstanceId = battleInstanceId;
+    outPlayerSessionIds = std::move(playerSessionIds);
+    return true;
+}
+
+bool parseBattleFinalRankingPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId,
+    std::vector<BattleFinalRankingEntry>& outRankings) {
+    outRoomId = 0;
+    outBattleInstanceId = 0;
+    outRankings.clear();
+    if (!parseExactPacketType(data, size, TcpPacketType::kBattleFinalRanking, outHeader) ||
+        size < kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize +
+            kBattleFinalRankingCountFieldSize) {
+        return false;
+    }
+
+    size_t offset = kTcpHeaderSize;
+    const uint32_t roomId = readU32BE(data + offset);
+    offset += kRoomIdFieldSize;
+    const uint64_t battleInstanceId = readU64BE(data + offset);
+    offset += kBattleInstanceIdFieldSize;
+    const uint8_t rankingCount = data[offset];
+    offset += kBattleFinalRankingCountFieldSize;
+    if (rankingCount < kBattleFinalRankingMinRows ||
+        rankingCount > kBattleFinalRankingMaxRows) {
+        return false;
+    }
+
+    std::vector<BattleFinalRankingEntry> rankings;
+    rankings.reserve(rankingCount);
+    for (uint8_t i = 0; i < rankingCount; ++i) {
+        if (offset + kBattleFinalRankingRankFieldSize + kSessionIdFieldSize +
+                kNicknameLengthFieldSize + kFinalAssetValueFieldSize > size) {
+            return false;
+        }
+
+        BattleFinalRankingEntry ranking;
+        ranking.rank = readU16BE(data + offset);
+        offset += kBattleFinalRankingRankFieldSize;
+        ranking.sessionId = readU64BE(data + offset);
+        offset += kSessionIdFieldSize;
+        const uint8_t nicknameLength = data[offset];
+        offset += kNicknameLengthFieldSize;
+        if (offset + nicknameLength + kFinalAssetValueFieldSize > size) {
+            return false;
+        }
+        ranking.nickname = std::string(
+            reinterpret_cast<const char*>(data + offset),
+            reinterpret_cast<const char*>(data + offset + nicknameLength));
+        offset += nicknameLength;
+        ranking.totalAssetValue = readI64BE(data + offset);
+        offset += kFinalAssetValueFieldSize;
+        rankings.push_back(std::move(ranking));
+    }
+
+    if (offset != size ||
+        battleFinalRankingPacketSize(rankings) != size ||
+        !isValidBattleFinalRanking(roomId, battleInstanceId, rankings)) {
+        return false;
+    }
+
+    outRoomId = roomId;
+    outBattleInstanceId = battleInstanceId;
+    outRankings = std::move(rankings);
+    return true;
+}
+
+bool parseArenaLoadCompletePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId) {
+    return parseRoomBattleInstancePacket(
+        data,
+        size,
+        TcpPacketType::kArenaLoadComplete,
+        kArenaLoadCompletePacketSize,
+        outHeader,
+        outRoomId,
+        outBattleInstanceId);
+}
+
+bool parseArenaGameplayStartPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId) {
+    return parseRoomBattleInstancePacket(
+        data,
+        size,
+        TcpPacketType::kArenaGameplayStart,
+        kArenaGameplayStartPacketSize,
+        outHeader,
+        outRoomId,
+        outBattleInstanceId);
 }
 
 bool parseMonsterSpawnPacket(
@@ -832,6 +2051,28 @@ bool parseMonsterDeathPacket(
     return true;
 }
 
+bool parseMonsterHealthSnapshotPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint32_t& outMonsterId,
+    uint16_t& outCurrentHp,
+    uint16_t& outMaxHp) {
+    if (!parseExactPacketType(data, size, TcpPacketType::kMonsterHealthSnapshot, outHeader) ||
+        size != kMonsterHealthSnapshotPacketSize) {
+        return false;
+    }
+
+    outRoomId = readU32BE(data + kTcpHeaderSize);
+    outMonsterId = readU32BE(data + kTcpHeaderSize + kRoomIdFieldSize);
+    outCurrentHp =
+        readU16BE(data + kTcpHeaderSize + kRoomIdFieldSize + kMonsterIdFieldSize);
+    outMaxHp = readU16BE(
+        data + kTcpHeaderSize + kRoomIdFieldSize + kMonsterIdFieldSize + kMonsterHpFieldSize);
+    return true;
+}
+
 bool parseDropListSnapshotPacket(
     const uint8_t* data,
     size_t size,
@@ -863,6 +2104,50 @@ bool parseDropListSnapshotPacket(
             readU32BE(entry),
             readU32BE(entry + kDropIdFieldSize),
             readU16BE(entry + kDropIdFieldSize + kItemIdFieldSize),
+        });
+    }
+
+    return true;
+}
+
+bool parseDropListSnapshotV2Packet(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint32_t& outScatterSeed,
+    std::vector<TcpDropEntryV2>& outDrops) {
+    outDrops.clear();
+    if (!parseTcpPacketHeader(data, size, outHeader)) {
+        return false;
+    }
+
+    if (outHeader.type != TcpPacketType::kDropListSnapshotV2 ||
+        size < kDropListSnapshotV2FixedPacketSize) {
+        return false;
+    }
+
+    outRoomId = readU32BE(data + kTcpHeaderSize);
+    outScatterSeed = readU32BE(data + kTcpHeaderSize + kRoomIdFieldSize);
+    const uint16_t count =
+        readU16BE(data + kTcpHeaderSize + kRoomIdFieldSize + kScatterSeedFieldSize);
+    const size_t expectedSize = dropListSnapshotV2PacketSize(count);
+    if (expectedSize != size) {
+        return false;
+    }
+
+    outDrops.reserve(count);
+    const uint8_t* payload = data + kDropListSnapshotV2FixedPacketSize;
+    for (uint16_t i = 0; i < count; ++i) {
+        const uint8_t* entry = payload + (static_cast<size_t>(i) * kDropEntryV2Size);
+        outDrops.push_back(TcpDropEntryV2{
+            readU32BE(entry),
+            readU32BE(entry + kDropIdFieldSize),
+            readU16BE(entry + kDropIdFieldSize + kItemIdFieldSize),
+            readI32BE(entry + kDropIdFieldSize + kItemIdFieldSize + kQuantityFieldSize),
+            readI32BE(
+                entry + kDropIdFieldSize + kItemIdFieldSize + kQuantityFieldSize +
+                    kPositionFieldSize),
         });
     }
 

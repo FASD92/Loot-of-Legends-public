@@ -1,0 +1,46 @@
+{
+  "schema_version": "release1.capacity.gate_config.v1",
+  "warmup_seconds": 300,
+  "official_measurement_window_seconds": 3600,
+  "arena_active_ratio_min": 0.8,
+  "runner_delivery_min_ratio": 0.99,
+  "runner_event_loop_lag_p99_max_tick_intervals": 1,
+  "runner_cpu_avg_max": 0.8,
+  "runner_cpu_p95_max": 0.9,
+  "primary_latency_p99_ms": 50,
+  "primary_latency_min_samples_per_op": 100000,
+  "heartbeat_stall_window_seconds": 5,
+  "snapshot_age_p99_ms": 200,
+  "rss_total_ram_max_ratio": 0.8,
+  "resource_cpu_avg_max": 0.8,
+  "resource_cpu_p95_max": 0.9,
+  "fd_growth_max_ratio": 0.05,
+  "thread_growth_max_ratio": 0.05,
+  "latency_buckets_ms": [
+    1,
+    2,
+    5,
+    10,
+    20,
+    33,
+    50,
+    75,
+    100,
+    150,
+    200,
+    500,
+    1000
+  ],
+  "result_statuses": [
+    "PASS",
+    "FAIL",
+    "INVALID",
+    "ABORTED"
+  ],
+  "hard_gate_categories": [
+    "Correctness",
+    "Primary latency",
+    "Tick and stability",
+    "Resource"
+  ]
+}

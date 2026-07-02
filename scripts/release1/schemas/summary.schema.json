@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "release1.capacity.summary.schema.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "completed_official_window",
+    "operator_aborted",
+    "validity",
+    "hard_gates",
+    "regression_comparisons"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "release1.capacity.summary.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "completed_official_window": {
+      "type": "boolean"
+    },
+    "operator_aborted": {
+      "type": "boolean"
+    },
+    "validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid",
+        "invalid_category",
+        "reason"
+      ],
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "invalid_category": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "hard_gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "all_passed",
+        "failed_categories"
+      ],
+      "properties": {
+        "all_passed": {
+          "type": "boolean"
+        },
+        "failed_categories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "regression_comparisons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "gate_config_sha256"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "gate_config_sha256": {
+            "type": "string",
+            "minLength": 64
+          }
+        }
+      }
+    }
+  }
+}

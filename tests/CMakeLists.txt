@@ -22,13 +22,17 @@ add_executable(
   core/RoomActorTests.cpp
   core/RoomEventDispatcherTests.cpp
   core/RoomEventMetricsTests.cpp
+  core/PrometheusTextfileWriterTests.cpp
   core/RoomEventQueueTests.cpp
   core/RoomEventTests.cpp
+  core/LootScatterTests.cpp
   core/RoomManagerTests.cpp
   core/ClientConnectionTests.cpp
   core/RudpInputCommandRoomEventTranslatorTests.cpp
   core/WorkerPoolTests.cpp
   core/ServerRoomIntegrationTests.cpp
+  core/LocalDevMetaSessionClaimClientTests.cpp
+  core/MetaHttpSessionClaimClientTests.cpp
   core/TcpPacketTests.cpp
   core/TcpPacketReaderTests.cpp
   core/SessionManagerTests.cpp
@@ -39,6 +43,7 @@ add_executable(
   client/DebugCliCommandTests.cpp
   protocol/AckWindowTests.cpp
   protocol/RudpBattleStartPayloadTests.cpp
+  protocol/RudpBattleStartRosterPayloadTests.cpp
   protocol/RudpDatagramReceiverTests.cpp
   protocol/RudpGameEventPayloadTests.cpp
   protocol/RudpGameplayEventIdempotencyTrackerTests.cpp

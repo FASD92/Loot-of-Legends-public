@@ -1,8 +1,13 @@
 #include "Game/RoomManager.hpp"
 
+#include "Game/LootScatter.hpp"
+
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <limits>
 #include <sstream>
+#include <string>
 
 namespace Game {
 namespace {
@@ -10,6 +15,10 @@ constexpr uint32_t kDefaultMonsterTypeId = 1;
 constexpr uint16_t kDefaultMonsterMaxHp = 100;
 constexpr uint32_t kDefaultDropItemId = 1001;
 constexpr uint16_t kDefaultDropQuantity = 1;
+constexpr uint16_t kMinCreateRoomCapacity = 2;
+constexpr uint16_t kMaxCreateRoomCapacity = 10;
+constexpr std::size_t kRoomTitleMaxVisibleCharacters = 20;
+constexpr std::size_t kRoomTitleMaxBytes = 64;
 
 uint64_t currentUnixTimeMs() {
     return static_cast<uint64_t>(
@@ -23,23 +32,175 @@ std::string makeSettlementId(uint32_t roomId, uint64_t sessionId, uint32_t seque
     out << "room-" << roomId << "-session-" << sessionId << "-finish-" << sequence;
     return out.str();
 }
+
+std::string makeDefaultRoomTitle(uint32_t roomId) {
+    return "Room" + std::to_string(roomId);
+}
+
+bool decodeNextUtf8CodePoint(const std::string& value, std::size_t& offset, uint32_t& outCodePoint) {
+    const unsigned char first = static_cast<unsigned char>(value[offset]);
+    if (first <= 0x7F) {
+        outCodePoint = first;
+        ++offset;
+        return true;
+    }
+
+    std::size_t length = 0;
+    uint32_t codePoint = 0;
+    if (first >= 0xC2 && first <= 0xDF) {
+        length = 2;
+        codePoint = first & 0x1F;
+    } else if (first >= 0xE0 && first <= 0xEF) {
+        length = 3;
+        codePoint = first & 0x0F;
+    } else if (first >= 0xF0 && first <= 0xF4) {
+        length = 4;
+        codePoint = first & 0x07;
+    } else {
+        return false;
+    }
+
+    if (offset + length > value.size()) {
+        return false;
+    }
+
+    for (std::size_t i = 1; i < length; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(value[offset + i]);
+        if ((ch & 0xC0) != 0x80) {
+            return false;
+        }
+        codePoint = (codePoint << 6) | (ch & 0x3F);
+    }
+
+    if ((length == 3 && codePoint < 0x800) ||
+        (length == 4 && codePoint < 0x10000) ||
+        codePoint > 0x10FFFF ||
+        (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+        return false;
+    }
+
+    offset += length;
+    outCodePoint = codePoint;
+    return true;
+}
+
+bool isDisallowedControlCodePoint(uint32_t codePoint) {
+    return codePoint < 0x20 || (codePoint >= 0x7F && codePoint <= 0x9F);
+}
+
+bool isWhitespaceCodePoint(uint32_t codePoint) {
+    return codePoint == 0x20 || codePoint == 0x09 || codePoint == 0x0A ||
+           codePoint == 0x0D || codePoint == 0x0B || codePoint == 0x0C ||
+           codePoint == 0x85 || codePoint == 0xA0 || codePoint == 0x1680 ||
+           (codePoint >= 0x2000 && codePoint <= 0x200A) ||
+           codePoint == 0x2028 || codePoint == 0x2029 ||
+           codePoint == 0x202F || codePoint == 0x205F ||
+           codePoint == 0x3000;
+}
+
+bool isValidRoomTitle(const std::string& title) {
+    if (title.empty() || title.size() > kRoomTitleMaxBytes) {
+        return false;
+    }
+
+    std::size_t offset = 0;
+    std::size_t visibleCharacters = 0;
+    bool previousWhitespace = false;
+    bool firstCharacter = true;
+    while (offset < title.size()) {
+        uint32_t codePoint = 0;
+        if (!decodeNextUtf8CodePoint(title, offset, codePoint) ||
+            isDisallowedControlCodePoint(codePoint)) {
+            return false;
+        }
+
+        const bool whitespace = isWhitespaceCodePoint(codePoint);
+        if ((firstCharacter && whitespace) || (previousWhitespace && whitespace)) {
+            return false;
+        }
+
+        previousWhitespace = whitespace;
+        firstCharacter = false;
+        ++visibleCharacters;
+        if (visibleCharacters > kRoomTitleMaxVisibleCharacters) {
+            return false;
+        }
+    }
+
+    return visibleCharacters > 0 && !previousWhitespace;
+}
+
+bool isValidCreateRoomCapacity(uint16_t maxPlayers) {
+    return maxPlayers >= kMinCreateRoomCapacity && maxPlayers <= kMaxCreateRoomCapacity;
+}
+
+bool isValidFinalRankingNickname(const std::string& nickname) {
+    if (nickname.empty() || nickname.size() > 32) {
+        return false;
+    }
+
+    for (const unsigned char ch : nickname) {
+        if (ch < 0x20 || ch > 0x7E) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool checkedAddAssetValue(
+    int64_t currentTotal,
+    int64_t unitValue,
+    uint16_t quantity,
+    int64_t& outTotal) {
+    if (unitValue < 0 || quantity == 0) {
+        return false;
+    }
+    if (unitValue != 0 &&
+        quantity > std::numeric_limits<int64_t>::max() / unitValue) {
+        return false;
+    }
+
+    const int64_t stackValue = unitValue * static_cast<int64_t>(quantity);
+    if (currentTotal > std::numeric_limits<int64_t>::max() - stackValue) {
+        return false;
+    }
+
+    outTotal = currentTotal + stackValue;
+    return outTotal >= 0;
+}
 }  // namespace
 
-RoomManager::RoomManager(uint16_t maxPlayersPerRoom, uint16_t maxInventoryWeight)
+RoomManager::RoomManager(
+    uint16_t maxPlayersPerRoom,
+    uint16_t maxInventoryWeight,
+    ItemValueCatalog itemValueCatalog)
     : nextRoomId_(1),
       nextMonsterId_(1),
       nextDropId_(1),
       nextSettlementSequence_(1),
+      nextCombatSequence_(1),
+      nextBattleInstanceId_(1),
       maxPlayersPerRoom_(maxPlayersPerRoom),
-      maxInventoryWeight_(maxInventoryWeight) {}
+      maxInventoryWeight_(maxInventoryWeight),
+      itemValueCatalog_(std::move(itemValueCatalog)) {}
 
 RoomCommandResult RoomManager::createRoom(uint64_t sessionId) {
+    const uint32_t roomId = nextRoomId_;
+    return createRoom(sessionId, makeDefaultRoomTitle(roomId), maxPlayersPerRoom_);
+}
+
+RoomCommandResult RoomManager::createRoom(uint64_t sessionId, std::string title, uint16_t maxPlayers) {
     if (findRoomIdForSession(sessionId).has_value()) {
         return RoomCommandResult(false, RoomCommandError::kAlreadyInRoom);
     }
 
+    if (!isValidRoomTitle(title) || !isValidCreateRoomCapacity(maxPlayers)) {
+        return RoomCommandResult(false, RoomCommandError::kInvalidTarget);
+    }
+
     const uint32_t roomId = nextRoomId_++;
-    Room room(roomId, maxPlayersPerRoom_, maxInventoryWeight_);
+    Room room(roomId, maxPlayers, maxInventoryWeight_, std::move(title));
     const bool added = room.addPlayer(sessionId);
     if (!added) {
         return RoomCommandResult(false, RoomCommandError::kFull);
@@ -64,6 +225,13 @@ RoomCommandResult RoomManager::joinRoom(uint64_t sessionId, uint32_t roomId) {
     auto roomIt = rooms_.find(roomId);
     if (roomIt == rooms_.end()) {
         return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    if (roomIt->second.battleStarted()) {
+        return RoomCommandResult(
+            false,
+            RoomCommandError::kAlreadyStarted,
+            summarizeRoom(roomIt->second));
     }
 
     if (roomIt->second.isFull()) {
@@ -100,6 +268,8 @@ RoomCommandResult RoomManager::leaveRoom(uint64_t sessionId) {
     }
 
     const std::vector<uint64_t> affectedSessionIds = roomIt->second.playerSessionIds();
+    const bool hostTransferred =
+        roomIt->second.isHost(sessionId) && roomIt->second.playerCount() > 1;
     roomIt->second.removePlayer(sessionId);
     sessionToRoomId_.erase(mappingIt);
     sessionStartedAtMs_.erase(sessionId);
@@ -112,7 +282,9 @@ RoomCommandResult RoomManager::leaveRoom(uint64_t sessionId) {
         rooms_.erase(roomIt);
     }
 
-    return RoomCommandResult(true, RoomCommandError::kNone, summary, playerSessionIds);
+    RoomCommandResult result(true, RoomCommandError::kNone, summary, playerSessionIds);
+    result.hostTransferred = hostTransferred;
+    return result;
 }
 
 RoomCommandResult RoomManager::markReady(uint64_t sessionId) {
@@ -133,17 +305,194 @@ RoomCommandResult RoomManager::markReady(uint64_t sessionId) {
         return RoomCommandResult(false, RoomCommandError::kNotInRoom);
     }
 
-    room.markReady(sessionId);
-    const bool battleJustStarted = room.tryStartBattle();
-    if (battleJustStarted) {    // 런타임 상태가 크게 바뀌는 이벤트. 이전에 만들어둔 settlement 캐시는 더 이상 현재 상태를 대표하지 않을 수 있으므로 삭제한다.
-        forgetSettlementsForPlayers(room.playerSessionIds());
+    if (room.battleStarted()) {
+        return RoomCommandResult(false, RoomCommandError::kAlreadyStarted, summarizeRoom(room));
     }
+
+    room.markReady(sessionId);
     return RoomCommandResult(
         true,
         RoomCommandError::kNone,
         summarizeRoom(room),
         room.playerSessionIds(),
-        battleJustStarted);
+        false);
+}
+
+RoomCommandResult RoomManager::markUnready(uint64_t sessionId) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    auto roomIt = rooms_.find(mappingIt->second);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    if (room.battleStarted()) {
+        return RoomCommandResult(false, RoomCommandError::kAlreadyStarted, summarizeRoom(room));
+    }
+
+    room.markUnready(sessionId);
+    return RoomCommandResult(
+        true,
+        RoomCommandError::kNone,
+        summarizeRoom(room),
+        room.playerSessionIds());
+}
+
+RoomCommandResult RoomManager::hostStartBattle(uint64_t sessionId) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    auto roomIt = rooms_.find(mappingIt->second);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    if (room.battleStarted()) {
+        return RoomCommandResult(false, RoomCommandError::kAlreadyStarted, summarizeRoom(room));
+    }
+
+    if (!room.isHost(sessionId)) {
+        return RoomCommandResult(false, RoomCommandError::kNotHost, summarizeRoom(room));
+    }
+
+    if (room.playerCount() < Room::kMinPlayersToStart) {
+        return RoomCommandResult(false, RoomCommandError::kNotEnoughPlayers, summarizeRoom(room));
+    }
+
+    if (!room.canStartBattle()) {
+        return RoomCommandResult(false, RoomCommandError::kNotAllReady, summarizeRoom(room));
+    }
+
+    const uint64_t battleInstanceId = nextBattleInstanceId_;
+    const bool battleJustStarted = room.hostStartBattle(sessionId, battleInstanceId);
+    if (!battleJustStarted) {
+        return RoomCommandResult(false, RoomCommandError::kNotAllReady, summarizeRoom(room));
+    }
+    ++nextBattleInstanceId_;
+
+    forgetSettlementsForPlayers(room.playerSessionIds());
+    RoomCommandResult result(
+        true,
+        RoomCommandError::kNone,
+        summarizeRoom(room),
+        room.playerSessionIds(),
+        true);
+    result.battleInstanceId = battleInstanceId;
+    result.arenaLoadBarrierOpened = true;
+    return result;
+}
+
+RoomCommandResult RoomManager::markArenaLoadComplete(
+    uint64_t sessionId,
+    uint32_t roomId,
+    uint64_t battleInstanceId) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    if (mappingIt->second != roomId) {
+        return RoomCommandResult(false, RoomCommandError::kInvalidTarget);
+    }
+
+    auto roomIt = rooms_.find(roomId);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    bool arenaGameplayJustStarted = false;
+    if (!room.markArenaLoadComplete(sessionId, battleInstanceId, arenaGameplayJustStarted)) {
+        RoomCommandResult rejected(
+            false,
+            RoomCommandError::kInvalidTarget,
+            summarizeRoom(room),
+            room.playerSessionIds());
+        rejected.battleInstanceId = room.battleInstanceId();
+        return rejected;
+    }
+
+    RoomCommandResult result(
+        true,
+        RoomCommandError::kNone,
+        summarizeRoom(room),
+        room.playerSessionIds());
+    result.battleInstanceId = room.battleInstanceId();
+    result.arenaGameplayJustStarted = arenaGameplayJustStarted;
+    return result;
+}
+
+RoomCommandResult RoomManager::hostKick(uint64_t hostSessionId, uint64_t targetSessionId) {
+    auto mappingIt = sessionToRoomId_.find(hostSessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    auto roomIt = rooms_.find(mappingIt->second);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(hostSessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    if (room.battleStarted()) {
+        return RoomCommandResult(false, RoomCommandError::kAlreadyStarted, summarizeRoom(room));
+    }
+
+    if (!room.isHost(hostSessionId)) {
+        return RoomCommandResult(false, RoomCommandError::kNotHost, summarizeRoom(room));
+    }
+
+    if (targetSessionId == hostSessionId || !room.contains(targetSessionId)) {
+        return RoomCommandResult(false, RoomCommandError::kInvalidTarget, summarizeRoom(room));
+    }
+
+    const std::vector<uint64_t> affectedSessionIds = room.playerSessionIds();
+    if (!room.kickPlayer(targetSessionId)) {
+        return RoomCommandResult(false, RoomCommandError::kInvalidTarget, summarizeRoom(room));
+    }
+
+    sessionToRoomId_.erase(targetSessionId);
+    sessionStartedAtMs_.erase(targetSessionId);
+    forgetSettlementsForPlayers(affectedSessionIds);
+
+    RoomCommandResult result(
+        true,
+        RoomCommandError::kNone,
+        summarizeRoom(room),
+        room.playerSessionIds());
+    result.kickedSessionId = targetSessionId;
+    return result;
 }
 
 RoomCommandResult RoomManager::spawnMonster(uint32_t roomId) {
@@ -193,11 +542,30 @@ RoomCommandResult RoomManager::defeatMonster(uint64_t sessionId, uint32_t monste
         return RoomCommandResult(false, RoomCommandError::kNotInRoom);
     }
 
-    const uint32_t dropId = nextDropId_;
-    if (!room.defeatMonster(monsterId, dropId, kDefaultDropItemId, kDefaultDropQuantity)) {
+    const uint32_t scatterSeed =
+        nextDropId_ ^ (room.roomId() * 2654435761U) ^ monsterId;
+    const std::vector<ScatterDropPlacement> placements =
+        buildLootScatter(scatterSeed, room.playerCount(), room.monster().position, nextDropId_);
+
+    std::vector<Drop> scatteredDrops;
+    scatteredDrops.reserve(placements.size());
+    for (const ScatterDropPlacement& placement : placements) {
+        scatteredDrops.push_back(
+            Drop{
+                placement.sequence,
+                kDefaultDropItemId,
+                kDefaultDropQuantity,
+                1,
+                false,
+                0,
+                placement.position});
+    }
+
+    if (!room.defeatMonster(monsterId, scatteredDrops)) {
         return RoomCommandResult(false, RoomCommandError::kNotFound, summarizeRoom(room));
     }
-    ++nextDropId_;
+    room.markBattleDropsVisible(currentUnixTimeMs());
+    nextDropId_ += static_cast<uint32_t>(scatteredDrops.size());
 
     return RoomCommandResult(
         true,
@@ -209,6 +577,75 @@ RoomCommandResult RoomManager::defeatMonster(uint64_t sessionId, uint32_t monste
         true,
         room.monster(),
         room.drops());
+}
+
+RoomCommandResult RoomManager::attackMonster(
+    uint64_t sessionId,
+    uint32_t targetHintMonsterId) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    auto roomIt = rooms_.find(mappingIt->second);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    const uint32_t scatterSeed =
+        nextDropId_ ^
+        (room.roomId() * 2654435761U) ^
+        targetHintMonsterId ^
+        nextCombatSequence_;
+    const std::vector<ScatterDropPlacement> placements =
+        buildLootScatter(scatterSeed, room.playerCount(), room.monster().position, nextDropId_);
+
+    std::vector<Drop> deathDrops;
+    deathDrops.reserve(placements.size());
+    for (const ScatterDropPlacement& placement : placements) {
+        deathDrops.push_back(
+            Drop{
+                placement.sequence,
+                kDefaultDropItemId,
+                kDefaultDropQuantity,
+                1,
+                false,
+                0,
+                placement.position});
+    }
+
+    const AttackApplyResult attack =
+        room.applyAttack(sessionId, targetHintMonsterId, deathDrops);
+    if (attack.status != AttackApplyStatus::kApplied) {
+        return RoomCommandResult(false, RoomCommandError::kNotFound, summarizeRoom(room));
+    }
+
+    ++nextCombatSequence_;
+    if (attack.monsterJustDefeated) {
+        room.markBattleDropsVisible(currentUnixTimeMs());
+        nextDropId_ += static_cast<uint32_t>(deathDrops.size());
+        forgetSettlementsForPlayers(room.playerSessionIds());
+    }
+
+    RoomCommandResult result(
+        true,
+        RoomCommandError::kNone,
+        summarizeRoom(room),
+        room.playerSessionIds(),
+        false,
+        false,
+        attack.monsterJustDefeated,
+        attack.monster,
+        attack.drops);
+    result.scatterSeed = scatterSeed;
+    return result;
 }
 
 RoomCommandResult RoomManager::createCenterDropForSmoke(uint64_t sessionId) {
@@ -233,6 +670,7 @@ RoomCommandResult RoomManager::createCenterDropForSmoke(uint64_t sessionId) {
     if (!room.createSmokeDrop(dropId, kDefaultDropItemId, kDefaultDropQuantity)) {
         return RoomCommandResult(false, RoomCommandError::kNotFound, summarizeRoom(room));
     }
+    room.markBattleDropsVisible(currentUnixTimeMs());
     ++nextDropId_;
 
     return RoomCommandResult(
@@ -288,6 +726,51 @@ RoomCommandResult RoomManager::claimLoot(uint64_t sessionId, uint32_t dropId) {
     result.drop = claim.drop;
     result.inventory = claim.inventory;
     if (claim.claimed) {    // 실제로 이 세션이 loot를 획득한 경우에만 정산 캐시 무효화.
+        forgetSettlement(sessionId);
+    }
+    return result;
+}
+
+RoomCommandResult RoomManager::claimNearestLoot(uint64_t sessionId) {
+    auto mappingIt = sessionToRoomId_.find(sessionId);
+    if (mappingIt == sessionToRoomId_.end()) {
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    auto roomIt = rooms_.find(mappingIt->second);
+    if (roomIt == rooms_.end()) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotFound);
+    }
+
+    Room& room = roomIt->second;
+    if (!room.contains(sessionId)) {
+        sessionToRoomId_.erase(mappingIt);
+        return RoomCommandResult(false, RoomCommandError::kNotInRoom);
+    }
+
+    const LootClaimResult claim = room.claimNearestLoot(sessionId);
+    if (!claim.found) {
+        return RoomCommandResult(false, RoomCommandError::kNotFound, summarizeRoom(room));
+    }
+
+    RoomCommandResult result(
+        true,
+        RoomCommandError::kNone,
+        summarizeRoom(room),
+        room.playerSessionIds(),
+        false,
+        false,
+        false,
+        room.monster(),
+        room.drops());
+    result.lootJustClaimed = claim.claimed;
+    result.lootRejected = claim.rejected;
+    result.lootRejectReason = claim.rejectReason;
+    result.winnerSessionId = claim.winnerSessionId;
+    result.drop = claim.drop;
+    result.inventory = claim.inventory;
+    if (claim.claimed) {
         forgetSettlement(sessionId);
     }
     return result;
@@ -369,6 +852,11 @@ MovementCommandResult RoomManager::applyMovement(
 SettlementCommandResult RoomManager::buildSettlementResult(
     uint64_t sessionId,
     uint64_t finishedAtUnixMs) {
+    auto cachedIt = settlementBySessionId_.find(sessionId);
+    if (cachedIt != settlementBySessionId_.end()) {
+        return SettlementCommandResult{true, RoomCommandError::kNone, cachedIt->second};
+    }
+
     auto mappingIt = sessionToRoomId_.find(sessionId);
     if (mappingIt == sessionToRoomId_.end()) {
         return SettlementCommandResult{false, RoomCommandError::kNotInRoom, SettlementResult{}};
@@ -388,11 +876,6 @@ SettlementCommandResult RoomManager::buildSettlementResult(
         sessionStartedAtMs_.erase(sessionId);
         forgetSettlement(sessionId);
         return SettlementCommandResult{false, RoomCommandError::kNotInRoom, SettlementResult{}};
-    }
-
-    auto cachedIt = settlementBySessionId_.find(sessionId);
-    if (cachedIt != settlementBySessionId_.end()) {
-        return SettlementCommandResult{true, RoomCommandError::kNone, cachedIt->second};
     }
 
     const InventorySnapshot* inventory = room.findInventory(sessionId);
@@ -432,6 +915,151 @@ SettlementCommandResult RoomManager::buildSettlementResult(
         true,
         RoomCommandError::kNone,
         settlementBySessionId_.at(sessionId)};
+}
+
+BattleFinalRankingResult RoomManager::buildBattleFinalRanking(
+    uint32_t roomId,
+    NicknameLookup nicknameLookup) const {
+    BattleFinalRankingResult result;
+    result.roomId = roomId;
+
+    const auto roomIt = rooms_.find(roomId);
+    if (roomIt == rooms_.end()) {
+        result.status = BattleFinalRankingStatus::kRoomNotFound;
+        return result;
+    }
+
+    const Room& room = roomIt->second;
+    result.battleInstanceId = room.battleInstanceId();
+    result.participantSessionIds = room.arenaGameplayParticipantSessionIds();
+
+    if (!room.arenaGameplayStarted() || result.battleInstanceId == 0) {
+        result.status = BattleFinalRankingStatus::kNotInGameplay;
+        return result;
+    }
+
+    if (!room.allBattleDropsResolved()) {
+        result.status = BattleFinalRankingStatus::kNotComplete;
+        return result;
+    }
+
+    if (!nicknameLookup || result.participantSessionIds.empty()) {
+        result.status = BattleFinalRankingStatus::kResultGenerationFailure;
+        return result;
+    }
+
+    std::vector<BattleFinalRankingRow> rows;
+    rows.reserve(result.participantSessionIds.size());
+    for (const uint64_t sessionId : result.participantSessionIds) {
+        const std::optional<std::string> nickname = nicknameLookup(sessionId);
+        if (!nickname.has_value() || !isValidFinalRankingNickname(*nickname)) {
+            result.status = BattleFinalRankingStatus::kResultGenerationFailure;
+            return result;
+        }
+
+        const InventorySnapshot* inventory = room.findInventory(sessionId);
+        if (inventory == nullptr) {
+            result.status = BattleFinalRankingStatus::kResultGenerationFailure;
+            return result;
+        }
+
+        int64_t totalAssetValue = 0;
+        for (const InventoryEntry& entry : inventory->entries) {
+            if (entry.quantity == 0) {
+                continue;
+            }
+            const std::optional<int64_t> unitValue =
+                itemValueCatalog_.findUnitValue(entry.itemId);
+            if (!unitValue.has_value()) {
+                result.status = BattleFinalRankingStatus::kResultGenerationFailure;
+                return result;
+            }
+
+            int64_t nextTotal = 0;
+            if (!checkedAddAssetValue(
+                    totalAssetValue,
+                    *unitValue,
+                    entry.quantity,
+                    nextTotal)) {
+                result.status = BattleFinalRankingStatus::kResultGenerationFailure;
+                return result;
+            }
+            totalAssetValue = nextTotal;
+        }
+
+        rows.push_back(BattleFinalRankingRow{0, sessionId, *nickname, totalAssetValue});
+    }
+
+    std::sort(
+        rows.begin(),
+        rows.end(),
+        [](const BattleFinalRankingRow& lhs, const BattleFinalRankingRow& rhs) {
+            if (lhs.totalAssetValue != rhs.totalAssetValue) {
+                return lhs.totalAssetValue > rhs.totalAssetValue;
+            }
+            return lhs.sessionId < rhs.sessionId;
+        });
+
+    uint16_t currentRank = 0;
+    int64_t previousValue = -1;
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        if (index == 0 || rows[index].totalAssetValue != previousValue) {
+            currentRank = static_cast<uint16_t>(index + 1);
+            previousValue = rows[index].totalAssetValue;
+        }
+        rows[index].rank = currentRank;
+    }
+
+    result.status = BattleFinalRankingStatus::kOk;
+    result.rows = std::move(rows);
+    return result;
+}
+
+std::vector<BattleFinalRankingResult> RoomManager::processBattleDropTimeouts(
+    uint64_t nowUnixMs,
+    NicknameLookup nicknameLookup) {
+    std::vector<BattleFinalRankingResult> completed;
+    for (auto& entry : rooms_) {
+        Room& room = entry.second;
+        if (!room.resolveExpiredBattleDrops(nowUnixMs) || !room.allBattleDropsResolved()) {
+            continue;
+        }
+        completed.push_back(buildBattleFinalRanking(room.roomId(), nicknameLookup));
+    }
+
+    std::sort(
+        completed.begin(),
+        completed.end(),
+        [](const BattleFinalRankingResult& lhs, const BattleFinalRankingResult& rhs) {
+            return lhs.roomId < rhs.roomId;
+        });
+    return completed;
+}
+
+std::vector<uint64_t> RoomManager::closeRoom(uint32_t roomId) {
+    auto roomIt = rooms_.find(roomId);
+    if (roomIt == rooms_.end()) {
+        return {};
+    }
+
+    std::vector<uint64_t> sessionIds = roomIt->second.playerSessionIds();
+    for (uint64_t sessionId : roomIt->second.arenaGameplayParticipantSessionIds()) {
+        if (std::find(sessionIds.begin(), sessionIds.end(), sessionId) == sessionIds.end()) {
+            sessionIds.push_back(sessionId);
+        }
+    }
+
+    const uint64_t finishedAtUnixMs = currentUnixTimeMs();
+    for (uint64_t sessionId : roomIt->second.playerSessionIds()) {
+        buildSettlementResult(sessionId, finishedAtUnixMs);
+    }
+
+    for (uint64_t sessionId : sessionIds) {
+        sessionToRoomId_.erase(sessionId);
+        sessionStartedAtMs_.erase(sessionId);
+    }
+    rooms_.erase(roomIt);
+    return sessionIds;
 }
 
 std::optional<uint32_t> RoomManager::findRoomIdForSession(uint64_t sessionId) const {
@@ -485,6 +1113,7 @@ void RoomManager::forgetSettlementsForPlayers(const std::vector<uint64_t>& sessi
 RoomSummary RoomManager::summarizeRoom(const Room& room) const {
     return RoomSummary(
         room.roomId(),
+        room.title(),
         room.playerCount(),
         room.maxPlayers(),
         room.readyPlayerCount(),

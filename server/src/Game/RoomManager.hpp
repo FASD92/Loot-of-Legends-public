@@ -2,12 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
 #include <unordered_map>
 #include <vector>
 
+#include "Game/ItemValueCatalog.hpp"
 #include "Game/Room.hpp"
 
 namespace Game {
@@ -17,10 +19,16 @@ enum class RoomCommandError : uint16_t {
     kNotFound = 2,
     kAlreadyInRoom = 3,
     kNotInRoom = 4,
+    kAlreadyStarted = 5,
+    kNotHost = 6,
+    kNotAllReady = 7,
+    kNotEnoughPlayers = 8,
+    kInvalidTarget = 9,
 };
 
 struct RoomSummary {
     uint32_t roomId{0};
+    std::string title;
     uint16_t playerCount{0};
     uint16_t maxPlayers{0};
     uint16_t readyPlayerCount{0};
@@ -35,7 +43,24 @@ struct RoomSummary {
         uint16_t readyPlayerCountIn = 0,
         bool battleStartedIn = false,
         bool monsterAliveIn = false)
+        : RoomSummary(
+              roomIdIn,
+              {},
+              playerCountIn,
+              maxPlayersIn,
+              readyPlayerCountIn,
+              battleStartedIn,
+              monsterAliveIn) {}
+    RoomSummary(
+        uint32_t roomIdIn,
+        std::string titleIn,
+        uint16_t playerCountIn,
+        uint16_t maxPlayersIn,
+        uint16_t readyPlayerCountIn = 0,
+        bool battleStartedIn = false,
+        bool monsterAliveIn = false)
         : roomId(roomIdIn),
+          title(std::move(titleIn)),
           playerCount(playerCountIn),
           maxPlayers(maxPlayersIn),
           readyPlayerCount(readyPlayerCountIn),
@@ -52,11 +77,17 @@ struct RoomCommandResult {
     // 서버는 '상태'가 아니라 '전이 이벤트'를 보고 broadcast 해야 한다.
     // 근데 따지고 보면 multicast도 하지 않나? 둘 다 하니까 broadcast인가?
     bool battleJustStarted{false};
+    uint64_t battleInstanceId{0};
+    bool arenaLoadBarrierOpened{false};
+    bool arenaGameplayJustStarted{false};
+    uint64_t kickedSessionId{0};
+    bool hostTransferred{false};
     bool monsterJustSpawned{false};
     bool monsterJustDefeated{false};
 
     Monster monster{};
     std::vector<Drop> drops{};
+    uint32_t scatterSeed{0};
     bool lootJustClaimed{false};
     bool lootRejected{false};
     LootRejectReason lootRejectReason{LootRejectReason::kNone};
@@ -134,19 +165,55 @@ struct SettlementCommandResult {
     SettlementResult settlement{};
 };
 
+enum class BattleFinalRankingStatus : uint16_t {
+    kOk = 0,
+    kRoomNotFound = 1,
+    kNotInGameplay = 2,
+    kNotComplete = 3,
+    kResultGenerationFailure = 4,
+};
+
+struct BattleFinalRankingRow {
+    uint16_t rank{0};
+    uint64_t sessionId{0};
+    std::string nickname;
+    int64_t totalAssetValue{0};
+};
+
+struct BattleFinalRankingResult {
+    BattleFinalRankingStatus status{BattleFinalRankingStatus::kResultGenerationFailure};
+    uint32_t roomId{0};
+    uint64_t battleInstanceId{0};
+    std::vector<uint64_t> participantSessionIds{};
+    std::vector<BattleFinalRankingRow> rows{};
+};
+
+using NicknameLookup = std::function<std::optional<std::string>(uint64_t)>;
+
 class RoomManager {
 public:
     explicit RoomManager(
         uint16_t maxPlayersPerRoom = Room::kDefaultMaxPlayers,
-        uint16_t maxInventoryWeight = Room::kDefaultMaxInventoryWeight);
+        uint16_t maxInventoryWeight = Room::kDefaultMaxInventoryWeight,
+        ItemValueCatalog itemValueCatalog = ItemValueCatalog::release0());
 
     RoomCommandResult createRoom(uint64_t sessionId);
+    RoomCommandResult createRoom(uint64_t sessionId, std::string title, uint16_t maxPlayers);
     RoomCommandResult joinRoom(uint64_t sessionId, uint32_t roomId);
     RoomCommandResult leaveRoom(uint64_t sessionId);
     RoomCommandResult markReady(uint64_t sessionId);
+    RoomCommandResult markUnready(uint64_t sessionId);
+    RoomCommandResult hostStartBattle(uint64_t sessionId);
+    RoomCommandResult markArenaLoadComplete(
+        uint64_t sessionId,
+        uint32_t roomId,
+        uint64_t battleInstanceId);
+    RoomCommandResult hostKick(uint64_t hostSessionId, uint64_t targetSessionId);
     RoomCommandResult spawnMonster(uint32_t roomId);
     RoomCommandResult defeatMonster(uint64_t sessionId, uint32_t monsterId);
+    RoomCommandResult attackMonster(uint64_t sessionId, uint32_t targetHintMonsterId);
     RoomCommandResult createCenterDropForSmoke(uint64_t sessionId);
+    RoomCommandResult claimNearestLoot(uint64_t sessionId);
     RoomCommandResult claimLoot(uint64_t sessionId, uint32_t dropId);
     SmokePlayerPlacementResult placePlayersAroundCenterDropForSmoke(uint64_t sessionId);
     MovementCommandResult applyMovement(
@@ -155,6 +222,13 @@ public:
         int16_t dirY,
         uint32_t elapsedMs);
     SettlementCommandResult buildSettlementResult(uint64_t sessionId, uint64_t finishedAtUnixMs);
+    BattleFinalRankingResult buildBattleFinalRanking(
+        uint32_t roomId,
+        NicknameLookup nicknameLookup) const;
+    std::vector<BattleFinalRankingResult> processBattleDropTimeouts(
+        uint64_t nowUnixMs,
+        NicknameLookup nicknameLookup);
+    std::vector<uint64_t> closeRoom(uint32_t roomId);
 
     std::optional<uint32_t> findRoomIdForSession(uint64_t sessionId) const;   // sessionId와 일치하는 세션이 없으면 std::nullopt 반환
     const Room* findRoom(uint32_t roomId) const;
@@ -175,7 +249,10 @@ private:
     uint32_t nextMonsterId_;
     uint32_t nextDropId_;
     uint32_t nextSettlementSequence_;
+    uint32_t nextCombatSequence_;
+    uint64_t nextBattleInstanceId_;
     uint16_t maxPlayersPerRoom_;
     uint16_t maxInventoryWeight_;
+    ItemValueCatalog itemValueCatalog_;
 };
 }  // namespace Game

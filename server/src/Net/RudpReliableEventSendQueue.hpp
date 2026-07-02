@@ -11,6 +11,7 @@
 namespace Net {
 enum class RudpReliableEventKind {
     kBattleStart,
+    kBattleStartRoster,
     kMonsterDeath,
     kLootResolved,
     kMetaResponse,

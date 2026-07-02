@@ -98,6 +98,62 @@ TEST(RudpInputCommandPayloadTests, ParsesClickLootPayload) {
     EXPECT_EQ(parsed.argValue, 0x01020304U);
 }
 
+TEST(RudpInputCommandPayloadTests, ParsesAttackPayloadWithOptionalTargetHint) {
+    const std::vector<uint8_t> bytes = inputCommandPayload(
+        9,
+        20,
+        static_cast<uint8_t>(Net::RudpInputCommandOp::kAttack),
+        u32Arg(0));
+
+    Net::RudpInputCommandPayload parsed;
+    ASSERT_TRUE(Net::parseRudpInputCommandPayload(bytes.data(), bytes.size(), parsed));
+    EXPECT_EQ(parsed.playerId, 9U);
+    EXPECT_EQ(parsed.cmdSeq, 20U);
+    EXPECT_EQ(parsed.op, Net::RudpInputCommandOp::kAttack);
+    EXPECT_EQ(parsed.argValue, 0U);
+}
+
+TEST(RudpInputCommandPayloadTests, ParsesAttackPayloadWithTargetHint) {
+    const std::vector<uint8_t> bytes = inputCommandPayload(
+        9,
+        21,
+        static_cast<uint8_t>(Net::RudpInputCommandOp::kAttack),
+        u32Arg(0x01020304U));
+
+    Net::RudpInputCommandPayload parsed;
+    ASSERT_TRUE(Net::parseRudpInputCommandPayload(bytes.data(), bytes.size(), parsed));
+    EXPECT_EQ(parsed.playerId, 9U);
+    EXPECT_EQ(parsed.cmdSeq, 21U);
+    EXPECT_EQ(parsed.op, Net::RudpInputCommandOp::kAttack);
+    EXPECT_EQ(parsed.argValue, 0x01020304U);
+}
+
+TEST(RudpInputCommandPayloadTests, ParsesSpaceLootPayloadWithoutArgument) {
+    const std::vector<uint8_t> bytes = inputCommandPayload(
+        9,
+        22,
+        static_cast<uint8_t>(Net::RudpInputCommandOp::kSpaceLoot),
+        {});
+
+    Net::RudpInputCommandPayload parsed;
+    ASSERT_TRUE(Net::parseRudpInputCommandPayload(bytes.data(), bytes.size(), parsed));
+    EXPECT_EQ(parsed.playerId, 9U);
+    EXPECT_EQ(parsed.cmdSeq, 22U);
+    EXPECT_EQ(parsed.op, Net::RudpInputCommandOp::kSpaceLoot);
+    EXPECT_EQ(parsed.argValue, 0U);
+}
+
+TEST(RudpInputCommandPayloadTests, RejectsSpaceLootPayloadWithArgument) {
+    const std::vector<uint8_t> bytes = inputCommandPayload(
+        9,
+        23,
+        static_cast<uint8_t>(Net::RudpInputCommandOp::kSpaceLoot),
+        u32Arg(1));
+
+    Net::RudpInputCommandPayload parsed;
+    EXPECT_FALSE(Net::parseRudpInputCommandPayload(bytes.data(), bytes.size(), parsed));
+}
+
 TEST(RudpInputCommandPayloadTests, ParsesMovePayload) {
     const std::vector<uint8_t> bytes = inputCommandPayload(
         11,
@@ -183,6 +239,11 @@ TEST(RudpInputCommandPayloadTests, RejectsActionPayloadWithWrongArgLength) {
         2,
         static_cast<uint8_t>(Net::RudpInputCommandOp::kClickLoot),
         {0x00, 0x01});
+    const std::vector<uint8_t> attack = inputCommandPayload(
+        1,
+        2,
+        static_cast<uint8_t>(Net::RudpInputCommandOp::kAttack),
+        {0x00, 0x01});
     const std::vector<uint8_t> move = inputCommandPayload(
         1,
         2,
@@ -197,6 +258,10 @@ TEST(RudpInputCommandPayloadTests, RejectsActionPayloadWithWrongArgLength) {
     EXPECT_FALSE(Net::parseRudpInputCommandPayload(
         clickLoot.data(),
         clickLoot.size(),
+        parsed));
+    EXPECT_FALSE(Net::parseRudpInputCommandPayload(
+        attack.data(),
+        attack.size(),
         parsed));
     EXPECT_FALSE(Net::parseRudpInputCommandPayload(
         move.data(),

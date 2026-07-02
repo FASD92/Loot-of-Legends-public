@@ -60,6 +60,7 @@ uint8_t expectedChannelForPacketType(uint16_t packetType) {
         case Net::RudpPacketType::kStateSnapshot:
             return static_cast<uint8_t>(Net::RudpChannelId::kSnapshot);
         case Net::RudpPacketType::kBattleStart:
+        case Net::RudpPacketType::kBattleStartRoster:
         case Net::RudpPacketType::kGameEvent:
             return static_cast<uint8_t>(Net::RudpChannelId::kEvent);
     }

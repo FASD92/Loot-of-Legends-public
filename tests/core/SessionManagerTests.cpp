@@ -1,7 +1,12 @@
 #include <gtest/gtest.h>
 
+#include "Core/Server.hpp"
 #include "Core/SessionManager.hpp"
 #include "Util/Time.hpp"
+
+TEST(ServerSessionTimeoutTests, DefaultTimeoutAllowsManualRoomReadyPause) {
+    EXPECT_GE(Core::defaultSessionTimeout(), std::chrono::seconds(60));
+}
 
 TEST(SessionManagerTests, FindOrCreateReusesSession) {
     Core::SessionManager manager(std::chrono::milliseconds(1000));

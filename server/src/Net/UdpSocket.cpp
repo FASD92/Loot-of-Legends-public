@@ -8,6 +8,19 @@
 
 #include <cstring>
 
+namespace {
+constexpr int kRequestedUdpReceiveBufferBytes = 4 * 1024 * 1024;
+
+void requestUdpReceiveBuffer(int fd) {
+    ::setsockopt(
+        fd,
+        SOL_SOCKET,
+        SO_RCVBUF,
+        &kRequestedUdpReceiveBufferBytes,
+        sizeof(kRequestedUdpReceiveBufferBytes));
+}
+}  // namespace
+
 namespace Net {
 UdpSocket::UdpSocket() : fd_(-1) {}     // 멤버 초기화 리스트. 처음엔 소켓이 안 열려있으니 fd를 -1로 엶. 생성자 본문보다 먼저 실행됨.
 
@@ -22,6 +35,8 @@ bool UdpSocket::open(uint16_t port) {
     if (fd_ < 0) {
         return false;
     }
+
+    requestUdpReceiveBuffer(fd_);
 
     int reuse = 1;      // 포트 재사용 옵션
     setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
@@ -125,6 +140,20 @@ uint16_t UdpSocket::boundPort() const {
     }
 
     return 0;
+}
+
+size_t UdpSocket::receiveBufferSize() const {
+    if (fd_ < 0) {
+        return 0;
+    }
+
+    int value = 0;
+    socklen_t valueSize = sizeof(value);
+    if (::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &value, &valueSize) < 0 ||
+        value < 0) {
+        return 0;
+    }
+    return static_cast<size_t>(value);
 }
 
     // 로깅용 문자열 변환

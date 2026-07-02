@@ -48,6 +48,13 @@ RudpInputCommandRoomEventTranslateResult translateRudpInputCommandToRoomEvent(
             sessionId,
             roomId,
             input.argValue));
+    case Net::RudpInputCommandOp::kAttack:
+        return translated(Game::makeAttackRoomEvent(
+            sessionId,
+            roomId,
+            input.argValue));
+    case Net::RudpInputCommandOp::kSpaceLoot:
+        return translated(Game::makeSpaceLootRoomEvent(sessionId, roomId));
     case Net::RudpInputCommandOp::kMove:
         return reject(RudpInputCommandRoomEventTranslateStatus::kUnsupportedOp);
     }

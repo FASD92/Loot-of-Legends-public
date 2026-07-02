@@ -24,6 +24,8 @@ enum class OutboundMessageType : uint8_t {
     kLootRejected = 6,
     kLootResolved = 7,
     kInventorySnapshot = 8,
+    kMonsterHealthSnapshot = 9,
+    kDropListSnapshotV2 = 10,
 };
 
 struct OutboundEnvelope {
@@ -38,6 +40,7 @@ struct OutboundEnvelope {
     std::vector<uint64_t> playerSessionIds{};
     Monster monster{};
     std::vector<Drop> drops{};
+    uint32_t scatterSeed{0};
     Drop drop{};
     LootRejectReason lootRejectReason{LootRejectReason::kNone};
     uint64_t winnerSessionId{0};

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -7,6 +8,16 @@
 #include "Game/RoomActor.hpp"
 #include "Game/RoomEventDispatcher.hpp"
 #include "Game/RoomEventQueue.hpp"
+
+namespace {
+void startTwoPlayerBattle(Game::RoomManager& manager, uint64_t hostSessionId, uint64_t guestSessionId) {
+    ASSERT_TRUE(manager.markReady(hostSessionId).ok);
+    ASSERT_TRUE(manager.markReady(guestSessionId).ok);
+    const Game::RoomCommandResult started = manager.hostStartBattle(hostSessionId);
+    ASSERT_TRUE(started.ok);
+    ASSERT_TRUE(started.battleJustStarted);
+}
+}  // namespace
 
 TEST(RoomActorTests, AppliesReadyEventsThroughRoomManager) {
     Game::RoomManager manager;
@@ -26,11 +37,16 @@ TEST(RoomActorTests, AppliesReadyEventsThroughRoomManager) {
         actor.apply(manager, Game::makeReadyRoomEvent(20, created.room.roomId));
     ASSERT_EQ(secondReady.status, Game::RoomEventApplyStatus::kApplied);
     EXPECT_TRUE(secondReady.commandResult.ok);
-    EXPECT_TRUE(secondReady.commandResult.battleJustStarted);
+    EXPECT_FALSE(secondReady.commandResult.battleJustStarted);
     EXPECT_EQ(secondReady.commandResult.room.readyPlayerCount, 2u);
 
     const Game::Room* room = manager.findRoom(created.room.roomId);
     ASSERT_NE(room, nullptr);
+    EXPECT_FALSE(room->battleStarted());
+
+    const Game::RoomCommandResult started = manager.hostStartBattle(10);
+    ASSERT_TRUE(started.ok);
+    EXPECT_TRUE(started.battleJustStarted);
     EXPECT_TRUE(room->battleStarted());
 }
 
@@ -39,8 +55,7 @@ TEST(RoomActorTests, AppliesMonsterDeathThroughRoomManager) {
     const Game::RoomCommandResult created = manager.createRoom(10);
     ASSERT_TRUE(created.ok);
     ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
-    ASSERT_TRUE(manager.markReady(10).ok);
-    ASSERT_TRUE(manager.markReady(20).ok);
+    startTwoPlayerBattle(manager, 10, 20);
     const Game::RoomCommandResult spawned = manager.spawnMonster(created.room.roomId);
     ASSERT_TRUE(spawned.ok);
     const Game::RoomActor actor(created.room.roomId);
@@ -60,13 +75,54 @@ TEST(RoomActorTests, AppliesMonsterDeathThroughRoomManager) {
     EXPECT_EQ(defeated.commandResult.drops[0].dropId, 1u);
 }
 
+TEST(RoomActorTests, AppliesAttackThroughRoomManagerUntilMonsterDeathScatter) {
+    Game::RoomManager manager;
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    startTwoPlayerBattle(manager, 10, 20);
+    const Game::RoomCommandResult spawned = manager.spawnMonster(created.room.roomId);
+    ASSERT_TRUE(spawned.ok);
+
+    const Game::RoomActor actor(created.room.roomId);
+    const Game::RoomEvent attack =
+        Game::makeAttackRoomEvent(10, created.room.roomId, spawned.monster.monsterId);
+
+    const Game::RoomEventApplyResult damaged = actor.apply(manager, attack);
+    ASSERT_EQ(damaged.status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_TRUE(damaged.commandResult.ok);
+    EXPECT_FALSE(damaged.commandResult.monsterJustDefeated);
+    EXPECT_TRUE(damaged.commandResult.monster.alive);
+    EXPECT_EQ(
+        damaged.commandResult.monster.currentHp,
+        spawned.monster.maxHp - Game::Room::kAttackDamage);
+
+    ASSERT_EQ(actor.apply(manager, attack).status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_EQ(actor.apply(manager, attack).status, Game::RoomEventApplyStatus::kApplied);
+    const Game::RoomEventApplyResult defeated = actor.apply(manager, attack);
+
+    ASSERT_EQ(defeated.status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_TRUE(defeated.commandResult.ok);
+    EXPECT_TRUE(defeated.commandResult.monsterJustDefeated);
+    EXPECT_FALSE(defeated.commandResult.monster.alive);
+    EXPECT_EQ(defeated.commandResult.monster.currentHp, 0u);
+    EXPECT_GT(defeated.commandResult.scatterSeed, 0u);
+    ASSERT_EQ(defeated.commandResult.drops.size(), 1u);
+    EXPECT_GT(defeated.commandResult.drops[0].dropId, 0u);
+
+    const Game::Room* room = manager.findRoom(created.room.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_FALSE(room->hasAliveMonster());
+    ASSERT_EQ(room->drops().size(), 1u);
+    EXPECT_EQ(room->drops()[0].dropId, defeated.commandResult.drops[0].dropId);
+}
+
 TEST(RoomActorTests, AppliesQueuedClickLootEventsWithoutChangingOwnershipInvariant) {
     Game::RoomManager manager;
     const Game::RoomCommandResult created = manager.createRoom(10);
     ASSERT_TRUE(created.ok);
     ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
-    ASSERT_TRUE(manager.markReady(10).ok);
-    ASSERT_TRUE(manager.markReady(20).ok);
+    startTwoPlayerBattle(manager, 10, 20);
     const Game::RoomCommandResult spawned = manager.spawnMonster(created.room.roomId);
     ASSERT_TRUE(spawned.ok);
     const Game::RoomCommandResult defeated =
@@ -119,8 +175,7 @@ TEST(RoomActorTests, CenterDropPlacementQueuedClickLootKeepsSingleWinner) {
     const Game::RoomCommandResult created = manager.createRoom(10);
     ASSERT_TRUE(created.ok);
     ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
-    ASSERT_TRUE(manager.markReady(10).ok);
-    ASSERT_TRUE(manager.markReady(20).battleJustStarted);
+    startTwoPlayerBattle(manager, 10, 20);
 
     const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
     ASSERT_TRUE(dropped.ok);
@@ -214,6 +269,26 @@ TEST(RoomActorTests, CenterDropPlacementQueuedClickLootKeepsSingleWinner) {
     EXPECT_EQ(loserPosition->y, 0);
 }
 
+TEST(RoomActorTests, AppliesSpaceLootThroughRoomManager) {
+    Game::RoomManager manager;
+    const Game::RoomCommandResult created = manager.createRoom(10);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
+    startTwoPlayerBattle(manager, 10, 20);
+    const Game::RoomCommandResult dropped = manager.createCenterDropForSmoke(10);
+    ASSERT_TRUE(dropped.ok);
+
+    const Game::RoomActor actor(created.room.roomId);
+    const Game::RoomEventApplyResult result =
+        actor.apply(manager, Game::makeSpaceLootRoomEvent(10, created.room.roomId));
+
+    ASSERT_EQ(result.status, Game::RoomEventApplyStatus::kApplied);
+    ASSERT_TRUE(result.commandResult.ok);
+    EXPECT_TRUE(result.commandResult.lootJustClaimed);
+    EXPECT_EQ(result.commandResult.winnerSessionId, 10u);
+    EXPECT_EQ(result.commandResult.drop.dropId, dropped.drops[0].dropId);
+}
+
 TEST(RoomActorTests, TenPlayerClickLootContentionKeepsSingleOwner) {
     constexpr std::size_t kPlayerCount = 10;
     constexpr uint64_t kFirstSessionId = 1000;
@@ -240,15 +315,19 @@ TEST(RoomActorTests, TenPlayerClickLootContentionKeepsSingleOwner) {
         ASSERT_TRUE(ready.ok);
         EXPECT_EQ(ready.room.readyPlayerCount, index + 1);
         EXPECT_EQ(ready.room.playerCount, kPlayerCount);
-        EXPECT_EQ(ready.battleJustStarted, index + 1 == sessionIds.size());
+        EXPECT_FALSE(ready.battleJustStarted);
     }
+    const Game::RoomCommandResult started = manager.hostStartBattle(sessionIds.front());
+    ASSERT_TRUE(started.ok);
+    ASSERT_TRUE(started.battleJustStarted);
 
     const Game::RoomCommandResult spawned = manager.spawnMonster(roomId);
     ASSERT_TRUE(spawned.ok);
     const Game::RoomCommandResult defeated =
         manager.defeatMonster(sessionIds.front(), spawned.monster.monsterId);
     ASSERT_TRUE(defeated.ok);
-    ASSERT_EQ(defeated.drops.size(), 1u);
+    ASSERT_GE(defeated.drops.size(), 1u);
+    ASSERT_LT(defeated.drops.size(), sessionIds.size());
     const uint32_t dropId = defeated.drops[0].dropId;
     const uint32_t itemId = defeated.drops[0].itemId;
     const uint16_t quantity = defeated.drops[0].quantity;
@@ -293,9 +372,13 @@ TEST(RoomActorTests, TenPlayerClickLootContentionKeepsSingleOwner) {
 
     const Game::Room* room = manager.findRoom(roomId);
     ASSERT_NE(room, nullptr);
-    ASSERT_EQ(room->drops().size(), 1u);
-    EXPECT_TRUE(room->drops()[0].claimed);
-    EXPECT_EQ(room->drops()[0].ownerSessionId, winnerSessionId);
+    const auto dropIt = std::find_if(
+        room->drops().begin(),
+        room->drops().end(),
+        [dropId](const Game::Drop& drop) { return drop.dropId == dropId; });
+    ASSERT_NE(dropIt, room->drops().end());
+    EXPECT_TRUE(dropIt->claimed);
+    EXPECT_EQ(dropIt->ownerSessionId, winnerSessionId);
 
     for (uint64_t sessionId : sessionIds) {
         const Game::InventorySnapshot* inventory = room->findInventory(sessionId);
@@ -333,10 +416,8 @@ TEST(RoomActorTests, MultipleRoomsKeepClickLootStateIsolated) {
     ASSERT_NE(roomBId, roomAId);
     ASSERT_TRUE(manager.joinRoom(kRoomBLoserSessionId, roomBId).ok);
 
-    ASSERT_TRUE(manager.markReady(kRoomAWinnerSessionId).ok);
-    ASSERT_TRUE(manager.markReady(kRoomALoserSessionId).battleJustStarted);
-    ASSERT_TRUE(manager.markReady(kRoomBWinnerSessionId).ok);
-    ASSERT_TRUE(manager.markReady(kRoomBLoserSessionId).battleJustStarted);
+    startTwoPlayerBattle(manager, kRoomAWinnerSessionId, kRoomALoserSessionId);
+    startTwoPlayerBattle(manager, kRoomBWinnerSessionId, kRoomBLoserSessionId);
 
     const Game::RoomCommandResult spawnedA = manager.spawnMonster(roomAId);
     ASSERT_TRUE(spawnedA.ok);
@@ -556,8 +637,7 @@ TEST(RoomActorTests, PreservesRoomCommandRejection) {
     const Game::RoomCommandResult created = manager.createRoom(10);
     ASSERT_TRUE(created.ok);
     ASSERT_TRUE(manager.joinRoom(20, created.room.roomId).ok);
-    ASSERT_TRUE(manager.markReady(10).ok);
-    ASSERT_TRUE(manager.markReady(20).ok);
+    startTwoPlayerBattle(manager, 10, 20);
     const Game::RoomCommandResult spawned = manager.spawnMonster(created.room.roomId);
     ASSERT_TRUE(spawned.ok);
     const Game::RoomActor actor(created.room.roomId);

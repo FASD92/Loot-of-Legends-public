@@ -25,6 +25,7 @@ public:
 
     int fd() const;
     uint16_t boundPort() const;
+    size_t receiveBufferSize() const;
 
 private:
     int fd_;

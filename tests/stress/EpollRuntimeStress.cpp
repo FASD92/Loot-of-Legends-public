@@ -419,8 +419,8 @@ bool receiveJoinRoomResponse(
 }
 
 bool sendCreateRoomRequest(int fd) {
-    std::array<uint8_t, Net::kTcpHeaderSize> packet{};
-    return Net::serializeCreateRoomRequestPacket(packet) &&
+    std::vector<uint8_t> packet;
+    return Net::serializeCreateRoomRequestPacket("Room", Net::kCreateRoomMaxCapacity, packet) &&
            sendAll(fd, packet.data(), packet.size());
 }
 

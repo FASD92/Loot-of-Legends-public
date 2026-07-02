@@ -64,6 +64,20 @@ bool parseRudpInputCommandPayload(
         parsed.op = RudpInputCommandOp::kClickLoot;
         parsed.argValue = readU32BE(data + kRudpInputCommandPrefixSize);
         break;
+    case static_cast<uint8_t>(RudpInputCommandOp::kAttack):
+        if (argLen != 4) {
+            return false;
+        }
+        parsed.op = RudpInputCommandOp::kAttack;
+        parsed.argValue = readU32BE(data + kRudpInputCommandPrefixSize);
+        break;
+    case static_cast<uint8_t>(RudpInputCommandOp::kSpaceLoot):
+        if (argLen != 0) {
+            return false;
+        }
+        parsed.op = RudpInputCommandOp::kSpaceLoot;
+        parsed.argValue = 0;
+        break;
     case static_cast<uint8_t>(RudpInputCommandOp::kMove):
         if (argLen != 6) {
             return false;

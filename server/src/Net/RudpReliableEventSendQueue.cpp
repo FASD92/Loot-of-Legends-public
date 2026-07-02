@@ -12,6 +12,10 @@ bool expectedPacketContract(
             outPacketType = static_cast<uint16_t>(Net::RudpPacketType::kBattleStart);
             outChannelId = static_cast<uint8_t>(Net::RudpChannelId::kEvent);
             return true;
+        case Net::RudpReliableEventKind::kBattleStartRoster:
+            outPacketType = static_cast<uint16_t>(Net::RudpPacketType::kBattleStartRoster);
+            outChannelId = static_cast<uint8_t>(Net::RudpChannelId::kEvent);
+            return true;
         case Net::RudpReliableEventKind::kMonsterDeath:
         case Net::RudpReliableEventKind::kLootResolved:
             outPacketType = static_cast<uint16_t>(Net::RudpPacketType::kGameEvent);

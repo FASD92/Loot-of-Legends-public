@@ -1,10 +1,14 @@
 spring:
   application:
     name: loot-of-legends-meta-server
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration
 
 server:
   port: 8081
   shutdown: graceful
+  forward-headers-strategy: framework
 
 management:
   endpoints:
@@ -15,3 +19,27 @@ management:
 meta:
   internal:
     token: ${META_INTERNAL_TOKEN}
+
+release0:
+  game-server:
+    host: ${RELEASE0_GAME_HOST:127.0.0.1}
+    tcp-port: ${RELEASE0_GAME_TCP_PORT:40000}
+    rudp-port: ${RELEASE0_GAME_RUDP_PORT:40000}
+  admission:
+    active-session-capacity: ${RELEASE0_ACTIVE_SESSION_CAPACITY:100}
+    queue-entry-ttl-seconds: ${RELEASE0_QUEUE_ENTRY_TTL_SECONDS:30}
+    reservation-ttl-seconds: ${RELEASE0_RESERVATION_TTL_SECONDS:10}
+  invite:
+    enabled: ${RELEASE0_INVITE_ENABLED:false}
+    code: ${RELEASE0_INVITE_CODE:}
+  firewall:
+    enabled: ${RELEASE0_FIREWALL_ENABLED:false}
+    socket-path: ${RELEASE0_FIREWALL_AGENT_SOCKET:/run/loot-of-legends/firewall-agent.sock}
+    pre-auth-ttl-seconds: ${RELEASE0_FIREWALL_PREAUTH_TTL_SECONDS:60}
+    active-session-ttl-seconds: ${RELEASE0_FIREWALL_ACTIVE_TTL_SECONDS:600}
+    trusted-forwarded-header: ${RELEASE0_FIREWALL_TRUSTED_FORWARDED_HEADER:X-Release0-Client-IP}
+    trust-forwarded-header: ${RELEASE0_FIREWALL_TRUST_FORWARDED_HEADER:false}
+  test-identities:
+    enabled: ${RELEASE0_TEST_IDENTITIES_ENABLED:false}
+    header-name: ${RELEASE0_TEST_ACCOUNT_HEADER:X-Release0-Test-Account}
+    max-batch-size: ${RELEASE0_TEST_IDENTITIES_MAX_BATCH_SIZE:101}

@@ -63,6 +63,33 @@ TEST(RudpInputCommandRoomEventTranslatorTests, TranslatesClickLootCommand) {
     expectTranslatedEvent(result, Game::RoomEventType::kClickLoot, 100, 7, 44);
 }
 
+TEST(RudpInputCommandRoomEventTranslatorTests, TranslatesAttackCommandWithZeroTargetHint) {
+    const auto result = Core::translateRudpInputCommandToRoomEvent(
+        100,
+        7,
+        input(999, 10, Net::RudpInputCommandOp::kAttack, 0));
+
+    expectTranslatedEvent(result, Game::RoomEventType::kAttack, 100, 7, 0);
+}
+
+TEST(RudpInputCommandRoomEventTranslatorTests, TranslatesAttackCommandWithTargetHint) {
+    const auto result = Core::translateRudpInputCommandToRoomEvent(
+        100,
+        7,
+        input(999, 11, Net::RudpInputCommandOp::kAttack, 33));
+
+    expectTranslatedEvent(result, Game::RoomEventType::kAttack, 100, 7, 33);
+}
+
+TEST(RudpInputCommandRoomEventTranslatorTests, TranslatesSpaceLootCommand) {
+    const auto result = Core::translateRudpInputCommandToRoomEvent(
+        100,
+        7,
+        input(999, 12, Net::RudpInputCommandOp::kSpaceLoot));
+
+    expectTranslatedEvent(result, Game::RoomEventType::kSpaceLoot, 100, 7, 0);
+}
+
 TEST(RudpInputCommandRoomEventTranslatorTests, RejectsMoveUntilMovementDispatchPlan) {
     Net::RudpInputCommandPayload move =
         input(999, 4, Net::RudpInputCommandOp::kMove);

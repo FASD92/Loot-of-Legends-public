@@ -10,15 +10,23 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
+#include "Core/MetaSessionClaimClient.hpp"
 #include "Core/Server.hpp"
 #include "Net/RudpBattleStartPayload.hpp"
+#include "Net/RudpBattleStartRosterPayload.hpp"
 #include "Net/RudpGameEventPayload.hpp"
 #include "Net/RudpHelloPayload.hpp"
 #include "Net/RudpInputCommandPayload.hpp"
@@ -103,8 +111,56 @@ struct ServerTestAccess {
             result == Net::RudpSessionBindResult::kRefreshed;
     }
 
+    static void processRudpSocket(Server& server, Util::TimePoint now) {
+        server.processRudpSocket(now);
+    }
+
+    static void broadcastStateSnapshots(
+        Server& server,
+        bool clientListChanged,
+        bool roomListChanged,
+        Util::TimePoint now) {
+        server.broadcastStateSnapshots(clientListChanged, roomListChanged, now);
+    }
+
+    static void processPendingRoomListSnapshotBroadcast(
+        Server& server,
+        Util::TimePoint now) {
+        server.processPendingRoomListSnapshotBroadcast(now);
+    }
+
+    static uint64_t createSession(
+        Server& server,
+        const std::string& remoteKey,
+        Util::TimePoint now) {
+        std::shared_ptr<Session> session =
+            server.sessionManager_.findOrCreate(remoteKey, now);
+        if (!session) {
+            return 0;
+        }
+        server.sessionCountSnapshot_.store(
+            server.sessionManager_.size(),
+            std::memory_order_relaxed);
+        return session->sessionId();
+    }
+
     static Game::RoomCommandResult createRoom(Server& server, uint64_t sessionId) {
         return server.roomManager_.createRoom(sessionId);
+    }
+
+    static bool registerRoomForDispatch(Server& server, uint32_t roomId) {
+        return server.roomEventDispatcher_.registerRoom(roomId);
+    }
+
+    static Game::RoomCommandResult spawnMonster(Server& server, uint32_t roomId) {
+        return server.roomManager_.spawnMonster(roomId);
+    }
+
+    static Game::RoomCommandResult defeatMonster(
+        Server& server,
+        uint64_t sessionId,
+        uint32_t monsterId) {
+        return server.roomManager_.defeatMonster(sessionId, monsterId);
     }
 
     static Game::RoomCommandResult joinRoom(
@@ -112,6 +168,16 @@ struct ServerTestAccess {
         uint64_t sessionId,
         uint32_t roomId) {
         return server.roomManager_.joinRoom(sessionId, roomId);
+    }
+
+    static Game::RoomCommandResult markReady(Server& server, uint64_t sessionId) {
+        return server.roomManager_.markReady(sessionId);
+    }
+
+    static Game::RoomCommandResult hostStartBattle(
+        Server& server,
+        uint64_t sessionId) {
+        return server.roomManager_.hostStartBattle(sessionId);
     }
 
     static Game::RoomCommandResult leaveRoom(Server& server, uint64_t sessionId) {
@@ -152,7 +218,47 @@ struct ServerTestAccess {
         delivery.header.sequence = sequence;
         delivery.header.payloadLen = static_cast<uint16_t>(payload.size());
         delivery.payload = payload;
-        server.processRudpAdapterGate(delivery, now);
+        std::vector<int> disconnectedClients;
+        bool roomListChanged = false;
+        server.processRudpAdapterGate(
+            delivery,
+            now,
+            disconnectedClients,
+            roomListChanged);
+
+        bool roomChangedByDisconnect = false;
+        for (int clientFd : disconnectedClients) {
+            roomChangedByDisconnect =
+                server.disconnectClient(clientFd) || roomChangedByDisconnect;
+        }
+        if (!disconnectedClients.empty() || roomListChanged || roomChangedByDisconnect) {
+            server.broadcastStateSnapshots(
+                !disconnectedClients.empty(),
+                roomListChanged || roomChangedByDisconnect);
+        }
+    }
+
+    static void processRudpHelloDelivery(
+        Server& server,
+        const Net::UdpEndpoint& endpoint,
+        uint32_t sequence,
+        const std::vector<uint8_t>& payload,
+        Util::TimePoint now) {
+        Net::RudpPeer* peer = server.rudpPeerRegistry_.findOrCreate(endpoint, now);
+        ASSERT_NE(peer, nullptr);
+        server.rudpPeerCountSnapshot_.store(
+            server.rudpPeerRegistry_.size(),
+            std::memory_order_relaxed);
+
+        Net::RudpPacketDelivery delivery;
+        delivery.endpoint = endpoint;
+        delivery.header.channelId = static_cast<uint8_t>(Net::RudpChannelId::kControl);
+        delivery.header.packetType =
+            static_cast<uint16_t>(Net::RudpPacketType::kHello);
+        delivery.header.sequence = sequence;
+        delivery.header.payloadLen = static_cast<uint16_t>(payload.size());
+        delivery.payload = payload;
+        server.processRudpHelloDelivery(delivery, now);
     }
 
     static RudpServerReliableEventTrackResult trackRudpReliableEvent(
@@ -181,6 +287,13 @@ struct ServerTestAccess {
         const Game::RoomCommandResult& result,
         std::vector<int>& disconnectedClients) {
         return server.broadcastBattleStart(result, disconnectedClients);
+    }
+
+    static void enqueueRudpBattleStartEvent(
+        Server& server,
+        const Game::RoomCommandResult& result,
+        Util::TimePoint now) {
+        server.enqueueRudpBattleStartEvent(result, now);
     }
 
     static bool broadcastMonsterDeath(
@@ -273,6 +386,29 @@ struct ServerTestAccess {
         return server.roomManager_.findRoom(roomId);
     }
 
+    static bool completeBattleResultsThenBroadcastRoomList(
+        Server& server,
+        const std::vector<Game::BattleFinalRankingResult>& rankings) {
+        std::vector<int> disconnectedClients;
+        bool roomListChanged = false;
+        bool allSucceeded = true;
+        for (const Game::BattleFinalRankingResult& ranking : rankings) {
+            allSucceeded =
+                server.completeBattleResult(ranking, disconnectedClients, roomListChanged) &&
+                allSucceeded;
+        }
+        if (roomListChanged) {
+            allSucceeded =
+                server.sendRoomListSnapshotToLobbySessions(disconnectedClients) &&
+                allSucceeded;
+        }
+        return allSucceeded;
+    }
+
+    static size_t roomCount(Server& server) {
+        return server.roomManager_.roomList().size();
+    }
+
     static bool markRudpReliableEventRetransmitted(
         Server& server,
         uint64_t sessionId,
@@ -297,6 +433,18 @@ struct ServerTestAccess {
         server.processRudpMovementSnapshots(now);
     }
 
+    static void processRuntimeTimerMaintenanceForRelease1Metrics(
+        Server& server,
+        Util::TimePoint now) {
+        server.processRuntimeTimerMaintenance(now);
+    }
+
+    static void processMetaSessionLivenessReports(
+        Server& server,
+        Util::TimePoint now) {
+        server.processMetaSessionLivenessReports(now);
+    }
+
     static size_t rudpSnapshotRoomStateSize(Server& server) {
         return server.rudpSnapshotStateByRoom_.size();
     }
@@ -312,7 +460,228 @@ Util::TimePoint timeAt(int64_t milliseconds) {
     return Util::TimePoint{std::chrono::milliseconds(milliseconds)};
 }
 
-int connectToServer(uint16_t port) {
+uint64_t unixTimeMsForTest(int64_t offsetMs = 0) {
+    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+    return static_cast<uint64_t>(nowMs + offsetMs);
+}
+
+std::string readTextFile(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    return std::string(
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>());
+}
+
+class TestMetaSessionClaimClient final : public Core::IMetaSessionClaimClient {
+public:
+    explicit TestMetaSessionClaimClient(bool completeImmediately = true)
+        : completeImmediately_(completeImmediately) {}
+
+    void claimGameSessionAsync(
+        const Core::MetaSessionClaimRequest& request,
+        ClaimCallback callback) override {
+        Core::MetaSessionClaimResult immediateResult;
+        bool completeNow = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            claimRequests_.push_back(request);
+            if (!completeImmediately_) {
+                pendingClaims_.push_back(PendingClaim{request, std::move(callback)});
+                return;
+            }
+
+            immediateResult.accepted = true;
+            immediateResult.profile.accountId = nextAutoAccountId_++;
+            immediateResult.profile.nickname =
+                "Player" + std::to_string(immediateResult.profile.accountId);
+            immediateResult.reservationExpiresAtUnixMs = unixTimeMsForTest(10'000);
+            completeNow = true;
+        }
+
+        if (completeNow) {
+            callback(std::move(immediateResult));
+        }
+    }
+
+    void releaseGameSessionAsync(
+        const Core::MetaSessionReleaseRequest& request) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        releaseRequests_.push_back(request);
+    }
+
+    void renewGameSessionAsync(
+        const Core::MetaSessionRenewRequest& request) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        renewRequests_.push_back(request);
+    }
+
+    bool completeClaim(
+        const std::string& token,
+        Core::MetaSessionClaimResult result) {
+        ClaimCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto pendingIt = std::find_if(
+                pendingClaims_.begin(),
+                pendingClaims_.end(),
+                [&token](const PendingClaim& pending) {
+                    return pending.request.gameSessionToken == token;
+                });
+            if (pendingIt == pendingClaims_.end()) {
+                return false;
+            }
+
+            callback = std::move(pendingIt->callback);
+            pendingClaims_.erase(pendingIt);
+        }
+
+        callback(std::move(result));
+        return true;
+    }
+
+    std::optional<ClaimCallback> takePendingClaimCallback(
+        const std::string& token) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto pendingIt = std::find_if(
+            pendingClaims_.begin(),
+            pendingClaims_.end(),
+            [&token](const PendingClaim& pending) {
+                return pending.request.gameSessionToken == token;
+            });
+        if (pendingIt == pendingClaims_.end()) {
+            return std::nullopt;
+        }
+
+        ClaimCallback callback = std::move(pendingIt->callback);
+        pendingClaims_.erase(pendingIt);
+        return callback;
+    }
+
+    bool hasPendingClaim(const std::string& token) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return std::any_of(
+            pendingClaims_.begin(),
+            pendingClaims_.end(),
+            [&token](const PendingClaim& pending) {
+                return pending.request.gameSessionToken == token;
+            });
+    }
+
+    size_t pendingClaimCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pendingClaims_.size();
+    }
+
+    size_t releaseCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return releaseRequests_.size();
+    }
+
+    std::vector<Core::MetaSessionReleaseRequest> releaseRequests() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return releaseRequests_;
+    }
+
+    size_t renewCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return renewRequests_.size();
+    }
+
+    std::vector<Core::MetaSessionRenewRequest> renewRequests() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return renewRequests_;
+    }
+
+private:
+    struct PendingClaim {
+        Core::MetaSessionClaimRequest request;
+        ClaimCallback callback;
+    };
+
+    bool completeImmediately_;
+    mutable std::mutex mutex_;
+    uint64_t nextAutoAccountId_{1000};
+    std::vector<Core::MetaSessionClaimRequest> claimRequests_;
+    std::vector<PendingClaim> pendingClaims_;
+    std::vector<Core::MetaSessionReleaseRequest> releaseRequests_;
+    std::vector<Core::MetaSessionRenewRequest> renewRequests_;
+};
+
+Core::MetaSessionClaimResult acceptedClaim(uint64_t accountId, const std::string& nickname) {
+    Core::MetaSessionClaimResult result;
+    result.accepted = true;
+    result.profile.accountId = accountId;
+    result.profile.nickname = nickname;
+    result.reservationExpiresAtUnixMs = unixTimeMsForTest(10'000);
+    return result;
+}
+
+Core::MetaSessionClaimResult rejectedClaim() {
+    Core::MetaSessionClaimResult result;
+    result.accepted = false;
+    return result;
+}
+
+class BlockingMetaSessionClaimClient final : public Core::IMetaSessionClaimClient {
+public:
+    void claimGameSessionAsync(
+        const Core::MetaSessionClaimRequest& request,
+        ClaimCallback callback) override {
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            claimRequests_.push_back(request);
+            ++startedClaims_;
+            if (startedClaims_ == 1) {
+                firstClaimStarted_ = true;
+                condition_.notify_all();
+                condition_.wait(lock, [this]() { return unblockFirstClaim_; });
+            }
+        }
+
+        callback(rejectedClaim());
+    }
+
+    void releaseGameSessionAsync(
+        const Core::MetaSessionReleaseRequest& request) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        releaseRequests_.push_back(request);
+    }
+
+    void renewGameSessionAsync(
+        const Core::MetaSessionRenewRequest& /*request*/) override {}
+
+    bool waitForFirstClaimStarted(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(500)) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(
+            lock,
+            timeout,
+            [this]() { return firstClaimStarted_; });
+    }
+
+    void unblockFirstClaim() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            unblockFirstClaim_ = true;
+        }
+        condition_.notify_all();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    bool firstClaimStarted_{false};
+    bool unblockFirstClaim_{false};
+    size_t startedClaims_{0};
+    std::vector<Core::MetaSessionClaimRequest> claimRequests_;
+    std::vector<Core::MetaSessionReleaseRequest> releaseRequests_;
+};
+
+bool sendAll(int fd, const uint8_t* data, size_t size);
+
+int connectRawToServer(uint16_t port) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return -1;
@@ -324,6 +693,25 @@ int connectToServer(uint16_t port) {
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+int connectToServer(uint16_t port) {
+    const int fd = connectRawToServer(port);
+    if (fd < 0) {
+        return -1;
+    }
+
+    static std::atomic<uint64_t> nextTokenId{1};
+    std::vector<uint8_t> packet;
+    const std::string token =
+        "integration-token-" + std::to_string(nextTokenId.fetch_add(1));
+    if (!Net::serializeAuthenticateGameSessionPacket(token, packet) ||
+        !sendAll(fd, packet.data(), packet.size())) {
         ::close(fd);
         return -1;
     }
@@ -389,13 +777,25 @@ bool recvPacket(int fd, std::vector<uint8_t>& outPacket) {
 }
 
 bool recvClientListSnapshotPacket(int fd, std::vector<uint64_t>& outSessionIds) {
-    std::vector<uint8_t> packet;
-    if (!recvPacket(fd, packet)) {
-        return false;
-    }
+    while (true) {
+        std::vector<uint8_t> packet;
+        if (!recvPacket(fd, packet)) {
+            return false;
+        }
 
-    Net::TcpPacketHeader header;
-    return Net::parseClientListSnapshotPacket(packet.data(), packet.size(), header, outSessionIds);
+        Net::TcpPacketHeader header;
+        if (!Net::peekTcpPacketHeader(packet.data(), packet.size(), header)) {
+            return false;
+        }
+        if (header.type == Net::TcpPacketType::kRoomListSnapshot) {
+            continue;
+        }
+        return Net::parseClientListSnapshotPacket(
+            packet.data(),
+            packet.size(),
+            header,
+            outSessionIds);
+    }
 }
 
 bool recvCreateRoomResponsePacket(int fd, uint32_t& outRoomId, uint16_t& outPlayerCount) {
@@ -458,6 +858,110 @@ bool recvRoomListSnapshotPacket(int fd, std::vector<Net::TcpRoomEntry>& outRooms
     return Net::parseRoomListSnapshotPacket(packet.data(), packet.size(), header, outRooms);
 }
 
+bool recvRoomDetailStatePacket(int fd, Net::TcpRoomDetailState& outDetail) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseRoomDetailStatePacket(packet.data(), packet.size(), header, outDetail);
+}
+
+bool recvHostStartBattleResponsePacket(int fd, uint32_t& outRoomId) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseHostStartBattleResponsePacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId);
+}
+
+bool recvBattleStartPacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint64_t& outPlayerASessionId,
+    uint64_t& outPlayerBSessionId) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseBattleStartPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outPlayerASessionId,
+        outPlayerBSessionId);
+}
+
+bool recvBattleLoadEntryPacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId,
+    std::vector<uint64_t>& outPlayerSessionIds) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseBattleLoadEntryPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outBattleInstanceId,
+        outPlayerSessionIds);
+}
+
+bool recvArenaGameplayStartPacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseArenaGameplayStartPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outBattleInstanceId);
+}
+
+bool recvMonsterSpawnPacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint32_t& outMonsterId,
+    uint32_t& outMonsterTypeId,
+    uint16_t& outMaxHp) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseMonsterSpawnPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outMonsterId,
+        outMonsterTypeId,
+        outMaxHp);
+}
+
 bool recvDropListSnapshotPacket(
     int fd,
     uint32_t& outRoomId,
@@ -473,6 +977,66 @@ bool recvDropListSnapshotPacket(
         packet.size(),
         header,
         outRoomId,
+        outDrops);
+}
+
+bool recvMonsterDeathPacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint32_t& outMonsterId) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseMonsterDeathPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outMonsterId);
+}
+
+bool recvMonsterHealthSnapshotPacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint32_t& outMonsterId,
+    uint16_t& outCurrentHp,
+    uint16_t& outMaxHp) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseMonsterHealthSnapshotPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outMonsterId,
+        outCurrentHp,
+        outMaxHp);
+}
+
+bool recvDropListSnapshotV2Packet(
+    int fd,
+    uint32_t& outRoomId,
+    uint32_t& outScatterSeed,
+    std::vector<Net::TcpDropEntryV2>& outDrops) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseDropListSnapshotV2Packet(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outScatterSeed,
         outDrops);
 }
 
@@ -522,6 +1086,44 @@ bool recvInventorySnapshotPacket(
         outEntries);
 }
 
+bool recvBattleFinalRankingPacket(
+    int fd,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId,
+    std::vector<Net::BattleFinalRankingEntry>& outRows) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseBattleFinalRankingPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outRoomId,
+        outBattleInstanceId,
+        outRows);
+}
+
+bool recvLobbyReturnVisibilityPacket(
+    int fd,
+    uint32_t& outPreviousRoomId,
+    Net::TcpLobbyReturnReason& outReason) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseLobbyReturnVisibilityPacket(
+        packet.data(),
+        packet.size(),
+        header,
+        outPreviousRoomId,
+        outReason);
+}
+
 bool recvErrorPacket(int fd, Net::TcpPacketType& outFailedType, Net::TcpErrorCode& outErrorCode) {
     std::vector<uint8_t> packet;
     if (!recvPacket(fd, packet)) {
@@ -538,11 +1140,31 @@ bool recvErrorPacket(int fd, Net::TcpPacketType& outFailedType, Net::TcpErrorCod
 }
 
 bool sendCreateRoomRequestPacket(int fd) {
-    std::array<uint8_t, Net::kTcpHeaderSize> packet{};
-    if (!Net::serializeCreateRoomRequestPacket(packet)) {
+    std::vector<uint8_t> packet;
+    if (!Net::serializeCreateRoomRequestPacket("Room", Game::Room::kDefaultMaxPlayers, packet)) {
         return false;
     }
     return sendAll(fd, packet.data(), packet.size());
+}
+
+bool sendAuthenticateGameSessionPacket(int fd, const std::string& token) {
+    std::vector<uint8_t> packet;
+    if (!Net::serializeAuthenticateGameSessionPacket(token, packet)) {
+        return false;
+    }
+    return sendAll(fd, packet.data(), packet.size());
+}
+
+bool recvSessionReplacedPacket(int fd) {
+    std::vector<uint8_t> packet;
+    if (!recvPacket(fd, packet)) {
+        return false;
+    }
+
+    Net::TcpPacketHeader header;
+    return Net::parseTcpPacketHeader(packet.data(), packet.size(), header) &&
+        header.type == Net::TcpPacketType::kSessionReplaced &&
+        header.size == Net::kTcpHeaderSize;
 }
 
 bool sendJoinRoomRequestPacket(int fd, uint32_t roomId) {
@@ -556,6 +1178,22 @@ bool sendJoinRoomRequestPacket(int fd, uint32_t roomId) {
 bool sendReadyRoomRequestPacket(int fd) {
     std::array<uint8_t, Net::kTcpHeaderSize> packet{};
     if (!Net::serializeReadyRoomRequestPacket(packet)) {
+        return false;
+    }
+    return sendAll(fd, packet.data(), packet.size());
+}
+
+bool sendHostStartBattleRequestPacket(int fd) {
+    std::array<uint8_t, Net::kTcpHeaderSize> packet{};
+    if (!Net::serializeHostStartBattleRequestPacket(packet)) {
+        return false;
+    }
+    return sendAll(fd, packet.data(), packet.size());
+}
+
+bool sendArenaLoadCompletePacket(int fd, uint32_t roomId, uint64_t battleInstanceId) {
+    std::array<uint8_t, Net::kArenaLoadCompletePacketSize> packet{};
+    if (!Net::serializeArenaLoadCompletePacket(roomId, battleInstanceId, packet)) {
         return false;
     }
     return sendAll(fd, packet.data(), packet.size());
@@ -669,7 +1307,11 @@ std::vector<uint8_t> inputCommandPayloadForTest(
     uint32_t cmdSeq,
     Net::RudpInputCommandOp op,
     uint32_t argValue) {
-    const uint8_t argLen = op == Net::RudpInputCommandOp::kReady ? 0 : 4;
+    const uint8_t argLen =
+        (op == Net::RudpInputCommandOp::kReady ||
+            op == Net::RudpInputCommandOp::kSpaceLoot)
+            ? 0
+            : 4;
     std::vector<uint8_t> payload(Net::kRudpInputCommandPrefixSize + argLen, 0);
     writeU32BEForTest(payload, 0, playerId);
     writeU32BEForTest(payload, 4, cmdSeq);
@@ -720,6 +1362,17 @@ std::vector<uint8_t> monsterDeathInputCommandPayloadForTest(
         monsterId);
 }
 
+std::vector<uint8_t> attackInputCommandPayloadForTest(
+    uint32_t playerId,
+    uint32_t cmdSeq,
+    uint32_t targetHintMonsterId) {
+    return inputCommandPayloadForTest(
+        playerId,
+        cmdSeq,
+        Net::RudpInputCommandOp::kAttack,
+        targetHintMonsterId);
+}
+
 std::vector<uint8_t> clickLootInputCommandPayloadForTest(
     uint32_t playerId,
     uint32_t cmdSeq,
@@ -729,6 +1382,16 @@ std::vector<uint8_t> clickLootInputCommandPayloadForTest(
         cmdSeq,
         Net::RudpInputCommandOp::kClickLoot,
         dropId);
+}
+
+std::vector<uint8_t> spaceLootInputCommandPayloadForTest(
+    uint32_t playerId,
+    uint32_t cmdSeq) {
+    return inputCommandPayloadForTest(
+        playerId,
+        cmdSeq,
+        Net::RudpInputCommandOp::kSpaceLoot,
+        0);
 }
 
 std::vector<uint8_t> reliableEventPacketBytesForTest(uint8_t marker) {
@@ -744,6 +1407,12 @@ Net::RudpReliableEventDescriptor reliableEventDescriptorForTest(
             kind,
             logicalKey,
             static_cast<uint16_t>(Net::RudpPacketType::kBattleStart),
+            static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+    case Net::RudpReliableEventKind::kBattleStartRoster:
+        return Net::RudpReliableEventDescriptor{
+            kind,
+            logicalKey,
+            static_cast<uint16_t>(Net::RudpPacketType::kBattleStartRoster),
             static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
     case Net::RudpReliableEventKind::kMonsterDeath:
     case Net::RudpReliableEventKind::kLootResolved:
@@ -879,6 +1548,60 @@ void expectBattleStartPending(
     EXPECT_EQ(payload.roomId, expectedRoomId);
     EXPECT_EQ(payload.playerASessionId, expectedPlayerA);
     EXPECT_EQ(payload.playerBSessionId, expectedPlayerB);
+}
+
+void expectBattleStartRosterPending(
+    Core::Server& server,
+    uint64_t sessionId,
+    uint32_t sequence,
+    const std::string& expectedLogicalKey,
+    uint32_t expectedRoomId,
+    const std::vector<uint64_t>& expectedPlayers) {
+    const Net::RudpReliableEventPendingEntry* entry =
+        Core::ServerTestAccess::rudpReliableEventPendingEntry(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->descriptor.kind, Net::RudpReliableEventKind::kBattleStartRoster);
+    EXPECT_EQ(entry->descriptor.logicalKey, expectedLogicalKey);
+    EXPECT_EQ(
+        entry->descriptor.packetType,
+        static_cast<uint16_t>(Net::RudpPacketType::kBattleStartRoster));
+    EXPECT_EQ(
+        entry->descriptor.channelId,
+        static_cast<uint8_t>(Net::RudpChannelId::kEvent));
+
+    const std::vector<uint8_t>* packetBytes =
+        Core::ServerTestAccess::rudpReliableEventPacketBytes(
+            server,
+            sessionId,
+            sequence);
+    ASSERT_NE(packetBytes, nullptr);
+
+    Net::RudpPacketHeader packetHeader;
+    std::vector<uint8_t> payloadBytes;
+    ASSERT_TRUE(Net::parseRudpPacket(
+        packetBytes->data(),
+        packetBytes->size(),
+        packetHeader,
+        payloadBytes));
+    EXPECT_EQ(packetHeader.flags, Net::kRudpFlagReliable);
+    EXPECT_EQ(packetHeader.channelId, static_cast<uint8_t>(Net::RudpChannelId::kEvent));
+    EXPECT_EQ(
+        packetHeader.packetType,
+        static_cast<uint16_t>(Net::RudpPacketType::kBattleStartRoster));
+    EXPECT_EQ(packetHeader.sequence, sequence);
+    EXPECT_EQ(packetHeader.ack, 0U);
+    EXPECT_EQ(packetHeader.ackBits, 0U);
+
+    Net::RudpBattleStartRosterPayload payload;
+    ASSERT_TRUE(Net::parseRudpBattleStartRosterPayload(
+        payloadBytes.data(),
+        payloadBytes.size(),
+        payload));
+    EXPECT_EQ(payload.roomId, expectedRoomId);
+    EXPECT_EQ(payload.playerSessionIds, expectedPlayers);
 }
 
 void expectMonsterDeathPending(
@@ -1225,6 +1948,36 @@ bool receiveBattleStartPacketWithWait(
     return false;
 }
 
+bool receiveBattleStartRosterPacketWithWait(
+    Net::UdpSocket& receiver,
+    uint32_t expectedSequence,
+    Net::RudpBattleStartRosterPayload& outPayload,
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(500)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        const auto slice = std::min(remaining, std::chrono::milliseconds(20));
+        Net::RudpPacketHeader header;
+        std::vector<uint8_t> payloadBytes;
+        if (!receiveRudpPacketWithWait(receiver, header, payloadBytes, slice)) {
+            continue;
+        }
+        if (header.flags != Net::kRudpFlagReliable ||
+            header.channelId != static_cast<uint8_t>(Net::RudpChannelId::kEvent) ||
+            header.packetType !=
+                static_cast<uint16_t>(Net::RudpPacketType::kBattleStartRoster) ||
+            header.sequence != expectedSequence) {
+            continue;
+        }
+        return Net::parseRudpBattleStartRosterPayload(
+            payloadBytes.data(),
+            payloadBytes.size(),
+            outPayload);
+    }
+    return false;
+}
+
 bool receiveStateSnapshotPacketWithWait(
     Net::UdpSocket& receiver,
     uint32_t expectedSequence,
@@ -1313,9 +2066,11 @@ void expectSnapshotEquals(
 }
 
 struct RunningServer {
-    explicit RunningServer(uint16_t port) : server(port) {}
+    explicit RunningServer(uint16_t port) : meta(), server(port, &meta) {}
+    RunningServer(uint16_t port, Core::IMetaSessionClaimClient* metaClient)
+        : meta(), server(port, metaClient) {}
     RunningServer(uint16_t port, std::chrono::milliseconds rudpPeerTimeout)
-        : server(port, rudpPeerTimeout) {}
+        : meta(), server(port, rudpPeerTimeout, &meta) {}
 
     ~RunningServer() {
         server.requestStop();
@@ -1324,6 +2079,7 @@ struct RunningServer {
         }
     }
 
+    TestMetaSessionClaimClient meta;
     Core::Server server;
     std::thread thread;
 };
@@ -1426,8 +2182,10 @@ bool bindRudpSessionForTest(
         return ::testing::AssertionFailure() << "unexpected create room response";
     }
 
+    Net::TcpRoomDetailState detail;
     std::vector<Net::TcpRoomEntry> roomSnapshot;
-    if (!recvRoomListSnapshotPacket(out.clientA, roomSnapshot) ||
+    if (!recvRoomDetailStatePacket(out.clientA, detail) ||
+        detail.roomId != out.roomId ||
         !recvRoomListSnapshotPacket(out.clientB, roomSnapshot)) {
         return ::testing::AssertionFailure() << "failed to receive create room snapshots";
     }
@@ -1441,8 +2199,12 @@ bool bindRudpSessionForTest(
         playerCount != 2u) {
         return ::testing::AssertionFailure() << "unexpected join room response";
     }
-    if (!recvRoomListSnapshotPacket(out.clientA, roomSnapshot) ||
-        !recvRoomListSnapshotPacket(out.clientB, roomSnapshot)) {
+    if (!recvRoomDetailStatePacket(out.clientA, detail) ||
+        detail.roomId != out.roomId ||
+        detail.members.size() != 2U ||
+        !recvRoomDetailStatePacket(out.clientB, detail) ||
+        detail.roomId != out.roomId ||
+        detail.members.size() != 2U) {
         return ::testing::AssertionFailure() << "failed to receive join room snapshots";
     }
 
@@ -1487,6 +2249,14 @@ void expectNoTcpPacketForTest(int fd) {
     EXPECT_FALSE(recvPacket(fd, unexpectedPacket));
 }
 
+void drainAvailableTcpPacketsForTest(int fd) {
+    ASSERT_TRUE(setReceiveTimeout(fd, std::chrono::milliseconds(50)));
+    std::vector<uint8_t> packet;
+    while (recvPacket(fd, packet)) {
+    }
+    ASSERT_TRUE(setReceiveTimeout(fd, std::chrono::milliseconds(500)));
+}
+
 ::testing::AssertionResult startRudpBattleForTest(
     RunningServer& runningServer,
     TwoPlayerRoomClients& clients,
@@ -1507,18 +2277,52 @@ void expectNoTcpPacketForTest(int fd) {
         udpPort);
 
     if (!waitUntil(
-            [&runningServer]() {
-                return runningServer.server.rudpReliableEventPendingCount() == 2U;
+            [&runningServer, &clients]() {
+                const Core::RudpServerBindingStats stats =
+                    runningServer.server.rudpBindingStats();
+                const Game::Room* room = Core::ServerTestAccess::findRoom(
+                    runningServer.server,
+                    clients.roomId);
+                return stats.inputDecoded >= 2U &&
+                    stats.inputSequenceAccepted >= 2U &&
+                    runningServer.server.rudpReliableEventPendingCount() == 0U &&
+                    room != nullptr &&
+                    room->isReady(clients.sessionA) &&
+                    room->isReady(clients.sessionB) &&
+                    !room->battleStarted();
             })) {
-        return ::testing::AssertionFailure() << "RUDP BattleStart pending events missing";
+        return ::testing::AssertionFailure() << "RUDP Ready state was not applied";
+    }
+
+    if (!sendHostStartBattleRequestPacket(clients.clientA)) {
+        return ::testing::AssertionFailure() << "failed to send HostStartBattleRequest";
+    }
+
+    if (!waitUntil(
+            [&runningServer, &clients]() {
+                const Game::Room* room = Core::ServerTestAccess::findRoom(
+                    runningServer.server,
+                    clients.roomId);
+                return room != nullptr &&
+                    room->battleStarted() &&
+                    room->hasActiveArenaLoadBarrier() &&
+                    !room->arenaGameplayStarted() &&
+                    !room->hasAliveMonster();
+            })) {
+        return ::testing::AssertionFailure() << "HostStart did not create RUDP BattleStart";
     }
 
     const Game::Room* room = Core::ServerTestAccess::findRoom(
         runningServer.server,
         clients.roomId);
-    if (room == nullptr || !room->battleStarted() || !room->hasAliveMonster()) {
-        return ::testing::AssertionFailure() << "RUDP Ready did not start battle";
+    if (room == nullptr ||
+        !room->battleStarted() ||
+        !room->hasActiveArenaLoadBarrier() ||
+        room->arenaGameplayStarted() ||
+        room->hasAliveMonster()) {
+        return ::testing::AssertionFailure() << "battle did not start";
     }
+    const uint64_t battleInstanceId = room->battleInstanceId();
 
     Net::RudpBattleStartPayload battleStartA;
     Net::RudpBattleStartPayload battleStartB;
@@ -1543,6 +2347,27 @@ void expectNoTcpPacketForTest(int fd) {
     }
     clients.battleStartSequenceA = sequenceA;
     clients.battleStartSequenceB = sequenceB;
+
+    if (!sendArenaLoadCompletePacket(clients.clientA, clients.roomId, battleInstanceId) ||
+        !sendArenaLoadCompletePacket(clients.clientB, clients.roomId, battleInstanceId)) {
+        return ::testing::AssertionFailure() << "failed to send ArenaLoadComplete packets";
+    }
+
+    if (!waitUntil(
+            [&runningServer, &clients]() {
+                const Game::Room* startedRoom = Core::ServerTestAccess::findRoom(
+                    runningServer.server,
+                    clients.roomId);
+                return startedRoom != nullptr &&
+                    !startedRoom->hasActiveArenaLoadBarrier() &&
+                    startedRoom->arenaGameplayStarted() &&
+                    startedRoom->hasAliveMonster();
+            })) {
+        return ::testing::AssertionFailure() << "ArenaGameplayStart did not spawn monster";
+    }
+
+    drainAvailableTcpPacketsForTest(clients.clientA);
+    drainAvailableTcpPacketsForTest(clients.clientB);
 
     return ::testing::AssertionSuccess();
 }
@@ -1638,6 +2463,11 @@ TEST(ServerIntegrationTests, RudpReliableEventTracksValidBattleStartDescriptor) 
     EXPECT_EQ(stats.duplicateLogicalEvent, 0U);
     EXPECT_EQ(server.rudpReliableEventPendingCount(), 1U);
     EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 1U);
+    const std::string textfile = server.renderRelease1RuntimeMetricsTextfile();
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_reliable_event_tracked_by_kind_total{kind=\"battle_start\"} 1\n"),
+        std::string::npos);
 }
 
 TEST(ServerIntegrationTests, RudpReliableEventRejectsDuplicateSequence) {
@@ -2122,6 +2952,135 @@ TEST(ServerIntegrationTests, RudpBattleStartReliableEventSkipsInvalidShape) {
         0U);
 }
 
+TEST(ServerIntegrationTests, RudpBattleStartRosterReliableEventTracksThreePlayerRoom) {
+    Core::Server server(0);
+    ASSERT_TRUE(server.start());
+
+    Net::UdpSocket receiverA;
+    Net::UdpSocket receiverB;
+    Net::UdpSocket receiverC;
+    ASSERT_TRUE(receiverA.open(0));
+    ASSERT_TRUE(receiverB.open(0));
+    ASSERT_TRUE(receiverC.open(0));
+
+    const Game::RoomCommandResult created =
+        Core::ServerTestAccess::createRoom(server, 1001);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(Core::ServerTestAccess::joinRoom(
+        server,
+        1002,
+        created.room.roomId).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::joinRoom(
+        server,
+        1003,
+        created.room.roomId).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::bindRudpEndpointWithPeer(
+        server,
+        udpLoopbackEndpoint(receiverA.boundPort()),
+        1001,
+        timeAt(1000)));
+    ASSERT_TRUE(Core::ServerTestAccess::bindRudpEndpointWithPeer(
+        server,
+        udpLoopbackEndpoint(receiverB.boundPort()),
+        1002,
+        timeAt(1000)));
+    ASSERT_TRUE(Core::ServerTestAccess::bindRudpEndpointWithPeer(
+        server,
+        udpLoopbackEndpoint(receiverC.boundPort()),
+        1003,
+        timeAt(1000)));
+
+    std::vector<int> disconnectedClients;
+    const std::vector<uint64_t> players{1001, 1002, 1003};
+    EXPECT_TRUE(Core::ServerTestAccess::broadcastBattleStart(
+        server,
+        battleStartResultForTest(created.room.roomId, players),
+        disconnectedClients));
+
+    EXPECT_TRUE(disconnectedClients.empty());
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 3U);
+    const std::string key =
+        "BattleStartRoster:" + std::to_string(created.room.roomId) + ":1001:1002:1003";
+    expectBattleStartRosterPending(server, 1001, 1, key, created.room.roomId, players);
+    expectBattleStartRosterPending(server, 1002, 1, key, created.room.roomId, players);
+    expectBattleStartRosterPending(server, 1003, 1, key, created.room.roomId, players);
+}
+
+TEST(ServerIntegrationTests, RudpBattleStartRosterPendingEventSendsAfterLateBind) {
+    Core::Server server(0);
+    ASSERT_TRUE(server.start());
+
+    Net::UdpSocket receiverA;
+    Net::UdpSocket receiverB;
+    ASSERT_TRUE(receiverA.open(0));
+    ASSERT_TRUE(receiverB.open(0));
+
+    const uint64_t sessionA =
+        Core::ServerTestAccess::createSession(server, "late-bind-A", timeAt(900));
+    const uint64_t sessionB =
+        Core::ServerTestAccess::createSession(server, "late-bind-B", timeAt(900));
+    const uint64_t sessionC =
+        Core::ServerTestAccess::createSession(server, "late-bind-C", timeAt(900));
+    ASSERT_NE(sessionA, 0U);
+    ASSERT_NE(sessionB, 0U);
+    ASSERT_NE(sessionC, 0U);
+
+    const Game::RoomCommandResult created =
+        Core::ServerTestAccess::createRoom(server, sessionA);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(Core::ServerTestAccess::joinRoom(
+        server,
+        sessionB,
+        created.room.roomId).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::joinRoom(
+        server,
+        sessionC,
+        created.room.roomId).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::bindRudpEndpointWithPeer(
+        server,
+        udpLoopbackEndpoint(receiverA.boundPort()),
+        sessionA,
+        timeAt(1000)));
+
+    const std::vector<uint64_t> players{sessionA, sessionB, sessionC};
+    Core::ServerTestAccess::enqueueRudpBattleStartEvent(
+        server,
+        battleStartResultForTest(created.room.roomId, players),
+        timeAt(1000));
+
+    const std::string key =
+        "BattleStartRoster:" + std::to_string(created.room.roomId) + ":" +
+        std::to_string(sessionA) + ":" + std::to_string(sessionB) + ":" +
+        std::to_string(sessionC);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 3U);
+    expectBattleStartRosterPending(server, sessionB, 1, key, created.room.roomId, players);
+
+    Core::ServerTestAccess::processRudpReliableEventRetransmissions(
+        server,
+        timeAt(1300));
+    EXPECT_EQ(server.rudpRetransmissionStats().due, 3U);
+    EXPECT_EQ(server.rudpRetransmissionStats().resent, 1U);
+    EXPECT_EQ(server.rudpRetransmissionStats().sendErrors, 0U);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 3U);
+
+    std::vector<uint8_t> helloPayload;
+    ASSERT_TRUE(Net::serializeRudpHelloPayload(
+        Net::RudpHelloPayload{1, 78, sessionB},
+        helloPayload));
+    Core::ServerTestAccess::processRudpHelloDelivery(
+        server,
+        udpLoopbackEndpoint(receiverB.boundPort()),
+        101,
+        helloPayload,
+        timeAt(1010));
+
+    Net::RudpBattleStartRosterPayload replayed;
+    ASSERT_TRUE(receiveBattleStartRosterPacketWithWait(receiverB, 1, replayed));
+    EXPECT_EQ(replayed.roomId, created.room.roomId);
+    EXPECT_EQ(replayed.playerSessionIds, players);
+    EXPECT_EQ(server.rudpReliableEventPendingCount(), 3U);
+}
+
 TEST(ServerIntegrationTests, RudpGameEventSkipsInvalidShape) {
     Core::Server server(0);
     std::vector<int> disconnectedClients;
@@ -2256,6 +3215,35 @@ TEST(ServerIntegrationTests, DrainsValidReliableRudpDatagramInServerLoop) {
     EXPECT_EQ(retransmissionStats.resent, 0U);
     EXPECT_EQ(retransmissionStats.sendErrors, 0U);
     EXPECT_EQ(retransmissionStats.droppedPeers, 0U);
+}
+
+TEST(ServerIntegrationTests, RudpSocketDrainBudgetLeavesFortyNinthDatagramForNextPass) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t udpPort = runningServer.server.udpBoundPort();
+    ASSERT_GT(udpPort, 0);
+
+    Net::UdpSocket sender;
+    ASSERT_TRUE(sender.open(0));
+    for (uint32_t sequence = 1; sequence <= 49; ++sequence) {
+        sendUdpPacket(
+            sender,
+            serializeRudpPacketForTest(reliableRudpHeader(1000 + sequence), {0x01}),
+            udpPort);
+    }
+
+    Core::ServerTestAccess::processRudpSocket(runningServer.server, timeAt(1000));
+
+    Core::RudpServerDrainStats stats = runningServer.server.rudpDrainStats();
+    EXPECT_EQ(stats.delivered, 48U);
+    EXPECT_EQ(stats.stoppedByMaxPackets, 1U);
+    EXPECT_EQ(stats.stoppedByWouldBlock, 0U);
+
+    Core::ServerTestAccess::processRudpSocket(runningServer.server, timeAt(1010));
+
+    stats = runningServer.server.rudpDrainStats();
+    EXPECT_GE(stats.delivered, 49U);
+    EXPECT_GE(stats.stoppedByWouldBlock, 1U);
 }
 
 TEST(ServerIntegrationTests, DropsRudpPeerAfterExpiredRetransmission) {
@@ -2747,6 +3735,33 @@ TEST(ServerIntegrationTests, RejectsUnboundMoveBeforeDecodeAndSequenceState) {
     EXPECT_EQ(Core::ServerTestAccess::rudpInputCommandSequenceTrackerSize(server), 0U);
     EXPECT_EQ(Core::ServerTestAccess::rudpMoveInputGuardSize(server), 0U);
     EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
+}
+
+TEST(ServerIntegrationTests, BoundRudpGameplayInputRefreshesSessionLiveness) {
+    Core::Server server(0);
+    const Util::TimePoint createdAt = timeAt(1000);
+    const uint64_t sessionId =
+        Core::ServerTestAccess::createSession(server, "127.0.0.1:49001", createdAt);
+    ASSERT_NE(sessionId, 0U);
+    ASSERT_TRUE(Core::ServerTestAccess::createRoom(server, sessionId).ok);
+
+    const Net::UdpEndpoint endpoint = udpLoopbackEndpoint(31905);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpoint, sessionId),
+        Net::RudpSessionBindResult::kBoundNew);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpoint,
+        1,
+        moveInputCommandPayloadForTest(1001, 1, 100, 0),
+        createdAt + std::chrono::milliseconds(59000));
+
+    Core::ServerTestAccess::processRuntimeTimerMaintenanceForRelease1Metrics(
+        server,
+        createdAt + std::chrono::milliseconds(118000));
+
+    EXPECT_EQ(server.release1RuntimeMetricsSnapshot().activeSessionCount, 1U);
 }
 
 TEST(ServerIntegrationTests, BoundNoRoomMoveRecordsSequenceWithoutOutbound) {
@@ -4017,57 +5032,185 @@ TEST(ServerIntegrationTests, RudpReadyInputsDispatchThroughInlineActorWithoutTcp
                 runningServer.server.rudpBindingStats();
             return stats.inputDecoded >= 2U &&
                 stats.inputSequenceAccepted >= 2U &&
-                runningServer.server.rudpReliableEventPendingCount() == 2U;
+                runningServer.server.rudpReliableEventPendingCount() == 0U;
         }));
 
     room = Core::ServerTestAccess::findRoom(runningServer.server, clients.roomId);
     ASSERT_NE(room, nullptr);
     EXPECT_TRUE(room->isReady(clients.sessionA));
     EXPECT_TRUE(room->isReady(clients.sessionB));
-    EXPECT_TRUE(room->battleStarted());
-    EXPECT_TRUE(room->hasAliveMonster());
-
-    Net::RudpBattleStartPayload battleStartA;
-    Net::RudpBattleStartPayload battleStartB;
-    uint32_t sequenceA = 0;
-    uint32_t sequenceB = 0;
-    ASSERT_TRUE(receiveBattleStartPacketWithWait(
-        senderA,
-        0,
-        battleStartA,
-        std::chrono::milliseconds(500),
-        &sequenceA));
-    ASSERT_TRUE(receiveBattleStartPacketWithWait(
-        senderB,
-        0,
-        battleStartB,
-        std::chrono::milliseconds(500),
-        &sequenceB));
-    EXPECT_EQ(battleStartA.roomId, clients.roomId);
-    EXPECT_EQ(battleStartB.roomId, clients.roomId);
-    expectBattleStartPending(
-        runningServer.server,
-        clients.sessionA,
-        sequenceA,
-        "BattleStart:" + std::to_string(clients.roomId) + ":" +
-            std::to_string(std::min(clients.sessionA, clients.sessionB)) + ":" +
-            std::to_string(std::max(clients.sessionA, clients.sessionB)),
-        clients.roomId,
-        std::min(clients.sessionA, clients.sessionB),
-        std::max(clients.sessionA, clients.sessionB));
-    expectBattleStartPending(
-        runningServer.server,
-        clients.sessionB,
-        sequenceB,
-        "BattleStart:" + std::to_string(clients.roomId) + ":" +
-            std::to_string(std::min(clients.sessionA, clients.sessionB)) + ":" +
-            std::to_string(std::max(clients.sessionA, clients.sessionB)),
-        clients.roomId,
-        std::min(clients.sessionA, clients.sessionB),
-        std::max(clients.sessionA, clients.sessionB));
+    EXPECT_FALSE(room->battleStarted());
+    EXPECT_FALSE(room->hasAliveMonster());
 
     expectNoTcpPacketForTest(clients.clientA);
     expectNoTcpPacketForTest(clients.clientB);
+
+    ::close(clients.clientB);
+    ::close(clients.clientA);
+}
+
+TEST(ServerIntegrationTests, TcpArenaLoadBarrierStartsGameplayAfterAllClientsComplete) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    TwoPlayerRoomClients clients;
+    ASSERT_TRUE(setupTwoPlayerRoomForRudpTest(runningServer, clients));
+
+    ASSERT_TRUE(sendReadyRoomRequestPacket(clients.clientA));
+    uint32_t readyRoomId = 0;
+    uint16_t readyPlayerCount = 0;
+    uint16_t totalPlayerCount = 0;
+    ASSERT_TRUE(recvReadyRoomResponsePacket(
+        clients.clientA,
+        readyRoomId,
+        readyPlayerCount,
+        totalPlayerCount));
+    EXPECT_EQ(readyRoomId, clients.roomId);
+    EXPECT_EQ(readyPlayerCount, 1u);
+    EXPECT_EQ(totalPlayerCount, 2u);
+
+    Net::TcpRoomDetailState detail;
+    ASSERT_TRUE(recvRoomDetailStatePacket(clients.clientA, detail));
+    ASSERT_TRUE(recvRoomDetailStatePacket(clients.clientB, detail));
+
+    ASSERT_TRUE(sendReadyRoomRequestPacket(clients.clientB));
+    ASSERT_TRUE(recvReadyRoomResponsePacket(
+        clients.clientB,
+        readyRoomId,
+        readyPlayerCount,
+        totalPlayerCount));
+    EXPECT_EQ(readyRoomId, clients.roomId);
+    EXPECT_EQ(readyPlayerCount, 2u);
+    EXPECT_EQ(totalPlayerCount, 2u);
+    ASSERT_TRUE(recvRoomDetailStatePacket(clients.clientA, detail));
+    ASSERT_TRUE(recvRoomDetailStatePacket(clients.clientB, detail));
+
+    ASSERT_TRUE(sendHostStartBattleRequestPacket(clients.clientA));
+    uint32_t hostStartRoomId = 0;
+    ASSERT_TRUE(recvHostStartBattleResponsePacket(clients.clientA, hostStartRoomId));
+    EXPECT_EQ(hostStartRoomId, clients.roomId);
+
+    uint32_t battleStartRoomId = 0;
+    uint64_t playerA = 0;
+    uint64_t playerB = 0;
+    ASSERT_TRUE(recvBattleStartPacket(clients.clientA, battleStartRoomId, playerA, playerB));
+    EXPECT_EQ(battleStartRoomId, clients.roomId);
+    EXPECT_EQ(playerA, clients.sessionA);
+    EXPECT_EQ(playerB, clients.sessionB);
+
+    ASSERT_TRUE(recvBattleStartPacket(clients.clientB, battleStartRoomId, playerA, playerB));
+    EXPECT_EQ(battleStartRoomId, clients.roomId);
+    EXPECT_EQ(playerA, clients.sessionA);
+    EXPECT_EQ(playerB, clients.sessionB);
+
+    const std::vector<uint64_t> expectedPlayers{clients.sessionA, clients.sessionB};
+    uint32_t loadRoomId = 0;
+    uint64_t battleInstanceId = 0;
+    std::vector<uint64_t> loadPlayers;
+    ASSERT_TRUE(recvBattleLoadEntryPacket(
+        clients.clientA,
+        loadRoomId,
+        battleInstanceId,
+        loadPlayers));
+    EXPECT_EQ(loadRoomId, clients.roomId);
+    EXPECT_GT(battleInstanceId, 0u);
+    EXPECT_EQ(loadPlayers, expectedPlayers);
+
+    uint64_t battleInstanceIdB = 0;
+    ASSERT_TRUE(recvBattleLoadEntryPacket(
+        clients.clientB,
+        loadRoomId,
+        battleInstanceIdB,
+        loadPlayers));
+    EXPECT_EQ(loadRoomId, clients.roomId);
+    EXPECT_EQ(battleInstanceIdB, battleInstanceId);
+    EXPECT_EQ(loadPlayers, expectedPlayers);
+
+    const Game::Room* room = Core::ServerTestAccess::findRoom(
+        runningServer.server,
+        clients.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_TRUE(room->battleStarted());
+    EXPECT_TRUE(room->hasActiveArenaLoadBarrier());
+    EXPECT_FALSE(room->arenaGameplayStarted());
+    EXPECT_FALSE(room->hasAliveMonster());
+
+    ASSERT_TRUE(sendArenaLoadCompletePacket(clients.clientA, clients.roomId, battleInstanceId + 1));
+    expectNoTcpPacketForTest(clients.clientA);
+    expectNoTcpPacketForTest(clients.clientB);
+
+    room = Core::ServerTestAccess::findRoom(runningServer.server, clients.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_TRUE(room->hasActiveArenaLoadBarrier());
+    EXPECT_FALSE(room->arenaGameplayStarted());
+    EXPECT_FALSE(room->hasAliveMonster());
+
+    ASSERT_TRUE(sendArenaLoadCompletePacket(clients.clientA, clients.roomId, battleInstanceId));
+    expectNoTcpPacketForTest(clients.clientA);
+    expectNoTcpPacketForTest(clients.clientB);
+    ASSERT_TRUE(setReceiveTimeout(clients.clientA, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(setReceiveTimeout(clients.clientB, std::chrono::milliseconds(500)));
+
+    room = Core::ServerTestAccess::findRoom(runningServer.server, clients.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_TRUE(room->hasActiveArenaLoadBarrier());
+    EXPECT_FALSE(room->arenaGameplayStarted());
+    EXPECT_FALSE(room->hasAliveMonster());
+
+    ASSERT_TRUE(sendArenaLoadCompletePacket(clients.clientB, clients.roomId, battleInstanceId));
+
+    uint32_t arenaStartRoomId = 0;
+    uint64_t arenaStartBattleInstanceId = 0;
+    ASSERT_TRUE(recvArenaGameplayStartPacket(
+        clients.clientA,
+        arenaStartRoomId,
+        arenaStartBattleInstanceId));
+    EXPECT_EQ(arenaStartRoomId, clients.roomId);
+    EXPECT_EQ(arenaStartBattleInstanceId, battleInstanceId);
+
+    ASSERT_TRUE(recvArenaGameplayStartPacket(
+        clients.clientB,
+        arenaStartRoomId,
+        arenaStartBattleInstanceId));
+    EXPECT_EQ(arenaStartRoomId, clients.roomId);
+    EXPECT_EQ(arenaStartBattleInstanceId, battleInstanceId);
+
+    uint32_t spawnRoomId = 0;
+    uint32_t monsterId = 0;
+    uint32_t monsterTypeId = 0;
+    uint16_t maxHp = 0;
+    ASSERT_TRUE(recvMonsterSpawnPacket(
+        clients.clientA,
+        spawnRoomId,
+        monsterId,
+        monsterTypeId,
+        maxHp));
+    EXPECT_EQ(spawnRoomId, clients.roomId);
+    EXPECT_GT(monsterId, 0u);
+    EXPECT_GT(monsterTypeId, 0u);
+    EXPECT_GT(maxHp, 0u);
+
+    uint32_t monsterIdB = 0;
+    uint32_t monsterTypeIdB = 0;
+    uint16_t maxHpB = 0;
+    ASSERT_TRUE(recvMonsterSpawnPacket(
+        clients.clientB,
+        spawnRoomId,
+        monsterIdB,
+        monsterTypeIdB,
+        maxHpB));
+    EXPECT_EQ(spawnRoomId, clients.roomId);
+    EXPECT_EQ(monsterIdB, monsterId);
+    EXPECT_EQ(monsterTypeIdB, monsterTypeId);
+    EXPECT_EQ(maxHpB, maxHp);
+
+    room = Core::ServerTestAccess::findRoom(runningServer.server, clients.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_FALSE(room->hasActiveArenaLoadBarrier());
+    EXPECT_TRUE(room->arenaGameplayStarted());
+    EXPECT_TRUE(room->hasAliveMonster());
 
     ::close(clients.clientB);
     ::close(clients.clientA);
@@ -4261,7 +5404,7 @@ TEST(ServerIntegrationTests, RejectsSmokePlacePlayersAroundCenterDropRequestWith
     ::close(clients.clientA);
 }
 
-TEST(ServerIntegrationTests, RejectsSmokePlacePlayersAroundCenterDropRequestAfterDropClaimed) {
+TEST(ServerIntegrationTests, RejectsSmokePlacePlayersAroundCenterDropRequestAfterBattleResultCloseout) {
     RunningServer runningServer(0);
     ASSERT_TRUE(runningServer.server.start());
     runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
@@ -4330,12 +5473,179 @@ TEST(ServerIntegrationTests, RejectsSmokePlacePlayersAroundCenterDropRequestAfte
         entries));
     EXPECT_EQ(inventorySessionId, clients.sessionA);
 
+    uint32_t rankingRoomId = 0;
+    uint64_t battleInstanceId = 0;
+    std::vector<Net::BattleFinalRankingEntry> rankingRows;
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientA,
+        rankingRoomId,
+        battleInstanceId,
+        rankingRows));
+    EXPECT_EQ(rankingRoomId, clients.roomId);
+    EXPECT_GT(battleInstanceId, 0u);
+    ASSERT_EQ(rankingRows.size(), 2U);
+    EXPECT_EQ(rankingRows[0].sessionId, clients.sessionA);
+    EXPECT_EQ(rankingRows[0].totalAssetValue, 100);
+
+    uint32_t rankingRoomIdB = 0;
+    uint64_t battleInstanceIdB = 0;
+    std::vector<Net::BattleFinalRankingEntry> rankingRowsB;
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientB,
+        rankingRoomIdB,
+        battleInstanceIdB,
+        rankingRowsB));
+    EXPECT_EQ(rankingRoomIdB, clients.roomId);
+    EXPECT_EQ(battleInstanceIdB, battleInstanceId);
+    ASSERT_EQ(rankingRowsB.size(), rankingRows.size());
+
+    uint32_t previousRoomId = 0;
+    Net::TcpLobbyReturnReason returnReason = Net::TcpLobbyReturnReason::kHostKick;
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientA, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientB, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+
+    std::vector<Net::TcpRoomEntry> roomSnapshot;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientA, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientB, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
+
     ASSERT_TRUE(sendSmokePlacePlayersAroundCenterDropRequestPacket(clients.clientA));
     Net::TcpPacketType failedType = Net::TcpPacketType::kWelcome;
     Net::TcpErrorCode errorCode = Net::TcpErrorCode::kNone;
     ASSERT_TRUE(recvErrorPacket(clients.clientA, failedType, errorCode));
     EXPECT_EQ(failedType, Net::TcpPacketType::kSmokePlacePlayersAroundCenterDropRequest);
-    EXPECT_EQ(errorCode, Net::TcpErrorCode::kNotFound);
+    EXPECT_EQ(errorCode, Net::TcpErrorCode::kNotInRoom);
+
+    ::close(clients.clientB);
+    ::close(clients.clientA);
+}
+
+TEST(ServerIntegrationTests, AllowsSameSessionsToCreateFreshRoomAfterBattleResultCloseout) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    TwoPlayerRoomClients clients;
+    Net::UdpSocket senderA;
+    Net::UdpSocket senderB;
+    ASSERT_TRUE(prepareRudpBattleForSmokeEndpointTest(
+        runningServer,
+        clients,
+        senderA,
+        senderB));
+
+    ASSERT_TRUE(sendSmokeCreateCenterDropRequestPacket(clients.clientA));
+    uint32_t dropId = 0;
+    uint32_t itemId = 0;
+    uint16_t quantity = 0;
+    ASSERT_TRUE(expectCenterDropSnapshot(clients.clientA, clients.roomId, dropId, itemId, quantity));
+    uint32_t ignoredDropId = 0;
+    uint32_t ignoredItemId = 0;
+    uint16_t ignoredQuantity = 0;
+    ASSERT_TRUE(expectCenterDropSnapshot(
+        clients.clientB,
+        clients.roomId,
+        ignoredDropId,
+        ignoredItemId,
+        ignoredQuantity));
+
+    ASSERT_TRUE(sendClickLootRequestPacket(clients.clientA, dropId));
+
+    uint32_t lootRoomId = 0;
+    uint32_t resolvedDropId = 0;
+    uint64_t winnerSessionId = 0;
+    uint32_t resolvedItemId = 0;
+    uint16_t resolvedQuantity = 0;
+    ASSERT_TRUE(recvLootResolvedPacket(
+        clients.clientA,
+        lootRoomId,
+        resolvedDropId,
+        winnerSessionId,
+        resolvedItemId,
+        resolvedQuantity));
+    ASSERT_TRUE(recvLootResolvedPacket(
+        clients.clientB,
+        lootRoomId,
+        resolvedDropId,
+        winnerSessionId,
+        resolvedItemId,
+        resolvedQuantity));
+
+    uint64_t inventorySessionId = 0;
+    uint16_t currentWeight = 0;
+    uint16_t maxWeight = 0;
+    std::vector<Net::TcpInventoryEntry> entries;
+    ASSERT_TRUE(recvInventorySnapshotPacket(
+        clients.clientA,
+        inventorySessionId,
+        currentWeight,
+        maxWeight,
+        entries));
+
+    uint32_t rankingRoomId = 0;
+    uint64_t battleInstanceId = 0;
+    std::vector<Net::BattleFinalRankingEntry> rankingRows;
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientA,
+        rankingRoomId,
+        battleInstanceId,
+        rankingRows));
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientB,
+        rankingRoomId,
+        battleInstanceId,
+        rankingRows));
+
+    uint32_t previousRoomId = 0;
+    Net::TcpLobbyReturnReason returnReason = Net::TcpLobbyReturnReason::kHostKick;
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientA, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientB, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+
+    std::vector<Net::TcpRoomEntry> roomSnapshot;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientA, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientB, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
+
+    ASSERT_TRUE(sendCreateRoomRequestPacket(clients.clientA));
+    uint32_t freshRoomId = 0;
+    uint16_t playerCount = 0;
+    ASSERT_TRUE(recvCreateRoomResponsePacket(clients.clientA, freshRoomId, playerCount));
+    EXPECT_NE(freshRoomId, clients.roomId);
+    EXPECT_EQ(playerCount, 1U);
+
+    Net::TcpRoomDetailState detail;
+    ASSERT_TRUE(recvRoomDetailStatePacket(clients.clientA, detail));
+    EXPECT_EQ(detail.roomId, freshRoomId);
+    ASSERT_EQ(detail.members.size(), 1U);
+    EXPECT_EQ(detail.members[0].sessionId, clients.sessionA);
+
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientB, roomSnapshot));
+    ASSERT_EQ(roomSnapshot.size(), 1U);
+    EXPECT_EQ(roomSnapshot[0].roomId, freshRoomId);
+
+    ASSERT_TRUE(sendJoinRoomRequestPacket(clients.clientB, freshRoomId));
+    uint32_t joinedRoomId = 0;
+    ASSERT_TRUE(recvJoinRoomResponsePacket(clients.clientB, joinedRoomId, playerCount));
+    EXPECT_EQ(joinedRoomId, freshRoomId);
+    EXPECT_EQ(playerCount, 2U);
+
+    ASSERT_TRUE(recvRoomDetailStatePacket(clients.clientA, detail));
+    EXPECT_EQ(detail.roomId, freshRoomId);
+    EXPECT_EQ(detail.members.size(), 2U);
+    ASSERT_TRUE(recvRoomDetailStatePacket(clients.clientB, detail));
+    EXPECT_EQ(detail.roomId, freshRoomId);
+    EXPECT_EQ(detail.members.size(), 2U);
 
     ::close(clients.clientB);
     ::close(clients.clientA);
@@ -4475,7 +5785,310 @@ TEST(ServerIntegrationTests, RudpMonsterDeathDispatchesThroughInlineActorOnlyRud
     ::close(clients.clientA);
 }
 
-TEST(ServerIntegrationTests, RudpClickLootDispatchKeepsSingleWinnerOnlyRudp) {
+TEST(ServerIntegrationTests, RudpAttackDispatchesTcpCombatResults) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t udpPort = runningServer.server.udpBoundPort();
+    ASSERT_GT(udpPort, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    TwoPlayerRoomClients clients;
+    ASSERT_TRUE(setupTwoPlayerRoomForRudpTest(runningServer, clients));
+
+    Net::UdpSocket senderA;
+    Net::UdpSocket senderB;
+    ASSERT_TRUE(senderA.open(0));
+    ASSERT_TRUE(senderB.open(0));
+    ASSERT_TRUE(bindRudpEndpointForSessionTest(
+        runningServer,
+        senderA,
+        clients.sessionA,
+        77,
+        100,
+        1));
+    ASSERT_TRUE(bindRudpEndpointForSessionTest(
+        runningServer,
+        senderB,
+        clients.sessionB,
+        78,
+        101,
+        2));
+    ASSERT_TRUE(startRudpBattleForTest(
+        runningServer,
+        clients,
+        senderA,
+        senderB,
+        udpPort));
+
+    const Game::Room* room = Core::ServerTestAccess::findRoom(
+        runningServer.server,
+        clients.roomId);
+    ASSERT_NE(room, nullptr);
+    const uint32_t monsterId = room->monster().monsterId;
+    ASSERT_GT(monsterId, 0u);
+
+    sendUdpPacket(
+        senderA,
+        serializeRudpPacketForTest(
+            ackOnlyRudpHeader(clients.battleStartSequenceA),
+            {}),
+        udpPort);
+    sendUdpPacket(
+        senderB,
+        serializeRudpPacketForTest(
+            ackOnlyRudpHeader(clients.battleStartSequenceB),
+            {}),
+        udpPort);
+    ASSERT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.rudpReliableEventPendingCount() == 0U;
+        }));
+
+    auto sendAttack = [&](uint32_t packetSequence, uint32_t cmdSeq) {
+        sendUdpPacket(
+            senderA,
+            serializeRudpPacketForTest(
+                inputCommandRudpHeader(packetSequence),
+                attackInputCommandPayloadForTest(77, cmdSeq, monsterId)),
+            udpPort);
+    };
+
+    auto expectHealth = [&](int fd, uint16_t expectedHp) {
+        uint32_t roomId = 0;
+        uint32_t observedMonsterId = 0;
+        uint16_t currentHp = 0;
+        uint16_t maxHp = 0;
+        ASSERT_TRUE(recvMonsterHealthSnapshotPacket(
+            fd,
+            roomId,
+            observedMonsterId,
+            currentHp,
+            maxHp));
+        EXPECT_EQ(roomId, clients.roomId);
+        EXPECT_EQ(observedMonsterId, monsterId);
+        EXPECT_EQ(currentHp, expectedHp);
+        EXPECT_EQ(maxHp, Game::Room::kAttackDamage * 4u);
+    };
+
+    sendAttack(203, 2);
+    expectHealth(clients.clientA, 75);
+    expectHealth(clients.clientB, 75);
+
+    sendAttack(204, 3);
+    expectHealth(clients.clientA, 50);
+    expectHealth(clients.clientB, 50);
+
+    sendAttack(205, 4);
+    expectHealth(clients.clientA, 25);
+    expectHealth(clients.clientB, 25);
+
+    sendAttack(206, 5);
+
+    uint32_t deathRoomId = 0;
+    uint32_t deadMonsterId = 0;
+    ASSERT_TRUE(recvMonsterDeathPacket(clients.clientA, deathRoomId, deadMonsterId));
+    EXPECT_EQ(deathRoomId, clients.roomId);
+    EXPECT_EQ(deadMonsterId, monsterId);
+    ASSERT_TRUE(recvMonsterDeathPacket(clients.clientB, deathRoomId, deadMonsterId));
+    EXPECT_EQ(deathRoomId, clients.roomId);
+    EXPECT_EQ(deadMonsterId, monsterId);
+
+    uint32_t dropRoomIdA = 0;
+    uint32_t scatterSeedA = 0;
+    std::vector<Net::TcpDropEntryV2> dropsA;
+    ASSERT_TRUE(recvDropListSnapshotV2Packet(
+        clients.clientA,
+        dropRoomIdA,
+        scatterSeedA,
+        dropsA));
+    EXPECT_EQ(dropRoomIdA, clients.roomId);
+    EXPECT_GT(scatterSeedA, 0u);
+    ASSERT_EQ(dropsA.size(), 1u);
+    EXPECT_GT(dropsA[0].dropId, 0u);
+    EXPECT_GE(dropsA[0].posX, Game::Room::kArenaMinPosition);
+    EXPECT_LE(dropsA[0].posX, Game::Room::kArenaMaxPosition);
+    EXPECT_GE(dropsA[0].posY, Game::Room::kArenaMinPosition);
+    EXPECT_LE(dropsA[0].posY, Game::Room::kArenaMaxPosition);
+
+    uint32_t dropRoomIdB = 0;
+    uint32_t scatterSeedB = 0;
+    std::vector<Net::TcpDropEntryV2> dropsB;
+    ASSERT_TRUE(recvDropListSnapshotV2Packet(
+        clients.clientB,
+        dropRoomIdB,
+        scatterSeedB,
+        dropsB));
+    EXPECT_EQ(dropRoomIdB, clients.roomId);
+    EXPECT_EQ(scatterSeedB, scatterSeedA);
+    ASSERT_EQ(dropsB.size(), dropsA.size());
+    EXPECT_EQ(dropsB[0].dropId, dropsA[0].dropId);
+    EXPECT_EQ(dropsB[0].posX, dropsA[0].posX);
+    EXPECT_EQ(dropsB[0].posY, dropsA[0].posY);
+
+    room = Core::ServerTestAccess::findRoom(runningServer.server, clients.roomId);
+    ASSERT_NE(room, nullptr);
+    EXPECT_FALSE(room->hasAliveMonster());
+    ASSERT_EQ(room->drops().size(), 1u);
+    EXPECT_EQ(room->drops()[0].dropId, dropsA[0].dropId);
+
+    ::close(clients.clientB);
+    ::close(clients.clientA);
+}
+
+TEST(ServerIntegrationTests, RudpSpaceLootClaimsNearestDropThroughTcpResults) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t udpPort = runningServer.server.udpBoundPort();
+    ASSERT_GT(udpPort, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    TwoPlayerRoomClients clients;
+    Net::UdpSocket senderA;
+    Net::UdpSocket senderB;
+    ASSERT_TRUE(prepareRudpBattleForSmokeEndpointTest(
+        runningServer,
+        clients,
+        senderA,
+        senderB));
+
+    sendUdpPacket(
+        senderA,
+        serializeRudpPacketForTest(
+            ackOnlyRudpHeader(clients.battleStartSequenceA),
+            {}),
+        udpPort);
+    sendUdpPacket(
+        senderB,
+        serializeRudpPacketForTest(
+            ackOnlyRudpHeader(clients.battleStartSequenceB),
+            {}),
+        udpPort);
+    ASSERT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.rudpReliableEventPendingCount() == 0U;
+        }));
+
+    ASSERT_TRUE(sendSmokeCreateCenterDropRequestPacket(clients.clientA));
+    uint32_t dropId = 0;
+    uint32_t itemId = 0;
+    uint16_t quantity = 0;
+    ASSERT_TRUE(expectCenterDropSnapshot(clients.clientA, clients.roomId, dropId, itemId, quantity));
+    uint32_t ignoredDropId = 0;
+    uint32_t ignoredItemId = 0;
+    uint16_t ignoredQuantity = 0;
+    ASSERT_TRUE(expectCenterDropSnapshot(
+        clients.clientB,
+        clients.roomId,
+        ignoredDropId,
+        ignoredItemId,
+        ignoredQuantity));
+    ASSERT_TRUE(sendSmokePlacePlayersAroundCenterDropRequestPacket(clients.clientA));
+
+    sendUdpPacket(
+        senderA,
+        serializeRudpPacketForTest(
+            inputCommandRudpHeader(203),
+            spaceLootInputCommandPayloadForTest(77, 2)),
+        udpPort);
+
+    uint32_t lootRoomId = 0;
+    uint32_t resolvedDropId = 0;
+    uint64_t winnerSessionId = 0;
+    uint32_t resolvedItemId = 0;
+    uint16_t resolvedQuantity = 0;
+    ASSERT_TRUE(recvLootResolvedPacket(
+        clients.clientA,
+        lootRoomId,
+        resolvedDropId,
+        winnerSessionId,
+        resolvedItemId,
+        resolvedQuantity));
+    EXPECT_EQ(lootRoomId, clients.roomId);
+    EXPECT_EQ(resolvedDropId, dropId);
+    EXPECT_EQ(winnerSessionId, clients.sessionA);
+    EXPECT_EQ(resolvedItemId, itemId);
+    EXPECT_EQ(resolvedQuantity, quantity);
+    ASSERT_TRUE(recvLootResolvedPacket(
+        clients.clientB,
+        lootRoomId,
+        resolvedDropId,
+        winnerSessionId,
+        resolvedItemId,
+        resolvedQuantity));
+    EXPECT_EQ(resolvedDropId, dropId);
+    EXPECT_EQ(winnerSessionId, clients.sessionA);
+
+    uint64_t inventorySessionId = 0;
+    uint16_t currentWeight = 0;
+    uint16_t maxWeight = 0;
+    std::vector<Net::TcpInventoryEntry> entries;
+    ASSERT_TRUE(recvInventorySnapshotPacket(
+        clients.clientA,
+        inventorySessionId,
+        currentWeight,
+        maxWeight,
+        entries));
+    EXPECT_EQ(inventorySessionId, clients.sessionA);
+    EXPECT_EQ(currentWeight, quantity);
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].itemId, itemId);
+    EXPECT_EQ(entries[0].quantity, quantity);
+
+    uint32_t rankingRoomId = 0;
+    uint64_t battleInstanceId = 0;
+    std::vector<Net::BattleFinalRankingEntry> rankingRows;
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientA,
+        rankingRoomId,
+        battleInstanceId,
+        rankingRows));
+    EXPECT_EQ(rankingRoomId, clients.roomId);
+    EXPECT_GT(battleInstanceId, 0u);
+    ASSERT_EQ(rankingRows.size(), 2U);
+    EXPECT_EQ(rankingRows[0].sessionId, clients.sessionA);
+    EXPECT_EQ(rankingRows[0].totalAssetValue, 100);
+
+    uint32_t rankingRoomIdB = 0;
+    uint64_t battleInstanceIdB = 0;
+    std::vector<Net::BattleFinalRankingEntry> rankingRowsB;
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientB,
+        rankingRoomIdB,
+        battleInstanceIdB,
+        rankingRowsB));
+    EXPECT_EQ(rankingRoomIdB, clients.roomId);
+    EXPECT_EQ(battleInstanceIdB, battleInstanceId);
+    ASSERT_EQ(rankingRowsB.size(), rankingRows.size());
+
+    uint32_t previousRoomId = 0;
+    Net::TcpLobbyReturnReason returnReason = Net::TcpLobbyReturnReason::kHostKick;
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientA, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientB, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+
+    std::vector<Net::TcpRoomEntry> roomSnapshot;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientA, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientB, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
+
+    const Game::Room* room = Core::ServerTestAccess::findRoom(
+        runningServer.server,
+        clients.roomId);
+    EXPECT_EQ(room, nullptr);
+
+    ::close(clients.clientB);
+    ::close(clients.clientA);
+}
+
+TEST(ServerIntegrationTests, RudpClickLootDispatchCompletesBattleResult) {
     RunningServer runningServer(0);
     ASSERT_TRUE(runningServer.server.start());
     const uint16_t udpPort = runningServer.server.udpBoundPort();
@@ -4600,6 +6213,8 @@ TEST(ServerIntegrationTests, RudpClickLootDispatchKeepsSingleWinnerOnlyRudp) {
             return runningServer.server.rudpReliableEventPendingCount() == 0U;
         }));
     ASSERT_EQ(runningServer.server.rudpReliableEventPendingCount(), 0U);
+    const uint32_t expectedLootResolvedSequenceA = *monsterDeathSequenceA + 1U;
+    const uint32_t expectedLootResolvedSequenceB = *monsterDeathSequenceB + 1U;
 
     sendUdpPacket(
         senderA,
@@ -4608,64 +6223,15 @@ TEST(ServerIntegrationTests, RudpClickLootDispatchKeepsSingleWinnerOnlyRudp) {
             clickLootInputCommandPayloadForTest(77, 3, dropId)),
         udpPort);
 
-    ASSERT_TRUE(waitUntil(
-        [&runningServer]() {
-            return runningServer.server.rudpReliableEventPendingCount() == 2U;
-        }));
-
-    room = Core::ServerTestAccess::findRoom(runningServer.server, clients.roomId);
-    ASSERT_NE(room, nullptr);
-    ASSERT_EQ(room->drops().size(), 1u);
-    EXPECT_TRUE(room->drops()[0].claimed);
-    EXPECT_EQ(room->drops()[0].ownerSessionId, clients.sessionA);
-
-    const std::string lootResolvedKey =
-        "LootResolved:" + std::to_string(clients.roomId) + ":" +
-        std::to_string(dropId);
-    const std::optional<uint32_t> lootResolvedSequenceA =
-        Core::ServerTestAccess::rudpReliableEventSequence(
-            runningServer.server,
-            clients.sessionA,
-            Net::RudpReliableEventKind::kLootResolved,
-            lootResolvedKey);
-    const std::optional<uint32_t> lootResolvedSequenceB =
-        Core::ServerTestAccess::rudpReliableEventSequence(
-            runningServer.server,
-            clients.sessionB,
-            Net::RudpReliableEventKind::kLootResolved,
-            lootResolvedKey);
-    ASSERT_TRUE(lootResolvedSequenceA.has_value());
-    ASSERT_TRUE(lootResolvedSequenceB.has_value());
-    expectLootResolvedPending(
-        runningServer.server,
-        clients.sessionA,
-        *lootResolvedSequenceA,
-        lootResolvedKey,
-        clients.roomId,
-        dropId,
-        clients.sessionA,
-        itemId,
-        quantity);
-    expectLootResolvedPending(
-        runningServer.server,
-        clients.sessionB,
-        *lootResolvedSequenceB,
-        lootResolvedKey,
-        clients.roomId,
-        dropId,
-        clients.sessionA,
-        itemId,
-        quantity);
-
     Net::RudpLootResolvedGameEventPayload lootResolvedA;
     Net::RudpLootResolvedGameEventPayload lootResolvedB;
     ASSERT_TRUE(receiveLootResolvedPacketWithWait(
         senderA,
-        *lootResolvedSequenceA,
+        expectedLootResolvedSequenceA,
         lootResolvedA));
     ASSERT_TRUE(receiveLootResolvedPacketWithWait(
         senderB,
-        *lootResolvedSequenceB,
+        expectedLootResolvedSequenceB,
         lootResolvedB));
     EXPECT_EQ(lootResolvedA.roomId, clients.roomId);
     EXPECT_EQ(lootResolvedA.dropId, dropId);
@@ -4674,49 +6240,49 @@ TEST(ServerIntegrationTests, RudpClickLootDispatchKeepsSingleWinnerOnlyRudp) {
     EXPECT_EQ(lootResolvedB.dropId, dropId);
     EXPECT_EQ(lootResolvedB.winnerSessionId, clients.sessionA);
 
-    sendUdpPacket(
-        senderB,
-        serializeRudpPacketForTest(
-            inputCommandRudpHeader(205),
-            clickLootInputCommandPayloadForTest(78, 2, dropId)),
-        udpPort);
+    uint32_t rankingRoomId = 0;
+    uint64_t battleInstanceId = 0;
+    std::vector<Net::BattleFinalRankingEntry> rankingRows;
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientA,
+        rankingRoomId,
+        battleInstanceId,
+        rankingRows));
+    EXPECT_EQ(rankingRoomId, clients.roomId);
+    EXPECT_GT(battleInstanceId, 0u);
+    ASSERT_EQ(rankingRows.size(), 2U);
+    EXPECT_EQ(rankingRows[0].sessionId, clients.sessionA);
+    EXPECT_EQ(rankingRows[0].totalAssetValue, 100);
 
-    ASSERT_TRUE(waitUntil(
-        [&runningServer]() {
-            const Core::RudpServerBindingStats stats =
-                runningServer.server.rudpBindingStats();
-            return stats.inputSequenceAccepted >= 5U &&
-                runningServer.server.rudpReliableEventPendingCount() == 2U;
-        }));
+    uint32_t rankingRoomIdB = 0;
+    uint64_t battleInstanceIdB = 0;
+    std::vector<Net::BattleFinalRankingEntry> rankingRowsB;
+    ASSERT_TRUE(recvBattleFinalRankingPacket(
+        clients.clientB,
+        rankingRoomIdB,
+        battleInstanceIdB,
+        rankingRowsB));
+    EXPECT_EQ(rankingRoomIdB, clients.roomId);
+    EXPECT_EQ(battleInstanceIdB, battleInstanceId);
+    ASSERT_EQ(rankingRowsB.size(), rankingRows.size());
+
+    uint32_t previousRoomId = 0;
+    Net::TcpLobbyReturnReason returnReason = Net::TcpLobbyReturnReason::kHostKick;
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientA, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+    ASSERT_TRUE(recvLobbyReturnVisibilityPacket(clients.clientB, previousRoomId, returnReason));
+    EXPECT_EQ(previousRoomId, clients.roomId);
+    EXPECT_EQ(returnReason, Net::TcpLobbyReturnReason::kNone);
+
+    std::vector<Net::TcpRoomEntry> roomSnapshot;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientA, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clients.clientB, roomSnapshot));
+    EXPECT_TRUE(roomSnapshot.empty());
 
     room = Core::ServerTestAccess::findRoom(runningServer.server, clients.roomId);
-    ASSERT_NE(room, nullptr);
-    ASSERT_EQ(room->drops().size(), 1u);
-    EXPECT_TRUE(room->drops()[0].claimed);
-    EXPECT_EQ(room->drops()[0].ownerSessionId, clients.sessionA);
-    const Game::InventorySnapshot* winnerInventory =
-        room->findInventory(clients.sessionA);
-    ASSERT_NE(winnerInventory, nullptr);
-    EXPECT_EQ(winnerInventory->currentWeight, quantity);
-    ASSERT_EQ(winnerInventory->entries.size(), 1u);
-    EXPECT_EQ(winnerInventory->entries[0].itemId, itemId);
-    EXPECT_EQ(winnerInventory->entries[0].quantity, quantity);
-    const Game::InventorySnapshot* loserInventory =
-        room->findInventory(clients.sessionB);
-    ASSERT_NE(loserInventory, nullptr);
-    EXPECT_EQ(loserInventory->currentWeight, 0u);
-    EXPECT_TRUE(loserInventory->entries.empty());
-    expectNoReliableEventPending(
-        runningServer.server,
-        clients.sessionA,
-        *monsterDeathSequenceA);
-    expectNoReliableEventPending(
-        runningServer.server,
-        clients.sessionB,
-        *monsterDeathSequenceB);
-
-    expectNoTcpPacketForTest(clients.clientA);
-    expectNoTcpPacketForTest(clients.clientB);
+    EXPECT_EQ(room, nullptr);
 
     ::close(clients.clientB);
     ::close(clients.clientA);
@@ -4880,6 +6446,11 @@ TEST(ServerIntegrationTests, RudpReliableEventMaxRetryExpiryDropsPendingOnly) {
     EXPECT_EQ(server.rudpReliableEventPendingCount(), 0U);
     EXPECT_EQ(Core::ServerTestAccess::rudpReliableEventSessionQueueCount(server), 0U);
     EXPECT_EQ(server.rudpRetransmissionStats().expired, 1U);
+    const std::string textfile = server.renderRelease1RuntimeMetricsTextfile();
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_retransmission_expired_by_kind_total{kind=\"battle_start\"} 1\n"),
+        std::string::npos);
 }
 
 TEST(ServerIntegrationTests, RejectsMalformedBoundRudpInputCommandAtAdapterGate) {
@@ -5272,7 +6843,495 @@ TEST(ServerIntegrationTests, ClearsRudpInputCommandSequenceStateOnTcpDisconnect)
         }));
 }
 
-TEST(ServerIntegrationTests, SendsWelcomePacketOnConnect) {
+TEST(ServerIntegrationTests, DoesNotSendWelcomeBeforeAuthenticateGameSessionClaimSuccess) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    expectNoTcpPacketForTest(clientFd);
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-1"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-1"); }));
+    expectNoTcpPacketForTest(clientFd);
+
+    ASSERT_TRUE(meta.completeClaim("token-1", acceptedClaim(123, "player123")));
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    uint64_t sessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(clientFd, sessionId));
+    EXPECT_GT(sessionId, 0u);
+
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientFd, rooms));
+    EXPECT_TRUE(rooms.empty());
+    EXPECT_EQ(runningServer.server.sessionCount(), 1u);
+
+    ::close(clientFd);
+}
+
+TEST(ServerIntegrationTests, PreAuthCreateRoomIsIgnoredAndNotReplayedAfterAuth) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    ASSERT_TRUE(sendCreateRoomRequestPacket(clientFd));
+    expectNoTcpPacketForTest(clientFd);
+    EXPECT_EQ(Core::ServerTestAccess::roomCount(runningServer.server), 0u);
+
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-2"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-2"); }));
+    ASSERT_TRUE(meta.completeClaim("token-2", acceptedClaim(124, "player124")));
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    uint64_t sessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(clientFd, sessionId));
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientFd, rooms));
+    EXPECT_TRUE(rooms.empty());
+    EXPECT_EQ(Core::ServerTestAccess::roomCount(runningServer.server), 0u);
+
+    ::close(clientFd);
+}
+
+TEST(ServerIntegrationTests, AuthSuccessSendsWelcomeThenInitialRoomListSnapshot) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-3"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-3"); }));
+    ASSERT_TRUE(meta.completeClaim("token-3", acceptedClaim(125, "player125")));
+
+    uint64_t sessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(clientFd, sessionId));
+    EXPECT_GT(sessionId, 0u);
+
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientFd, rooms));
+    EXPECT_TRUE(rooms.empty());
+
+    ::close(clientFd);
+}
+
+TEST(ServerIntegrationTests, ClaimRejectedClosesWithoutLobbyMembership) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-rejected"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-rejected"); }));
+    ASSERT_TRUE(meta.completeClaim("token-rejected", rejectedClaim()));
+
+    EXPECT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() == 0u &&
+                runningServer.server.sessionCount() == 0u;
+        }));
+    EXPECT_EQ(Core::ServerTestAccess::roomCount(runningServer.server), 0u);
+    EXPECT_FALSE(expectConnectionAlive(clientFd));
+}
+
+TEST(ServerIntegrationTests, SameAccountSecondClaimReplacesOldSession) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int firstFd = connectRawToServer(port);
+    ASSERT_GE(firstFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(firstFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(firstFd, "token-old"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-old"); }));
+    ASSERT_TRUE(meta.completeClaim("token-old", acceptedClaim(777, "player777")));
+
+    uint64_t firstSessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(firstFd, firstSessionId));
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(firstFd, rooms));
+    drainAvailableTcpPacketsForTest(firstFd);
+
+    const int secondFd = connectRawToServer(port);
+    ASSERT_GE(secondFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(secondFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(secondFd, "token-new"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-new"); }));
+    ASSERT_TRUE(meta.completeClaim("token-new", acceptedClaim(777, "player777")));
+
+    ASSERT_TRUE(recvSessionReplacedPacket(firstFd));
+    EXPECT_TRUE(waitUntil([firstFd]() { return !expectConnectionAlive(firstFd); }));
+
+    uint64_t secondSessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(secondFd, secondSessionId));
+    ASSERT_TRUE(recvRoomListSnapshotPacket(secondFd, rooms));
+    EXPECT_GT(secondSessionId, 0u);
+    EXPECT_NE(firstSessionId, secondSessionId);
+    EXPECT_EQ(runningServer.server.sessionCount(), 1u);
+
+    ::close(secondFd);
+}
+
+TEST(ServerIntegrationTests, SameAccountReplacementReleasesOldThenNewSession) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int firstFd = connectRawToServer(port);
+    ASSERT_GE(firstFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(firstFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(firstFd, "token-replace-old-release"));
+    ASSERT_TRUE(waitUntil(
+        [&meta]() { return meta.hasPendingClaim("token-replace-old-release"); }));
+    ASSERT_TRUE(meta.completeClaim(
+        "token-replace-old-release",
+        acceptedClaim(778, "player778")));
+
+    uint64_t firstSessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(firstFd, firstSessionId));
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(firstFd, rooms));
+    drainAvailableTcpPacketsForTest(firstFd);
+
+    const int secondFd = connectRawToServer(port);
+    ASSERT_GE(secondFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(secondFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(secondFd, "token-replace-new-release"));
+    ASSERT_TRUE(waitUntil(
+        [&meta]() { return meta.hasPendingClaim("token-replace-new-release"); }));
+    ASSERT_TRUE(meta.completeClaim(
+        "token-replace-new-release",
+        acceptedClaim(778, "player778")));
+
+    ASSERT_TRUE(recvSessionReplacedPacket(firstFd));
+    EXPECT_TRUE(waitUntil([firstFd]() { return !expectConnectionAlive(firstFd); }));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.releaseCount() == 1u; }));
+
+    uint64_t secondSessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(secondFd, secondSessionId));
+    ASSERT_TRUE(recvRoomListSnapshotPacket(secondFd, rooms));
+    EXPECT_GT(secondSessionId, 0u);
+    EXPECT_NE(firstSessionId, secondSessionId);
+
+    std::vector<Core::MetaSessionReleaseRequest> releases = meta.releaseRequests();
+    ASSERT_EQ(releases.size(), 1u);
+    EXPECT_EQ(releases[0].accountId, 778u);
+    EXPECT_EQ(releases[0].serverSessionId, firstSessionId);
+    EXPECT_GT(releases[0].connectionId, 0u);
+
+    ::close(secondFd);
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.releaseCount() == 2u; }));
+
+    releases = meta.releaseRequests();
+    ASSERT_EQ(releases.size(), 2u);
+    EXPECT_EQ(releases[1].accountId, 778u);
+    EXPECT_EQ(releases[1].serverSessionId, secondSessionId);
+    EXPECT_GT(releases[1].connectionId, 0u);
+}
+
+TEST(ServerIntegrationTests, AuthenticatedDisconnectReleasesMetaSessionWithIdentity) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-release"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-release"); }));
+    ASSERT_TRUE(meta.completeClaim("token-release", acceptedClaim(888, "player888")));
+
+    uint64_t sessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(clientFd, sessionId));
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientFd, rooms));
+
+    ::close(clientFd);
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.releaseCount() == 1u; }));
+
+    const std::vector<Core::MetaSessionReleaseRequest> releases = meta.releaseRequests();
+    ASSERT_EQ(releases.size(), 1u);
+    EXPECT_EQ(releases[0].accountId, 888u);
+    EXPECT_EQ(releases[0].serverSessionId, sessionId);
+    EXPECT_GT(releases[0].connectionId, 0u);
+}
+
+TEST(ServerIntegrationTests, AuthenticatedSessionReportsLivenessAfterInterval) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-liveness"));
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.hasPendingClaim("token-liveness"); }));
+    ASSERT_TRUE(meta.completeClaim("token-liveness", acceptedClaim(889, "player889")));
+
+    uint64_t sessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(clientFd, sessionId));
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(clientFd, rooms));
+
+    Core::ServerTestAccess::processMetaSessionLivenessReports(
+        runningServer.server,
+        Util::now() + std::chrono::minutes(4));
+    EXPECT_EQ(meta.renewCount(), 0u);
+
+    Core::ServerTestAccess::processMetaSessionLivenessReports(
+        runningServer.server,
+        Util::now() + std::chrono::minutes(6));
+    ASSERT_EQ(meta.renewCount(), 1u);
+
+    const std::vector<Core::MetaSessionRenewRequest> renews = meta.renewRequests();
+    ASSERT_EQ(renews.size(), 1u);
+    EXPECT_EQ(renews[0].accountId, 889u);
+    EXPECT_GT(renews[0].connectionId, 0u);
+
+    ::close(clientFd);
+}
+
+TEST(ServerIntegrationTests, ExpiredAcceptedClaimClosesWithoutWelcomeOrLobbyMembership) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-expired-accepted"));
+    ASSERT_TRUE(waitUntil(
+        [&meta]() { return meta.hasPendingClaim("token-expired-accepted"); }));
+
+    Core::MetaSessionClaimResult expired = acceptedClaim(901, "expired901");
+    expired.reservationExpiresAtUnixMs = unixTimeMsForTest(-1);
+    ASSERT_TRUE(meta.completeClaim("token-expired-accepted", expired));
+
+    EXPECT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() == 0u &&
+                runningServer.server.sessionCount() == 0u;
+        }));
+    EXPECT_EQ(Core::ServerTestAccess::roomCount(runningServer.server), 0u);
+    EXPECT_FALSE(expectConnectionAlive(clientFd));
+
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.releaseCount() == 1u; }));
+    const std::vector<Core::MetaSessionReleaseRequest> releases = meta.releaseRequests();
+    ASSERT_EQ(releases.size(), 1u);
+    EXPECT_EQ(releases[0].accountId, 901u);
+    EXPECT_EQ(releases[0].serverSessionId, 0u);
+    EXPECT_GT(releases[0].connectionId, 0u);
+}
+
+TEST(ServerIntegrationTests, ClaimPendingClientDoesNotReceiveClientListSnapshot) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int pendingFd = connectRawToServer(port);
+    ASSERT_GE(pendingFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(pendingFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(pendingFd, "token-still-pending"));
+    ASSERT_TRUE(waitUntil(
+        [&meta]() { return meta.hasPendingClaim("token-still-pending"); }));
+    expectNoTcpPacketForTest(pendingFd);
+
+    const int activeFd = connectRawToServer(port);
+    ASSERT_GE(activeFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(activeFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(activeFd, "token-active-visible"));
+    ASSERT_TRUE(waitUntil(
+        [&meta]() { return meta.hasPendingClaim("token-active-visible"); }));
+    ASSERT_TRUE(meta.completeClaim(
+        "token-active-visible",
+        acceptedClaim(902, "active902")));
+
+    uint64_t activeSessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(activeFd, activeSessionId));
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(activeFd, rooms));
+    EXPECT_TRUE(waitUntil(
+        [&runningServer]() { return runningServer.server.sessionCount() == 1u; }));
+    expectNoTcpPacketForTest(pendingFd);
+
+    ::close(activeFd);
+    ASSERT_TRUE(waitUntil(
+        [&runningServer]() { return runningServer.server.sessionCount() == 0u; }));
+    expectNoTcpPacketForTest(pendingFd);
+
+    ::close(pendingFd);
+}
+
+TEST(ServerIntegrationTests, PreWelcomeDisconnectLateAcceptedClaimReleasesMetaSlot) {
+    TestMetaSessionClaimClient meta(false);
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectRawToServer(port);
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-late-accepted"));
+    ASSERT_TRUE(waitUntil(
+        [&meta]() { return meta.hasPendingClaim("token-late-accepted"); }));
+
+    ::close(clientFd);
+    ASSERT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() == 0u &&
+                runningServer.server.sessionCount() == 0u;
+        }));
+
+    ASSERT_TRUE(meta.completeClaim(
+        "token-late-accepted",
+        acceptedClaim(903, "late903")));
+
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.releaseCount() == 1u; }));
+    EXPECT_EQ(runningServer.server.sessionCount(), 0u);
+    EXPECT_EQ(Core::ServerTestAccess::roomCount(runningServer.server), 0u);
+
+    const std::vector<Core::MetaSessionReleaseRequest> releases = meta.releaseRequests();
+    ASSERT_EQ(releases.size(), 1u);
+    EXPECT_EQ(releases[0].accountId, 903u);
+    EXPECT_EQ(releases[0].serverSessionId, 0u);
+    EXPECT_GT(releases[0].connectionId, 0u);
+}
+
+TEST(ServerIntegrationTests, ShutdownLateAcceptedClaimReleasesMetaSlotWithoutServer) {
+    TestMetaSessionClaimClient meta(false);
+    std::optional<Core::IMetaSessionClaimClient::ClaimCallback> lateCallback;
+
+    {
+        RunningServer runningServer(0, &meta);
+        ASSERT_TRUE(runningServer.server.start());
+        const uint16_t port = runningServer.server.boundPort();
+        ASSERT_GT(port, 0);
+
+        runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        const int clientFd = connectRawToServer(port);
+        ASSERT_GE(clientFd, 0);
+        ASSERT_TRUE(sendAuthenticateGameSessionPacket(clientFd, "token-shutdown-late"));
+        ASSERT_TRUE(waitUntil(
+            [&meta]() { return meta.hasPendingClaim("token-shutdown-late"); }));
+
+        lateCallback = meta.takePendingClaimCallback("token-shutdown-late");
+        ASSERT_TRUE(lateCallback.has_value());
+        ::close(clientFd);
+    }
+
+    std::move(*lateCallback)(acceptedClaim(904, "shutdown904"));
+
+    ASSERT_TRUE(waitUntil([&meta]() { return meta.releaseCount() == 1u; }));
+    const std::vector<Core::MetaSessionReleaseRequest> releases = meta.releaseRequests();
+    ASSERT_EQ(releases.size(), 1u);
+    EXPECT_EQ(releases[0].accountId, 904u);
+    EXPECT_EQ(releases[0].serverSessionId, 0u);
+    EXPECT_GT(releases[0].connectionId, 0u);
+}
+
+TEST(ServerIntegrationTests, BlockingMetaClaimDoesNotBlockAcceptingAnotherTcpClient) {
+    BlockingMetaSessionClaimClient meta;
+    RunningServer runningServer(0, &meta);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int blockedFd = connectRawToServer(port);
+    ASSERT_GE(blockedFd, 0);
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(blockedFd, "token-blocking-meta"));
+    ASSERT_TRUE(meta.waitForFirstClaimStarted());
+
+    const int secondFd = connectRawToServer(port);
+    ASSERT_GE(secondFd, 0);
+    ASSERT_TRUE(sendAuthenticateGameSessionPacket(secondFd, "token-second-meta"));
+
+    const bool acceptedSecondConnection = waitUntil(
+        std::function<bool()>(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() >= 2u;
+        }),
+        std::chrono::milliseconds(300));
+
+    meta.unblockFirstClaim();
+    EXPECT_TRUE(acceptedSecondConnection);
+
+    ::close(blockedFd);
+    ::close(secondFd);
+}
+
+TEST(ServerIntegrationTests, SendsWelcomePacketAfterAuthClaimSuccess) {
     RunningServer runningServer(0);
     ASSERT_TRUE(runningServer.server.start());
     const uint16_t port = runningServer.server.boundPort();
@@ -5306,6 +7365,55 @@ TEST(ServerIntegrationTests, SendsWelcomePacketOnConnect) {
             return runningServer.server.activeConnectionCount() == 0u &&
                    runningServer.server.sessionCount() == 0u;
         }));
+}
+
+TEST(ServerIntegrationTests, AuthenticatedMalformedCreateRoomRequestDoesNotCreateLobbyRoom) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    const uint16_t port = runningServer.server.boundPort();
+    ASSERT_GT(port, 0);
+
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    int creatorFd = connectToServer(port);
+    ASSERT_GE(creatorFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(creatorFd, std::chrono::milliseconds(500)));
+
+    uint64_t creatorSessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(creatorFd, creatorSessionId));
+    ASSERT_GT(creatorSessionId, 0u);
+
+    std::vector<Net::TcpRoomEntry> rooms;
+    ASSERT_TRUE(recvRoomListSnapshotPacket(creatorFd, rooms));
+    ASSERT_TRUE(rooms.empty());
+
+    std::vector<uint8_t> malformedCreateRoom;
+    ASSERT_TRUE(Net::serializeCreateRoomRequestPacket("BadCap", 10, malformedCreateRoom));
+    malformedCreateRoom.back() = 1;
+    ASSERT_TRUE(sendAll(creatorFd, malformedCreateRoom.data(), malformedCreateRoom.size()));
+    EXPECT_TRUE(waitUntil(
+        [&runningServer]() {
+            return runningServer.server.activeConnectionCount() == 0u &&
+                   runningServer.server.sessionCount() == 0u;
+        }));
+    EXPECT_EQ(Core::ServerTestAccess::roomCount(runningServer.server), 0u);
+
+    int observerFd = connectToServer(port);
+    ASSERT_GE(observerFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(observerFd, std::chrono::milliseconds(500)));
+
+    uint64_t observerSessionId = 0;
+    ASSERT_TRUE(recvWelcomePacket(observerFd, observerSessionId));
+    ASSERT_GT(observerSessionId, 0u);
+
+    rooms.clear();
+    ASSERT_TRUE(recvRoomListSnapshotPacket(observerFd, rooms));
+    EXPECT_TRUE(rooms.empty());
+    EXPECT_EQ(Core::ServerTestAccess::roomCount(runningServer.server), 0u);
+
+    ::close(creatorFd);
+    ::close(observerFd);
 }
 
 TEST(ServerIntegrationTests, AssignsUniqueSessionIdsToMultipleClients) {
@@ -5422,5 +7530,655 @@ TEST(ServerIntegrationTests, SynchronizesClientListSnapshotOnJoinAndLeave) {
         [&runningServer]() {
             return runningServer.server.activeConnectionCount() == 0u &&
                    runningServer.server.sessionCount() == 0u;
-        }));
+    }));
+}
+
+TEST(ServerIntegrationTests, CoalescesBattleResultRoomListSnapshotBroadcastsForOneFlush) {
+    Core::Server server(0);
+
+    const Game::RoomCommandResult roomA =
+        Core::ServerTestAccess::createRoom(server, 1001);
+    const Game::RoomCommandResult roomB =
+        Core::ServerTestAccess::createRoom(server, 2001);
+    ASSERT_TRUE(roomA.ok);
+    ASSERT_TRUE(roomB.ok);
+
+    Game::BattleFinalRankingResult rankingA;
+    rankingA.status = Game::BattleFinalRankingStatus::kOk;
+    rankingA.roomId = roomA.room.roomId;
+    rankingA.battleInstanceId = 101;
+    rankingA.participantSessionIds = {1001};
+    rankingA.rows = {Game::BattleFinalRankingRow{1, 1001, "Player1001", 0}};
+
+    Game::BattleFinalRankingResult rankingB;
+    rankingB.status = Game::BattleFinalRankingStatus::kOk;
+    rankingB.roomId = roomB.room.roomId;
+    rankingB.battleInstanceId = 102;
+    rankingB.participantSessionIds = {2001};
+    rankingB.rows = {Game::BattleFinalRankingRow{1, 2001, "Player2001", 0}};
+
+    ASSERT_TRUE(Core::ServerTestAccess::completeBattleResultsThenBroadcastRoomList(
+        server,
+        {rankingA, rankingB}));
+
+    const Core::Release1RuntimeMetricsSnapshot metrics =
+        server.release1RuntimeMetricsSnapshot();
+    EXPECT_EQ(metrics.tcpRoomListSnapshotBroadcastCount, 1U);
+    EXPECT_EQ(metrics.tcpRoomListSnapshotBroadcastRecipientCount, 0U);
+    EXPECT_EQ(Core::ServerTestAccess::findRoom(server, roomA.room.roomId), nullptr);
+    EXPECT_EQ(Core::ServerTestAccess::findRoom(server, roomB.room.roomId), nullptr);
+}
+
+TEST(ServerIntegrationTests, DefersRoomListBroadcastUntilDebounceWindow) {
+    Core::Server server(0);
+
+    Core::ServerTestAccess::broadcastStateSnapshots(
+        server,
+        false,
+        true,
+        timeAt(1000));
+    Core::ServerTestAccess::broadcastStateSnapshots(
+        server,
+        false,
+        true,
+        timeAt(1020));
+
+    EXPECT_EQ(server.release1RuntimeMetricsSnapshot().tcpRoomListSnapshotBroadcastCount, 0U);
+
+    Core::ServerTestAccess::processPendingRoomListSnapshotBroadcast(server, timeAt(1049));
+    EXPECT_EQ(server.release1RuntimeMetricsSnapshot().tcpRoomListSnapshotBroadcastCount, 0U);
+
+    Core::ServerTestAccess::processPendingRoomListSnapshotBroadcast(server, timeAt(1050));
+    EXPECT_EQ(server.release1RuntimeMetricsSnapshot().tcpRoomListSnapshotBroadcastCount, 1U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsSnapshotCountsCompletedTimerTicks) {
+    Core::Server server(0);
+
+    EXPECT_EQ(server.release1RuntimeMetricsSnapshot().runtimeTickCount, 0U);
+
+    Core::ServerTestAccess::processRuntimeTimerMaintenanceForRelease1Metrics(
+        server,
+        timeAt(1000));
+
+    EXPECT_EQ(server.release1RuntimeMetricsSnapshot().runtimeTickCount, 1U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsRenderTextfile) {
+    Core::Server server(0);
+    Core::ServerTestAccess::processRuntimeTimerMaintenanceForRelease1Metrics(
+        server,
+        timeAt(1000));
+
+    const std::string textfile = server.renderRelease1RuntimeMetricsTextfile();
+
+    EXPECT_NE(
+        textfile.find("lol_server_runtime_tick_total 1\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_input_sequence_accepted_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_move_accepted_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_move_receive_to_apply_latency_ms_bucket{le=\"1\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_move_receive_to_apply_latency_ms_count 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_move_receive_to_apply_latency_ms_sum 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_attack_accepted_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_attack_receive_to_apply_latency_ms_bucket{le=\"1\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_attack_receive_to_apply_latency_ms_count 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_attack_receive_to_apply_latency_ms_sum 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_loot_claim_accepted_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_loot_claim_receive_to_apply_latency_ms_bucket{le=\"1\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_loot_claim_receive_to_apply_latency_ms_count 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_loot_claim_receive_to_apply_latency_ms_sum 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_state_snapshot_sent_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_delivered_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_attempted_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_malformed_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_duplicate_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_socket_errors_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_stopped_by_would_block_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_stopped_by_max_packets_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_drain_stopped_by_socket_error_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_hello_received_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_bound_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_refreshed_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_unknown_session_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_unbound_input_rejected_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_input_candidates_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_input_decode_failed_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_input_sequence_duplicate_rejected_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_binding_input_no_room_rejected_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_binding_input_no_room_rejected_by_op_total{op=\"ready\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_binding_input_no_room_rejected_by_op_total{op=\"move\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_binding_input_no_room_rejected_by_op_total{op=\"attack\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_binding_input_no_room_rejected_by_op_total{op=\"click_loot\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_move_apply_rejected_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_reliable_event_tracked_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_reliable_event_tracked_by_kind_total{kind=\"battle_start_roster\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_reliable_event_pending 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_retransmission_expired_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_rudp_retransmission_expired_by_kind_total{kind=\"battle_start_roster\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_retransmission_due_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_retransmission_resent_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_retransmission_send_errors_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_rudp_retransmission_dropped_peers_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(textfile.find("lol_tcp_disconnect_total 0\n"), std::string::npos);
+    EXPECT_NE(textfile.find("lol_tcp_disconnect_marked_read_closed_total 0\n"), std::string::npos);
+    EXPECT_NE(textfile.find("lol_tcp_disconnect_marked_read_error_total 0\n"), std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_disconnect_marked_read_error_by_errno_total{errno=\"econnreset\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_disconnect_marked_read_error_by_errno_total{errno=\"econnaborted\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_disconnect_marked_read_error_by_errno_total{errno=\"etimedout\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_disconnect_marked_read_error_by_errno_total{errno=\"other\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_disconnect_marked_packet_reader_rejected_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(textfile.find("lol_tcp_disconnect_marked_invalid_packet_total 0\n"), std::string::npos);
+    EXPECT_NE(textfile.find("lol_tcp_disconnect_marked_network_event_total 0\n"), std::string::npos);
+    EXPECT_NE(textfile.find("lol_tcp_disconnect_marked_send_failure_total 0\n"), std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_disconnect_marked_outbound_queue_full_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_disconnect_marked_event_loop_update_failure_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_disconnect_marked_missing_connection_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_send_failure_by_packet_type_total{packet=\"room_list_snapshot\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_send_failure_by_packet_type_total{packet=\"battle_start_roster\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_send_failure_by_packet_type_total{packet=\"arena_gameplay_start\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_send_failure_by_packet_type_total{packet=\"battle_final_ranking\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_send_failure_by_packet_type_total{packet=\"lobby_return_visibility\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_request_received_total{command=\"create_room\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_request_received_total{command=\"join_room\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_response_sent_total{command=\"create_room\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_response_sent_total{command=\"join_room\"} 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_send_failure_unknown_packet_type_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_room_list_snapshot_direct_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_room_list_snapshot_broadcast_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_room_list_snapshot_broadcast_recipients_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find("lol_tcp_room_list_snapshot_bytes_total 0\n"),
+        std::string::npos);
+    EXPECT_NE(textfile.find("lol_active_connections 0\n"), std::string::npos);
+    EXPECT_NE(textfile.find("lol_active_sessions 0\n"), std::string::npos);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsCountsTcpReadClosedDisconnect) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int clientFd = connectToServer(runningServer.server.boundPort());
+    ASSERT_GE(clientFd, 0);
+    ASSERT_TRUE(setReceiveTimeout(clientFd, std::chrono::milliseconds(500)));
+
+    uint64_t sessionId = 0;
+    std::vector<uint64_t> snapshot;
+    ASSERT_TRUE(recvWelcomePacket(clientFd, sessionId));
+    ASSERT_TRUE(recvClientListSnapshotPacket(clientFd, snapshot));
+
+    ::close(clientFd);
+
+    ASSERT_TRUE(waitUntil(
+        [&runningServer]() {
+            const std::string textfile =
+                runningServer.server.renderRelease1RuntimeMetricsTextfile();
+            return textfile.find("lol_tcp_disconnect_total 1\n") != std::string::npos &&
+                textfile.find("lol_tcp_disconnect_marked_read_closed_total 1\n") !=
+                    std::string::npos;
+        },
+        std::chrono::milliseconds(1000)));
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsCountsTcpRoomCommandVisibility) {
+    RunningServer runningServer(0);
+    ASSERT_TRUE(runningServer.server.start());
+    runningServer.thread = std::thread([&runningServer]() { runningServer.server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    TwoPlayerRoomClients clients;
+    ASSERT_TRUE(setupTwoPlayerRoomForRudpTest(runningServer, clients));
+
+    const std::string textfile =
+        runningServer.server.renderRelease1RuntimeMetricsTextfile();
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_request_received_total{command=\"create_room\"} 1\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_response_sent_total{command=\"create_room\"} 1\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_request_received_total{command=\"join_room\"} 1\n"),
+        std::string::npos);
+    EXPECT_NE(
+        textfile.find(
+            "lol_tcp_room_command_response_sent_total{command=\"join_room\"} 1\n"),
+        std::string::npos);
+
+    ::close(clients.clientB);
+    ::close(clients.clientA);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsCountsAcceptedRudpAttack) {
+    Core::Server server(0);
+    const Net::UdpEndpoint endpoint = udpLoopbackEndpoint(31901);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpoint, 1001),
+        Net::RudpSessionBindResult::kBoundNew);
+    const Game::RoomCommandResult created =
+        Core::ServerTestAccess::createRoom(server, 1001);
+    ASSERT_TRUE(created.ok);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpoint,
+        101,
+        attackInputCommandPayloadForTest(77, 10, 1),
+        timeAt(1000));
+
+    EXPECT_EQ(server.release1RuntimeMetricsSnapshot().rudpAttackAcceptedCount, 1U);
+    EXPECT_EQ(server.rudpBindingStats().attackAccepted, 1U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsSamplesAcceptedRudpAttackLatency) {
+    Core::Server server(0);
+    const Net::UdpEndpoint endpoint = udpLoopbackEndpoint(31902);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpoint, 1001),
+        Net::RudpSessionBindResult::kBoundNew);
+    const Game::RoomCommandResult created =
+        Core::ServerTestAccess::createRoom(server, 1001);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(Core::ServerTestAccess::joinRoom(
+        server,
+        1002,
+        created.room.roomId).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::markReady(server, 1001).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::markReady(server, 1002).ok);
+    ASSERT_TRUE(
+        Core::ServerTestAccess::hostStartBattle(server, 1001).battleJustStarted);
+    ASSERT_TRUE(Core::ServerTestAccess::registerRoomForDispatch(
+        server,
+        created.room.roomId));
+    const Game::RoomCommandResult spawned =
+        Core::ServerTestAccess::spawnMonster(server, created.room.roomId);
+    ASSERT_TRUE(spawned.ok);
+    ASSERT_GT(spawned.monster.monsterId, 0u);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpoint,
+        101,
+        attackInputCommandPayloadForTest(77, 10, spawned.monster.monsterId),
+        Util::now());
+
+    const Core::Release1RuntimeMetricsSnapshot metrics =
+        server.release1RuntimeMetricsSnapshot();
+    EXPECT_EQ(metrics.rudpAttackReceiveToApplyLatencySampleCount, 1U);
+    EXPECT_EQ(metrics.rudpAttackReceiveToApplyLatencyBucketCounts.back(), 1U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsSamplesAcceptedRudpMoveLatency) {
+    Core::Server server(0);
+    const Net::UdpEndpoint endpoint = udpLoopbackEndpoint(31904);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpoint, 1001),
+        Net::RudpSessionBindResult::kBoundNew);
+    const Game::RoomCommandResult created =
+        Core::ServerTestAccess::createRoom(server, 1001);
+    ASSERT_TRUE(created.ok);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpoint,
+        101,
+        moveInputCommandPayloadForTest(77, 10, 100, -100),
+        Util::now());
+
+    const Core::Release1RuntimeMetricsSnapshot metrics =
+        server.release1RuntimeMetricsSnapshot();
+    EXPECT_EQ(metrics.rudpMoveReceiveToApplyLatencySampleCount, 1U);
+    EXPECT_EQ(metrics.rudpMoveReceiveToApplyLatencyBucketCounts.back(), 1U);
+    EXPECT_EQ(metrics.rudpAttackReceiveToApplyLatencySampleCount, 0U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsSamplesAcceptedRudpLootClaimLatency) {
+    Core::Server server(0);
+    const Net::UdpEndpoint endpoint = udpLoopbackEndpoint(31906);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpoint, 1001),
+        Net::RudpSessionBindResult::kBoundNew);
+    const Game::RoomCommandResult created =
+        Core::ServerTestAccess::createRoom(server, 1001);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(Core::ServerTestAccess::joinRoom(
+        server,
+        1002,
+        created.room.roomId).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::markReady(server, 1001).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::markReady(server, 1002).ok);
+    ASSERT_TRUE(
+        Core::ServerTestAccess::hostStartBattle(server, 1001).battleJustStarted);
+    ASSERT_TRUE(Core::ServerTestAccess::registerRoomForDispatch(
+        server,
+        created.room.roomId));
+    const Game::RoomCommandResult spawned =
+        Core::ServerTestAccess::spawnMonster(server, created.room.roomId);
+    ASSERT_TRUE(spawned.ok);
+    const Game::RoomCommandResult defeated =
+        Core::ServerTestAccess::defeatMonster(
+            server,
+            1001,
+            spawned.monster.monsterId);
+    ASSERT_TRUE(defeated.ok);
+    ASSERT_EQ(defeated.drops.size(), 1u);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpoint,
+        101,
+        clickLootInputCommandPayloadForTest(77, 10, defeated.drops[0].dropId),
+        Util::now());
+
+    const Core::Release1RuntimeMetricsSnapshot metrics =
+        server.release1RuntimeMetricsSnapshot();
+    EXPECT_EQ(metrics.rudpLootClaimAcceptedCount, 1U);
+    EXPECT_EQ(server.rudpBindingStats().lootClaimAccepted, 1U);
+    EXPECT_EQ(metrics.rudpLootClaimReceiveToApplyLatencySampleCount, 1U);
+    EXPECT_EQ(metrics.rudpLootClaimReceiveToApplyLatencyBucketCounts.back(), 1U);
+    EXPECT_EQ(metrics.rudpMoveReceiveToApplyLatencySampleCount, 0U);
+    EXPECT_EQ(metrics.rudpAttackReceiveToApplyLatencySampleCount, 0U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsSkipsRejectedLootClaimLatency) {
+    Core::Server server(0);
+    const Net::UdpEndpoint endpointA = udpLoopbackEndpoint(31907);
+    const Net::UdpEndpoint endpointB = udpLoopbackEndpoint(31908);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpointA, 1001),
+        Net::RudpSessionBindResult::kBoundNew);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpointB, 1002),
+        Net::RudpSessionBindResult::kBoundNew);
+    const Game::RoomCommandResult created =
+        Core::ServerTestAccess::createRoom(server, 1001);
+    ASSERT_TRUE(created.ok);
+    ASSERT_TRUE(Core::ServerTestAccess::joinRoom(
+        server,
+        1002,
+        created.room.roomId).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::markReady(server, 1001).ok);
+    ASSERT_TRUE(Core::ServerTestAccess::markReady(server, 1002).ok);
+    ASSERT_TRUE(
+        Core::ServerTestAccess::hostStartBattle(server, 1001).battleJustStarted);
+    ASSERT_TRUE(Core::ServerTestAccess::registerRoomForDispatch(
+        server,
+        created.room.roomId));
+    const Game::RoomCommandResult spawned =
+        Core::ServerTestAccess::spawnMonster(server, created.room.roomId);
+    ASSERT_TRUE(spawned.ok);
+    const Game::RoomCommandResult defeated =
+        Core::ServerTestAccess::defeatMonster(
+            server,
+            1001,
+            spawned.monster.monsterId);
+    ASSERT_TRUE(defeated.ok);
+    ASSERT_EQ(defeated.drops.size(), 1u);
+    const uint32_t dropId = defeated.drops[0].dropId;
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpointA,
+        101,
+        clickLootInputCommandPayloadForTest(77, 10, dropId),
+        Util::now());
+    ASSERT_EQ(
+        server.release1RuntimeMetricsSnapshot()
+            .rudpLootClaimReceiveToApplyLatencySampleCount,
+        1U);
+    ASSERT_EQ(
+        server.release1RuntimeMetricsSnapshot().rudpLootClaimAcceptedCount,
+        1U);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpointB,
+        102,
+        clickLootInputCommandPayloadForTest(78, 10, dropId),
+        Util::now());
+
+    EXPECT_EQ(
+        server.release1RuntimeMetricsSnapshot()
+            .rudpLootClaimReceiveToApplyLatencySampleCount,
+        1U);
+    EXPECT_EQ(
+        server.release1RuntimeMetricsSnapshot().rudpLootClaimAcceptedCount,
+        2U);
+    EXPECT_EQ(server.rudpBindingStats().lootClaimAccepted, 2U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsSkipsRejectedMoveLatency) {
+    Core::Server server(0);
+    const Net::UdpEndpoint endpoint = udpLoopbackEndpoint(31905);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpoint, 1001),
+        Net::RudpSessionBindResult::kBoundNew);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpoint,
+        101,
+        moveInputCommandPayloadForTest(77, 10, 100, -100),
+        Util::now());
+
+    EXPECT_EQ(
+        server.release1RuntimeMetricsSnapshot()
+            .rudpMoveReceiveToApplyLatencySampleCount,
+        0U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsSkipsRejectedAttackLatency) {
+    Core::Server server(0);
+    const Net::UdpEndpoint endpoint = udpLoopbackEndpoint(31903);
+    ASSERT_EQ(
+        Core::ServerTestAccess::bindRudpEndpoint(server, endpoint, 1001),
+        Net::RudpSessionBindResult::kBoundNew);
+
+    Core::ServerTestAccess::processRudpInputCommandDelivery(
+        server,
+        endpoint,
+        101,
+        attackInputCommandPayloadForTest(77, 10, 1),
+        Util::now());
+
+    EXPECT_EQ(
+        server.release1RuntimeMetricsSnapshot()
+            .rudpAttackReceiveToApplyLatencySampleCount,
+        0U);
+}
+
+TEST(ServerIntegrationTests, Release1RuntimeMetricsTextfileWritesImmediatelyThenHonorsInterval) {
+    const auto suffix =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path target =
+        std::filesystem::temp_directory_path() /
+        ("lol_release1_runtime_metrics_" + std::to_string(suffix) + ".prom");
+    std::remove(target.string().c_str());
+    std::remove((target.string() + ".tmp").c_str());
+
+    Core::Server server(0);
+    ASSERT_TRUE(server.configureRelease1MetricsTextfile(
+        target.string(),
+        std::chrono::milliseconds(1000)));
+
+    Core::ServerTestAccess::processRuntimeTimerMaintenanceForRelease1Metrics(
+        server,
+        timeAt(1000));
+    const std::string firstWrite = readTextFile(target);
+    ASSERT_NE(
+        firstWrite.find("lol_server_runtime_tick_total 1\n"),
+        std::string::npos);
+
+    Core::ServerTestAccess::processRuntimeTimerMaintenanceForRelease1Metrics(
+        server,
+        timeAt(1500));
+    EXPECT_EQ(readTextFile(target), firstWrite);
+
+    Core::ServerTestAccess::processRuntimeTimerMaintenanceForRelease1Metrics(
+        server,
+        timeAt(2000));
+    const std::string secondWrite = readTextFile(target);
+    EXPECT_NE(secondWrite.find("lol_server_runtime_tick_total 3\n"), std::string::npos);
+
+    std::remove(target.string().c_str());
+    std::remove((target.string() + ".tmp").c_str());
 }

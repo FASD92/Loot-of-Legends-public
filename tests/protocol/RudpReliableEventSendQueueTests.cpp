@@ -27,6 +27,12 @@ Net::RudpReliableEventDescriptor descriptor(
                 logicalKey,
                 static_cast<uint16_t>(Net::RudpPacketType::kBattleStart),
                 static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
+        case Net::RudpReliableEventKind::kBattleStartRoster:
+            return Net::RudpReliableEventDescriptor{
+                kind,
+                logicalKey,
+                static_cast<uint16_t>(Net::RudpPacketType::kBattleStartRoster),
+                static_cast<uint8_t>(Net::RudpChannelId::kEvent)};
         case Net::RudpReliableEventKind::kMonsterDeath:
         case Net::RudpReliableEventKind::kLootResolved:
             return Net::RudpReliableEventDescriptor{
@@ -54,6 +60,7 @@ TEST(RudpReliableEventSendQueueTests, TracksValidReliableEventDescriptors) {
     Net::RudpReliableEventSendQueue queue;
     const std::vector<Net::RudpReliableEventDescriptor> descriptors = {
         descriptor(Net::RudpReliableEventKind::kBattleStart, "room-42:1001:1002"),
+        descriptor(Net::RudpReliableEventKind::kBattleStartRoster, "room-42:1001:1002:1003"),
         descriptor(Net::RudpReliableEventKind::kMonsterDeath, "room-42:monster-7"),
         descriptor(Net::RudpReliableEventKind::kLootResolved, "room-42:drop-77"),
         descriptor(Net::RudpReliableEventKind::kMetaResponse, "settlement-1"),
@@ -72,7 +79,7 @@ TEST(RudpReliableEventSendQueueTests, TracksValidReliableEventDescriptors) {
     EXPECT_EQ(queue.pendingCount(), descriptors.size());
     EXPECT_EQ(
         queue.pendingSequences(),
-        (std::vector<uint32_t>{100, 101, 102, 103}));
+        (std::vector<uint32_t>{100, 101, 102, 103, 104}));
 }
 
 TEST(RudpReliableEventSendQueueTests, TrackStoresEventMetadataAndPacketBytes) {

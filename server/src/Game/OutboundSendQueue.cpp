@@ -9,6 +9,7 @@ Game::OutboundEnvelope copyResultFields(
     envelope.playerSessionIds = result.playerSessionIds;
     envelope.monster = result.monster;
     envelope.drops = result.drops;
+    envelope.scatterSeed = result.scatterSeed;
     envelope.drop = result.drop;
     envelope.lootRejectReason = result.lootRejectReason;
     envelope.winnerSessionId = result.winnerSessionId;
@@ -96,6 +97,31 @@ void appendRoomCommandBroadcasts(
                 result));
     }
 }
+
+void appendAttackBroadcasts(
+    std::vector<Game::OutboundEnvelope>& envelopes,
+    const Game::RoomCommandResult& result,
+    Game::RoomEventType sourceEventType) {
+    if (result.monsterJustDefeated) {
+        envelopes.push_back(
+            roomEnvelope(
+                Game::OutboundMessageType::kMonsterDeath,
+                sourceEventType,
+                result));
+        envelopes.push_back(
+            roomEnvelope(
+                Game::OutboundMessageType::kDropListSnapshotV2,
+                sourceEventType,
+                result));
+        return;
+    }
+
+    envelopes.push_back(
+        roomEnvelope(
+            Game::OutboundMessageType::kMonsterHealthSnapshot,
+            sourceEventType,
+            result));
+}
 }  // namespace
 
 namespace Game {
@@ -135,6 +161,9 @@ size_t OutboundSendQueue::enqueueFromRoomEventApplyResult(
     case RoomEventApplyStatus::kRoomMismatch:
         return 0;
     case RoomEventApplyStatus::kRoomCommandRejected:
+        if (event.type == RoomEventType::kAttack) {
+            return 0;
+        }
         envelopes.push_back(commandErrorEnvelope(event, command));
         break;
     case RoomEventApplyStatus::kApplied:
@@ -152,6 +181,7 @@ size_t OutboundSendQueue::enqueueFromRoomEventApplyResult(
             appendRoomCommandBroadcasts(envelopes, command, event.type);
             break;
         case RoomEventType::kClickLoot:
+        case RoomEventType::kSpaceLoot:
             if (command.lootRejected) {
                 envelopes.push_back(
                     sessionEnvelope(
@@ -172,6 +202,9 @@ size_t OutboundSendQueue::enqueueFromRoomEventApplyResult(
                         event.type,
                         command));
             }
+            break;
+        case RoomEventType::kAttack:
+            appendAttackBroadcasts(envelopes, command, event.type);
             break;
         }
         break;

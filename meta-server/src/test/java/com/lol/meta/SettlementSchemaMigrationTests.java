@@ -51,6 +51,60 @@ class SettlementSchemaMigrationTests extends AbstractContainerIntegrationTest {
   }
 
   @Test
+  void release0AuthTablesExist() {
+    Set<String> tableNames =
+        jdbcTemplate
+            .queryForList(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                  AND table_name IN ('player_account', 'player_oauth_identity')
+                """,
+                String.class)
+            .stream()
+            .collect(Collectors.toSet());
+
+    assertThat(tableNames).containsExactlyInAnyOrder("player_account", "player_oauth_identity");
+  }
+
+  @Test
+  void playerNicknameColumnUsesCaseSensitiveCollation() {
+    String collation =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT collation_name
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = 'player_account'
+              AND column_name = 'nickname'
+            """,
+            String.class);
+
+    assertThat(collation).isEqualTo("utf8mb4_bin");
+  }
+
+  @Test
+  void playerOauthIdentityColumnsUseCaseSensitiveCollation() {
+    Set<String> columnCollations =
+        jdbcTemplate
+            .queryForList(
+                """
+                SELECT CONCAT(column_name, ':', collation_name)
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'player_oauth_identity'
+                  AND column_name IN ('provider', 'provider_subject')
+                """,
+                String.class)
+            .stream()
+            .collect(Collectors.toSet());
+
+    assertThat(columnCollations)
+        .containsExactlyInAnyOrder("provider:utf8mb4_bin", "provider_subject:utf8mb4_bin");
+  }
+
+  @Test
   void primaryKeysMatchSettlementSchemaContract() {
     assertPrimaryKeyColumns("accounts", List.of("account_id"));
     assertPrimaryKeyColumns("inventories", List.of("account_id", "item_id"));

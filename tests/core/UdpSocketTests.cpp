@@ -58,6 +58,13 @@ TEST(UdpSocketTests, OpenBindsEphemeralPortAndEmptyReceiveWouldBlock) {
     EXPECT_EQ(socket.boundPort(), 0);
 }
 
+TEST(UdpSocketTests, OpenRequestsBurstSizedReceiveBuffer) {
+    Net::UdpSocket socket;
+
+    ASSERT_TRUE(socket.open(0));
+    EXPECT_GE(socket.receiveBufferSize(), 1024U * 1024U);
+}
+
 TEST(UdpSocketTests, SendsAndReceivesDatagramOverLoopback) {
     Net::UdpSocket receiver;
     Net::UdpSocket sender;

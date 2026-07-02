@@ -31,6 +31,7 @@ enum class RudpPacketType : uint16_t {
     kStateSnapshot = 0x1004,
     kGameEvent = 0x1005,
     kMetaResponse = 0x1006,
+    kBattleStartRoster = 0x1007,
     kError = 0x2001,
 };
 

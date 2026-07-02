@@ -8,6 +8,10 @@ add_library(
   lol_server_core
   src/Core/ClientConnection.cpp
   src/Core/ClientConnection.hpp
+  src/Core/LocalDevMetaSessionClaimClient.cpp
+  src/Core/LocalDevMetaSessionClaimClient.hpp
+  src/Core/MetaHttpSessionClaimClient.cpp
+  src/Core/MetaHttpSessionClaimClient.hpp
   src/Core/RudpInputCommandRoomEventTranslator.cpp
   src/Core/RudpInputCommandRoomEventTranslator.hpp
   src/Core/Server.cpp
@@ -18,6 +22,10 @@ add_library(
   src/Core/SessionManager.hpp
   src/Game/Room.cpp
   src/Game/Room.hpp
+  src/Game/ItemValueCatalog.cpp
+  src/Game/ItemValueCatalog.hpp
+  src/Game/LootScatter.cpp
+  src/Game/LootScatter.hpp
   src/Game/RoomActor.cpp
   src/Game/RoomActor.hpp
   src/Game/RoomEventDispatcher.cpp
@@ -36,6 +44,8 @@ add_library(
   src/Net/RudpAckWindow.hpp
   src/Net/RudpBattleStartPayload.cpp
   src/Net/RudpBattleStartPayload.hpp
+  src/Net/RudpBattleStartRosterPayload.cpp
+  src/Net/RudpBattleStartRosterPayload.hpp
   src/Net/RudpDatagramReceiver.cpp
   src/Net/RudpDatagramReceiver.hpp
   src/Net/RudpGameEventPayload.cpp
@@ -85,6 +95,8 @@ add_library(
   src/Net/TcpListener.hpp
   src/Net/UdpSocket.cpp
   src/Net/UdpSocket.hpp
+  src/Util/PrometheusTextfileWriter.cpp
+  src/Util/PrometheusTextfileWriter.hpp
   src/Util/Time.cpp
   src/Util/Time.hpp
 )

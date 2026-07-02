@@ -11,6 +11,8 @@ enum class RudpInputCommandOp : uint8_t {
     kMonsterDeath = 0x02,
     kClickLoot = 0x03,
     kMove = 0x04,
+    kAttack = 0x05,
+    kSpaceLoot = 0x06,
 };
 
 struct RudpInputCommandMoveArgs {

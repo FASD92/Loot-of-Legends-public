@@ -1,15 +1,24 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Core/ClientConnection.hpp"
+#include "Core/GameSessionAuthState.hpp"
+#include "Core/MetaSessionClaimClient.hpp"
 #include "Core/SessionManager.hpp"
 #include "Game/OutboundSendQueue.hpp"
 #include "Game/RoomEventDispatcher.hpp"
@@ -31,6 +40,29 @@
 #include "Util/Time.hpp"
 
 namespace Core {
+std::chrono::milliseconds defaultSessionTimeout();
+
+constexpr size_t kRelease1PrimaryLatencyBucketCount = 13;
+constexpr size_t kRudpReliableEventKindCount = 5;
+constexpr size_t kRudpInputCommandOpMetricCount = 6;
+constexpr size_t kTcpReadErrorErrnoMetricCount = 4;
+constexpr size_t kTcpSendFailurePacketTypeMetricCount = 29;
+inline constexpr std::array<uint32_t, kRelease1PrimaryLatencyBucketCount>
+    kRelease1PrimaryLatencyBucketMs{
+        1,
+        2,
+        5,
+        10,
+        20,
+        33,
+        50,
+        75,
+        100,
+        150,
+        200,
+        500,
+        1000};
+
 struct RudpServerDrainStats {
     size_t attempted{0};
     size_t delivered{0};
@@ -40,6 +72,9 @@ struct RudpServerDrainStats {
     size_t duplicate{0};
     size_t tooOld{0};
     size_t socketErrors{0};
+    size_t stoppedByWouldBlock{0};
+    size_t stoppedByMaxPackets{0};
+    size_t stoppedBySocketError{0};
 };
 
 struct RudpServerRetransmissionStats {
@@ -70,7 +105,11 @@ struct RudpServerBindingStats {
     size_t inputSequenceAmbiguousRejected{0};
     size_t inputSequenceInvalidSessionRejected{0};
     size_t inputNoRoomRejected{0};
+    std::array<size_t, kRudpInputCommandOpMetricCount>
+        inputNoRoomRejectedByOp{};
     size_t moveAccepted{0};
+    size_t attackAccepted{0};
+    size_t lootClaimAccepted{0};
     size_t moveDispatched{0};
     size_t moveApplyRejected{0};
     size_t moveInvalidReservedFlagsRejected{0};
@@ -104,6 +143,98 @@ struct RudpServerSnapshotStats {
     size_t serializeFailed{0};
 };
 
+struct Release1RuntimeMetricsSnapshot {
+    size_t runtimeTickCount{0};
+    size_t rudpDrainAttemptedCount{0};
+    size_t rudpDrainDeliveredCount{0};
+    size_t rudpDrainMalformedCount{0};
+    size_t rudpDrainInvalidEndpointCount{0};
+    size_t rudpDrainAckOnlyCount{0};
+    size_t rudpDrainDuplicateCount{0};
+    size_t rudpDrainTooOldCount{0};
+    size_t rudpDrainSocketErrorCount{0};
+    size_t rudpDrainStoppedByWouldBlockCount{0};
+    size_t rudpDrainStoppedByMaxPacketsCount{0};
+    size_t rudpDrainStoppedBySocketErrorCount{0};
+    size_t rudpBindingHelloReceivedCount{0};
+    size_t rudpBindingBoundCount{0};
+    size_t rudpBindingRefreshedCount{0};
+    size_t rudpBindingUnknownSessionCount{0};
+    size_t rudpBindingConflictsCount{0};
+    size_t rudpBindingInvalidEndpointCount{0};
+    size_t rudpBindingInvalidPayloadCount{0};
+    size_t rudpBindingIgnoredNonHelloCount{0};
+    size_t rudpBindingUnboundInputRejectedCount{0};
+    size_t rudpBindingUnsupportedPacketIgnoredCount{0};
+    size_t rudpBindingInputCandidatesCount{0};
+    size_t rudpBindingInputDecodedCount{0};
+    size_t rudpBindingInputDecodeFailedCount{0};
+    size_t rudpReliableEventTrackedCount{0};
+    std::array<size_t, kRudpReliableEventKindCount>
+        rudpReliableEventTrackedByKindCounts{};
+    size_t rudpReliableEventPendingCount{0};
+    size_t rudpRetransmissionExpiredCount{0};
+    std::array<size_t, kRudpReliableEventKindCount>
+        rudpReliableEventExpiredByKindCounts{};
+    size_t rudpRetransmissionDueCount{0};
+    size_t rudpRetransmissionResentCount{0};
+    size_t rudpRetransmissionSendErrorCount{0};
+    size_t rudpRetransmissionDroppedPeerCount{0};
+    size_t rudpInputSequenceAcceptedCount{0};
+    size_t rudpInputSequenceDuplicateRejectedCount{0};
+    size_t rudpInputSequenceStaleRejectedCount{0};
+    size_t rudpInputSequenceAmbiguousRejectedCount{0};
+    size_t rudpInputSequenceInvalidSessionRejectedCount{0};
+    size_t rudpBindingInputNoRoomRejectedCount{0};
+    std::array<size_t, kRudpInputCommandOpMetricCount>
+        rudpBindingInputNoRoomRejectedByOpCounts{};
+    size_t rudpMoveAcceptedCount{0};
+    size_t rudpMoveDispatchedCount{0};
+    size_t rudpMoveApplyRejectedCount{0};
+    size_t rudpMoveInvalidReservedFlagsRejectedCount{0};
+    size_t rudpMoveRateLimitedRejectedCount{0};
+    size_t rudpMoveReceiveToApplyLatencySampleCount{0};
+    uint64_t rudpMoveReceiveToApplyLatencyTotalUs{0};
+    std::array<size_t, kRelease1PrimaryLatencyBucketCount>
+        rudpMoveReceiveToApplyLatencyBucketCounts{};
+    size_t rudpAttackAcceptedCount{0};
+    size_t rudpAttackReceiveToApplyLatencySampleCount{0};
+    uint64_t rudpAttackReceiveToApplyLatencyTotalUs{0};
+    std::array<size_t, kRelease1PrimaryLatencyBucketCount>
+        rudpAttackReceiveToApplyLatencyBucketCounts{};
+    size_t rudpLootClaimAcceptedCount{0};
+    size_t rudpLootClaimReceiveToApplyLatencySampleCount{0};
+    uint64_t rudpLootClaimReceiveToApplyLatencyTotalUs{0};
+    std::array<size_t, kRelease1PrimaryLatencyBucketCount>
+        rudpLootClaimReceiveToApplyLatencyBucketCounts{};
+    size_t rudpStateSnapshotSentCount{0};
+    size_t tcpDisconnectTotalCount{0};
+    size_t tcpDisconnectMarkedReadClosedCount{0};
+    size_t tcpDisconnectMarkedReadErrorCount{0};
+    std::array<size_t, kTcpReadErrorErrnoMetricCount>
+        tcpDisconnectMarkedReadErrorByErrnoCounts{};
+    size_t tcpDisconnectMarkedPacketReaderRejectedCount{0};
+    size_t tcpDisconnectMarkedInvalidPacketCount{0};
+    size_t tcpDisconnectMarkedNetworkEventCount{0};
+    size_t tcpDisconnectMarkedSendFailureCount{0};
+    size_t tcpDisconnectMarkedOutboundQueueFullCount{0};
+    size_t tcpDisconnectMarkedEventLoopUpdateFailureCount{0};
+    size_t tcpDisconnectMarkedMissingConnectionCount{0};
+    std::array<size_t, kTcpSendFailurePacketTypeMetricCount>
+        tcpSendFailureByPacketTypeCounts{};
+    size_t tcpSendFailureUnknownPacketTypeCount{0};
+    size_t tcpCreateRoomRequestReceivedCount{0};
+    size_t tcpJoinRoomRequestReceivedCount{0};
+    size_t tcpCreateRoomResponseSentCount{0};
+    size_t tcpJoinRoomResponseSentCount{0};
+    size_t tcpRoomListSnapshotDirectCount{0};
+    size_t tcpRoomListSnapshotBroadcastCount{0};
+    size_t tcpRoomListSnapshotBroadcastRecipientCount{0};
+    size_t tcpRoomListSnapshotBytesCount{0};
+    size_t activeConnectionCount{0};
+    size_t activeSessionCount{0};
+};
+
 enum class RudpServerReliableEventTrackResult {
     kTracked,
     kDuplicateSequence,
@@ -117,7 +248,13 @@ enum class RudpServerReliableEventTrackResult {
 class Server {
 public:
     explicit Server(uint16_t port);
+    Server(uint16_t port, IMetaSessionClaimClient* metaSessionClaimClient);
     Server(uint16_t port, std::chrono::milliseconds rudpPeerTimeout);
+    Server(
+        uint16_t port,
+        std::chrono::milliseconds rudpPeerTimeout,
+        IMetaSessionClaimClient* metaSessionClaimClient);
+    ~Server();
 
     bool start();
     void run();
@@ -132,6 +269,13 @@ public:
     RudpServerReliableEventStats rudpReliableEventStats() const;
     RudpServerMetaResponseStats rudpMetaResponseStats() const;
     RudpServerSnapshotStats rudpSnapshotStats() const;
+    Release1RuntimeMetricsSnapshot release1RuntimeMetricsSnapshot() const;
+    std::string renderRelease1RuntimeMetricsTextfile() const;
+    bool configureRelease1MetricsTextfile(
+        const std::string& targetPath,
+        std::chrono::milliseconds interval);
+    bool writeRelease1RuntimeMetricsTextfile(
+        std::string* errorMessage = nullptr) const;
     size_t rudpPeerCount() const;
     size_t rudpBindingCount() const;
     size_t rudpReliableEventPendingCount() const;
@@ -149,6 +293,17 @@ private:
     void processActiveConnections(Util::TimePoint now);
     void processRuntimeMaintenance(Util::TimePoint now);
     void processRuntimeTimerMaintenance(Util::TimePoint now);
+    void processRelease1MetricsTextfile(Util::TimePoint now);
+    void processPendingMetaSessionClaims(Util::TimePoint now);
+    void processMetaSessionLivenessReports(Util::TimePoint now);
+    void releaseQueuedAcceptedMetaSessionClaimsAfterShutdown();
+    void enqueueMetaSessionClaim(
+        int clientFd,
+        uint64_t connectionId,
+        const std::string& token);
+    void startMetaSessionClaimWorker();
+    void stopMetaSessionClaimWorker();
+    void runMetaSessionClaimWorker();
     void processReadableTcpClient(
         ClientConnection& connection,
         Util::TimePoint now,
@@ -169,13 +324,17 @@ private:
     void processRudpSocket(Util::TimePoint now);
     void processRudpDeliveries(
         const std::vector<Net::RudpPacketDelivery>& deliveries,
-        Util::TimePoint now);
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
     void processRudpHelloDelivery(
         const Net::RudpPacketDelivery& delivery,
         Util::TimePoint now);
     void processRudpAdapterGate(
         const Net::RudpPacketDelivery& delivery,
-        Util::TimePoint now);
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
     void dispatchRudpMoveInput(
         uint64_t sessionId,
         const Net::RudpInputCommandMoveArgs& move,
@@ -195,6 +354,7 @@ private:
         uint32_t sequence,
         const std::vector<uint8_t>& packetBytes,
         Util::TimePoint now);
+    bool sendPendingRudpReliableEventsForSession(uint64_t sessionId);
     void enqueueRudpBattleStartEvent(
         const Game::RoomCommandResult& result,
         Util::TimePoint now);
@@ -229,6 +389,27 @@ private:
     size_t calculateRudpReliableEventPendingCount() const;
     std::vector<uint64_t> collectActiveSessionIds() const;
     std::vector<Net::TcpRoomEntry> collectRoomEntries() const;
+    std::optional<uint64_t> authenticatedSessionIdForClientFd(int clientFd) const;
+    Net::TcpRoomDetailState buildRoomDetailState(
+        const Game::Room& room,
+        uint64_t viewerSessionId) const;
+    bool handleTcpPacket(
+        ClientConnection& connection,
+        const std::vector<uint8_t>& packet,
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
+    bool handleAuthenticateGameSessionPacket(
+        ClientConnection& connection,
+        const std::vector<uint8_t>& packet,
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients);
+    bool completeAcceptedGameSessionClaim(
+        ClientConnection& connection,
+        GameSessionAuthState& authState,
+        const MetaSessionClaimResult& result,
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients);
     bool handleRoomPacket(
         ClientConnection& connection,
         const std::vector<uint8_t>& packet,
@@ -240,8 +421,16 @@ private:
         const Game::RoomEvent& event,
         std::vector<int>& disconnectedClients);
     bool dispatchRudpRoomEvent(const Game::RoomEvent& event, Util::TimePoint now);
+    bool dispatchRudpRoomEvent(
+        const Game::RoomEvent& event,
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
     bool drainInlineRoomEvents(std::vector<int>& disconnectedClients);
-    bool drainInlineRudpRoomEvents(Util::TimePoint now);
+    bool drainInlineRudpRoomEvents(
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
     bool applyInlineRoomEvent(
         uint32_t roomId,
         const Game::RoomEvent& event,
@@ -249,7 +438,18 @@ private:
     bool applyInlineRudpRoomEvent(
         uint32_t roomId,
         const Game::RoomEvent& event,
-        Util::TimePoint now);
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
+    void recordRelease1RudpMoveReceiveToApplyLatency(
+        Util::TimePoint receivedAt,
+        Util::TimePoint appliedAt);
+    void recordRelease1RudpAttackReceiveToApplyLatency(
+        Util::TimePoint receivedAt,
+        Util::TimePoint appliedAt);
+    void recordRelease1RudpLootClaimReceiveToApplyLatency(
+        Util::TimePoint receivedAt,
+        Util::TimePoint appliedAt);
     bool flushOutboundQueue(std::vector<int>& disconnectedClients);
     bool flushRudpOutboundQueue(Util::TimePoint now);
     bool flushOutboundEnvelope(
@@ -263,12 +463,61 @@ private:
         Net::TcpPacketType failedType,
         Net::TcpErrorCode errorCode,
         std::vector<int>& disconnectedClients);
+    void recordTcpSendFailurePacketType(const uint8_t* data, size_t size);
     bool sendPacketToClient(
         int clientFd,
         const uint8_t* data,
         size_t size,
         std::vector<int>& disconnectedClients);
+    bool sendCurrentRoomListSnapshotToClient(
+        int clientFd,
+        std::vector<int>& disconnectedClients);
+    bool sendRoomListSnapshotToLobbySessions(std::vector<int>& disconnectedClients);
+    void scheduleRoomListSnapshotBroadcast(Util::TimePoint now);
+    bool flushPendingRoomListSnapshotBroadcast(
+        Util::TimePoint now,
+        std::vector<int>& disconnectedClients);
+    void processPendingRoomListSnapshotBroadcast(Util::TimePoint now);
+    bool sendRoomDetailStateToSession(
+        uint64_t sessionId,
+        uint32_t roomId,
+        std::vector<int>& disconnectedClients);
+    bool broadcastRoomDetailState(
+        uint32_t roomId,
+        const std::vector<uint64_t>& sessionIds,
+        std::vector<int>& disconnectedClients);
+    bool sendLobbyReturnVisibility(
+        uint64_t sessionId,
+        uint32_t previousRoomId,
+        Net::TcpLobbyReturnReason reason,
+        std::vector<int>& disconnectedClients);
+    bool completeBattleResultIfReady(
+        uint32_t roomId,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
+    bool completeBattleResult(
+        const Game::BattleFinalRankingResult& ranking,
+        std::vector<int>& disconnectedClients,
+        bool& outRoomListChanged);
+    bool broadcastBattleFinalRanking(
+        const Game::BattleFinalRankingResult& ranking,
+        std::vector<int>& disconnectedClients);
+    bool sendBattleResultLobbyReturn(
+        const std::vector<uint64_t>& sessionIds,
+        uint32_t previousRoomId,
+        Net::TcpLobbyReturnReason reason,
+        std::vector<int>& disconnectedClients);
+    void closeBattleResultRoom(
+        uint32_t roomId,
+        const std::vector<uint64_t>& sessionIds);
+    std::optional<std::string> nicknameForSession(uint64_t sessionId) const;
     bool broadcastBattleStart(
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients);
+    bool broadcastBattleLoadEntry(
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients);
+    bool broadcastArenaGameplayStart(
         const Game::RoomCommandResult& result,
         std::vector<int>& disconnectedClients);
     bool broadcastMonsterSpawn(
@@ -278,6 +527,12 @@ private:
         const Game::RoomCommandResult& result,
         std::vector<int>& disconnectedClients);
     bool broadcastDropListSnapshot(
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients);
+    bool broadcastMonsterHealthSnapshot(
+        const Game::RoomCommandResult& result,
+        std::vector<int>& disconnectedClients);
+    bool broadcastDropListSnapshotV2(
         const Game::RoomCommandResult& result,
         std::vector<int>& disconnectedClients);
     bool broadcastLootResolved(
@@ -293,13 +548,47 @@ private:
         std::vector<int>& disconnectedClients);
     int findClientFdForSession(uint64_t sessionId) const;
     void broadcastStateSnapshots(bool clientListChanged, bool roomListChanged);
+    void broadcastStateSnapshots(
+        bool clientListChanged,
+        bool roomListChanged,
+        Util::TimePoint now);
     bool disconnectClient(int clientFd);
     void closeAllConnections();
 
     friend struct ServerTestAccess;
 
+    struct PendingMetaSessionClaimCompletion {
+        int clientFd{-1};
+        uint64_t connectionId{0};
+        std::string gameSessionToken;
+        MetaSessionClaimResult result;
+    };
+    struct PendingMetaSessionClaimInvocation {
+        int clientFd{-1};
+        uint64_t connectionId{0};
+        std::string gameSessionToken;
+    };
+    struct MetaSessionClaimCompletionSink {
+        std::mutex mutex;
+        std::vector<PendingMetaSessionClaimCompletion> completions;
+        std::atomic<bool> accepting{true};
+#if defined(__linux__)
+        std::atomic<int> linuxWakeupFd{-1};
+#endif
+    };
+    struct MetaSessionClaimReleaseSink {
+        explicit MetaSessionClaimReleaseSink(IMetaSessionClaimClient* client);
+        void releaseAcceptedClaimWithoutServerSession(
+            const MetaSessionClaimResult& result,
+            uint64_t connectionId) const;
+        void release(const MetaSessionReleaseRequest& request) const;
+
+        IMetaSessionClaimClient* client{nullptr};
+    };
+
     Net::TcpListener listener_;
     Net::UdpSocket udpSocket_;
+    IMetaSessionClaimClient* metaSessionClaimClient_;
     SessionManager sessionManager_;
     Game::RoomManager roomManager_;
     Game::RoomEventMetrics roomEventMetrics_;
@@ -326,11 +615,28 @@ private:
         rudpReliableEventQueues_;
     std::unordered_map<uint64_t, uint32_t> rudpOutboundNextSequenceBySession_;
     std::unordered_map<int, std::unique_ptr<ClientConnection>> connections_;
+    std::unordered_map<int, GameSessionAuthState> gameSessionAuthByClientFd_;
+    std::unordered_map<uint64_t, int> authenticatedClientFdByAccountId_;
+    std::unordered_map<uint64_t, Util::TimePoint> lastMetaSessionLivenessByConnectionId_;
+    std::shared_ptr<MetaSessionClaimCompletionSink> metaSessionClaimCompletionSink_;
+    std::shared_ptr<MetaSessionClaimReleaseSink> metaSessionClaimReleaseSink_;
+    std::mutex metaSessionClaimWorkerMutex_;
+    std::condition_variable metaSessionClaimWorkerCondition_;
+    std::deque<PendingMetaSessionClaimInvocation> pendingMetaSessionClaimInvocations_;
+    std::thread metaSessionClaimWorker_;
+    bool metaSessionClaimWorkerStopping_{false};
+    std::unordered_set<uint64_t> lobbySessionIds_;
     Net::NetworkEventLoop* networkEventLoop_;
     uint64_t nextTcpFdGeneration_;
     std::atomic<int> linuxWakeupFd_;
     std::atomic<size_t> activeConnectionCount_;
     std::atomic<size_t> sessionCountSnapshot_;
+    std::atomic<size_t> release1RuntimeTickCount_;
+    std::string release1MetricsTextfilePath_;
+    std::chrono::milliseconds release1MetricsTextfileInterval_;
+    Util::TimePoint release1MetricsTextfileLastAttemptAt_;
+    bool release1MetricsTextfileEnabled_;
+    bool release1MetricsTextfileHasAttempted_;
     std::atomic<size_t> rudpPeerCountSnapshot_;
     std::atomic<size_t> rudpDrainAttempted_;
     std::atomic<size_t> rudpDrainDelivered_;
@@ -340,6 +646,9 @@ private:
     std::atomic<size_t> rudpDrainDuplicate_;
     std::atomic<size_t> rudpDrainTooOld_;
     std::atomic<size_t> rudpDrainSocketErrors_;
+    std::atomic<size_t> rudpDrainStoppedByWouldBlock_;
+    std::atomic<size_t> rudpDrainStoppedByMaxPackets_;
+    std::atomic<size_t> rudpDrainStoppedBySocketError_;
     std::atomic<size_t> rudpRetransmissionExpired_;
     std::atomic<size_t> rudpRetransmissionDue_;
     std::atomic<size_t> rudpRetransmissionResent_;
@@ -364,7 +673,23 @@ private:
     std::atomic<size_t> rudpBindingInputSequenceAmbiguousRejected_;
     std::atomic<size_t> rudpBindingInputSequenceInvalidSessionRejected_;
     std::atomic<size_t> rudpBindingInputNoRoomRejected_;
+    std::array<std::atomic<size_t>, kRudpInputCommandOpMetricCount>
+        rudpBindingInputNoRoomRejectedByOp_{};
     std::atomic<size_t> rudpBindingMoveAccepted_;
+    std::atomic<size_t> rudpBindingAttackAccepted_;
+    std::atomic<size_t> rudpBindingLootClaimAccepted_;
+    std::atomic<size_t> rudpMoveReceiveToApplyLatencySampleCount_;
+    std::atomic<uint64_t> rudpMoveReceiveToApplyLatencyTotalUs_;
+    std::array<std::atomic<size_t>, kRelease1PrimaryLatencyBucketCount>
+        rudpMoveReceiveToApplyLatencyBuckets_{};
+    std::atomic<size_t> rudpAttackReceiveToApplyLatencySampleCount_;
+    std::atomic<uint64_t> rudpAttackReceiveToApplyLatencyTotalUs_;
+    std::array<std::atomic<size_t>, kRelease1PrimaryLatencyBucketCount>
+        rudpAttackReceiveToApplyLatencyBuckets_{};
+    std::atomic<size_t> rudpLootClaimReceiveToApplyLatencySampleCount_;
+    std::atomic<uint64_t> rudpLootClaimReceiveToApplyLatencyTotalUs_;
+    std::array<std::atomic<size_t>, kRelease1PrimaryLatencyBucketCount>
+        rudpLootClaimReceiveToApplyLatencyBuckets_{};
     std::atomic<size_t> rudpBindingMoveDispatched_;
     std::atomic<size_t> rudpBindingMoveApplyRejected_;
     std::atomic<size_t> rudpBindingMoveInvalidReservedFlagsRejected_;
@@ -376,6 +701,10 @@ private:
     std::atomic<size_t> rudpReliableEventInvalidSession_;
     std::atomic<size_t> rudpReliableEventInvalidDescriptor_;
     std::atomic<size_t> rudpReliableEventInvalidPacketBytes_;
+    std::array<std::atomic<size_t>, kRudpReliableEventKindCount>
+        rudpReliableEventTrackedByKind_{};
+    std::array<std::atomic<size_t>, kRudpReliableEventKindCount>
+        rudpReliableEventExpiredByKind_{};
     std::atomic<size_t> rudpReliableEventPendingCountSnapshot_;
     std::atomic<size_t> rudpMetaResponseCompletedFirst_;
     std::atomic<size_t> rudpMetaResponseCompletionDuplicate_;
@@ -389,6 +718,31 @@ private:
     std::atomic<size_t> rudpSnapshotSendErrors_;
     std::atomic<size_t> rudpSnapshotSkippedNoBoundEndpoint_;
     std::atomic<size_t> rudpSnapshotSerializeFailed_;
+    std::atomic<size_t> tcpDisconnectTotal_;
+    std::atomic<size_t> tcpDisconnectMarkedReadClosed_;
+    std::atomic<size_t> tcpDisconnectMarkedReadError_;
+    std::array<std::atomic<size_t>, kTcpReadErrorErrnoMetricCount>
+        tcpDisconnectMarkedReadErrorByErrno_{};
+    std::atomic<size_t> tcpDisconnectMarkedPacketReaderRejected_;
+    std::atomic<size_t> tcpDisconnectMarkedInvalidPacket_;
+    std::atomic<size_t> tcpDisconnectMarkedNetworkEvent_;
+    std::atomic<size_t> tcpDisconnectMarkedSendFailure_;
+    std::atomic<size_t> tcpDisconnectMarkedOutboundQueueFull_;
+    std::atomic<size_t> tcpDisconnectMarkedEventLoopUpdateFailure_;
+    std::atomic<size_t> tcpDisconnectMarkedMissingConnection_;
+    std::array<std::atomic<size_t>, kTcpSendFailurePacketTypeMetricCount>
+        tcpSendFailureByPacketType_{};
+    std::atomic<size_t> tcpSendFailureUnknownPacketType_;
+    std::atomic<size_t> tcpCreateRoomRequestReceived_;
+    std::atomic<size_t> tcpJoinRoomRequestReceived_;
+    std::atomic<size_t> tcpCreateRoomResponseSent_;
+    std::atomic<size_t> tcpJoinRoomResponseSent_;
+    std::atomic<size_t> tcpRoomListSnapshotDirect_;
+    std::atomic<size_t> tcpRoomListSnapshotBroadcast_;
+    std::atomic<size_t> tcpRoomListSnapshotBroadcastRecipients_;
+    std::atomic<size_t> tcpRoomListSnapshotBytes_;
+    bool pendingRoomListSnapshotBroadcast_;
+    Util::TimePoint pendingRoomListSnapshotBroadcastDueAt_;
     std::atomic<bool> running_;
     uint16_t port_;
 };

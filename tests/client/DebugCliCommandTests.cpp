@@ -106,12 +106,47 @@ std::vector<uint8_t> readyRoomResponsePacket(
     return toVector(packet);
 }
 
+std::vector<uint8_t> hostStartBattleResponsePacket(uint32_t roomId) {
+    std::array<uint8_t, Net::kRoomIdPacketSize> packet{};
+    EXPECT_TRUE(Net::serializeHostStartBattleResponsePacket(roomId, packet));
+    return toVector(packet);
+}
+
 std::vector<uint8_t> battleStartPacket(
     uint32_t roomId,
     uint64_t playerASessionId,
     uint64_t playerBSessionId) {
     std::array<uint8_t, Net::kBattleStartPacketSize> packet{};
     EXPECT_TRUE(Net::serializeBattleStartPacket(roomId, playerASessionId, playerBSessionId, packet));
+    return toVector(packet);
+}
+
+std::vector<uint8_t> battleStartRosterPacket(
+    uint32_t roomId,
+    const std::vector<uint64_t>& playerSessionIds) {
+    std::vector<uint8_t> packet;
+    EXPECT_TRUE(Net::serializeBattleStartRosterPacket(roomId, playerSessionIds, packet));
+    return packet;
+}
+
+std::vector<uint8_t> battleLoadEntryPacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    const std::vector<uint64_t>& playerSessionIds) {
+    std::vector<uint8_t> packet;
+    EXPECT_TRUE(Net::serializeBattleLoadEntryPacket(roomId, battleInstanceId, playerSessionIds, packet));
+    return packet;
+}
+
+std::vector<uint8_t> arenaGameplayStartPacket(uint32_t roomId, uint64_t battleInstanceId) {
+    std::array<uint8_t, Net::kArenaGameplayStartPacketSize> packet{};
+    EXPECT_TRUE(Net::serializeArenaGameplayStartPacket(roomId, battleInstanceId, packet));
+    return toVector(packet);
+}
+
+std::vector<uint8_t> errorPacket(Net::TcpPacketType failedType, Net::TcpErrorCode errorCode) {
+    std::array<uint8_t, Net::kErrorPacketSize> packet{};
+    EXPECT_TRUE(Net::serializeErrorPacket(failedType, errorCode, packet));
     return toVector(packet);
 }
 
@@ -131,9 +166,28 @@ std::vector<uint8_t> monsterDeathPacket(uint32_t roomId, uint32_t monsterId) {
     return toVector(packet);
 }
 
+std::vector<uint8_t> monsterHealthSnapshotPacket(
+    uint32_t roomId,
+    uint32_t monsterId,
+    uint16_t currentHp,
+    uint16_t maxHp) {
+    std::array<uint8_t, Net::kMonsterHealthSnapshotPacketSize> packet{};
+    EXPECT_TRUE(Net::serializeMonsterHealthSnapshotPacket(roomId, monsterId, currentHp, maxHp, packet));
+    return toVector(packet);
+}
+
 std::vector<uint8_t> dropListSnapshotPacket(uint32_t roomId, const std::vector<Net::TcpDropEntry>& drops) {
     std::vector<uint8_t> packet;
     EXPECT_TRUE(Net::serializeDropListSnapshotPacket(roomId, drops, packet));
+    return packet;
+}
+
+std::vector<uint8_t> dropListSnapshotV2Packet(
+    uint32_t roomId,
+    uint32_t scatterSeed,
+    const std::vector<Net::TcpDropEntryV2>& drops) {
+    std::vector<uint8_t> packet;
+    EXPECT_TRUE(Net::serializeDropListSnapshotV2Packet(roomId, scatterSeed, drops, packet));
     return packet;
 }
 
@@ -349,6 +403,158 @@ TEST(DebugCliTests, PhaseOneFlowUpdatesBattleLootAndInventoryState) {
     EXPECT_EQ(packetTypeOf(transportState->sentPackets[0]), Net::TcpPacketType::kReadyRoomRequest);
     EXPECT_EQ(packetTypeOf(transportState->sentPackets[1]), Net::TcpPacketType::kMonsterDeathRequest);
     EXPECT_EQ(packetTypeOf(transportState->sentPackets[2]), Net::TcpPacketType::kClickLootRequest);
+}
+
+TEST(DebugCliTests, AppliesBattleStartRosterPacket) {
+    const auto transportState = std::make_shared<FakeTransportState>();
+    transportState->incomingPackets.push_back(welcomePacket(1001));
+    Client::DebugCli cli = makeCliWithTransport(transportState);
+    ASSERT_TRUE(cli.executeLine("connect A 127.0.0.1 4000").success);
+
+    transportState->incomingPackets.push_back(battleStartRosterPacket(7, {1001, 1002, 1003}));
+    const Client::DebugCliResult result = cli.executeLine("A ready");
+
+    EXPECT_TRUE(result.success);
+    EXPECT_NE(
+        result.output.find("BattleStartRoster(roomId=7, players=1001/1002/1003)"),
+        std::string::npos);
+
+    const std::vector<Client::DebugClientState> states = cli.clientStates();
+    ASSERT_EQ(states.size(), 1U);
+    EXPECT_TRUE(states[0].battleStarted);
+    ASSERT_TRUE(states[0].roomId.has_value());
+    EXPECT_EQ(*states[0].roomId, 7U);
+}
+
+TEST(DebugCliTests, HostStartBattleResponseDoesNotMarkBattleStarted) {
+    const auto transportState = std::make_shared<FakeTransportState>();
+    transportState->incomingPackets.push_back(welcomePacket(1001));
+    Client::DebugCli cli = makeCliWithTransport(transportState);
+    ASSERT_TRUE(cli.executeLine("connect A 127.0.0.1 4000").success);
+
+    transportState->incomingPackets.push_back(hostStartBattleResponsePacket(7));
+    const Client::DebugCliResult result = cli.executeLine("A ready");
+
+    EXPECT_TRUE(result.success);
+    EXPECT_NE(
+        result.output.find("HostStartBattleResponse(roomId=7)"),
+        std::string::npos);
+
+    const std::vector<Client::DebugClientState> states = cli.clientStates();
+    ASSERT_EQ(states.size(), 1U);
+    EXPECT_FALSE(states[0].battleStarted);
+    ASSERT_TRUE(states[0].roomId.has_value());
+    EXPECT_EQ(*states[0].roomId, 7U);
+}
+
+TEST(DebugCliTests, AppliesBattleLoadEntryPacket) {
+    const auto transportState = std::make_shared<FakeTransportState>();
+    transportState->incomingPackets.push_back(welcomePacket(1001));
+    Client::DebugCli cli = makeCliWithTransport(transportState);
+    ASSERT_TRUE(cli.executeLine("connect A 127.0.0.1 4000").success);
+
+    transportState->incomingPackets.push_back(battleLoadEntryPacket(7, 9001, {1001, 1002, 1003}));
+    const Client::DebugCliResult result = cli.executeLine("A ready");
+
+    EXPECT_TRUE(result.success);
+    EXPECT_NE(
+        result.output.find("BattleLoadEntry(roomId=7, battleInstanceId=9001, players=1001/1002/1003)"),
+        std::string::npos);
+
+    const std::vector<Client::DebugClientState> states = cli.clientStates();
+    ASSERT_EQ(states.size(), 1U);
+    EXPECT_FALSE(states[0].battleStarted);
+    ASSERT_TRUE(states[0].roomId.has_value());
+    EXPECT_EQ(*states[0].roomId, 7U);
+}
+
+TEST(DebugCliTests, AppliesArenaGameplayStartPacket) {
+    const auto transportState = std::make_shared<FakeTransportState>();
+    transportState->incomingPackets.push_back(welcomePacket(1001));
+    Client::DebugCli cli = makeCliWithTransport(transportState);
+    ASSERT_TRUE(cli.executeLine("connect A 127.0.0.1 4000").success);
+
+    transportState->incomingPackets.push_back(arenaGameplayStartPacket(7, 9001));
+    const Client::DebugCliResult result = cli.executeLine("A ready");
+
+    EXPECT_TRUE(result.success);
+    EXPECT_NE(
+        result.output.find("ArenaGameplayStart(roomId=7, battleInstanceId=9001)"),
+        std::string::npos);
+
+    const std::vector<Client::DebugClientState> states = cli.clientStates();
+    ASSERT_EQ(states.size(), 1U);
+    EXPECT_TRUE(states[0].battleStarted);
+    ASSERT_TRUE(states[0].roomId.has_value());
+    EXPECT_EQ(*states[0].roomId, 7U);
+}
+
+TEST(DebugCliTests, AppliesMonsterHealthSnapshotPacket) {
+    const auto transportState = std::make_shared<FakeTransportState>();
+    transportState->incomingPackets.push_back(welcomePacket(1001));
+    Client::DebugCli cli = makeCliWithTransport(transportState);
+    ASSERT_TRUE(cli.executeLine("connect A 127.0.0.1 4000").success);
+
+    transportState->incomingPackets.push_back(monsterHealthSnapshotPacket(7, 501, 75, 100));
+    const Client::DebugCliResult result = cli.executeLine("A ready");
+
+    EXPECT_TRUE(result.success);
+    EXPECT_NE(
+        result.output.find("MonsterHealthSnapshot(roomId=7, monsterId=501, hp=75/100)"),
+        std::string::npos);
+
+    const std::vector<Client::DebugClientState> states = cli.clientStates();
+    ASSERT_EQ(states.size(), 1U);
+    ASSERT_TRUE(states[0].roomId.has_value());
+    EXPECT_EQ(*states[0].roomId, 7U);
+    ASSERT_TRUE(states[0].monsterId.has_value());
+    EXPECT_EQ(*states[0].monsterId, 501U);
+}
+
+TEST(DebugCliTests, AppliesDropListSnapshotV2Packet) {
+    const auto transportState = std::make_shared<FakeTransportState>();
+    transportState->incomingPackets.push_back(welcomePacket(1001));
+    Client::DebugCli cli = makeCliWithTransport(transportState);
+    ASSERT_TRUE(cli.executeLine("connect A 127.0.0.1 4000").success);
+
+    transportState->incomingPackets.push_back(
+        dropListSnapshotV2Packet(
+            7,
+            12345,
+            {
+                Net::TcpDropEntryV2{77, 3001, 2, -500, 250},
+                Net::TcpDropEntryV2{78, 3002, 1, 3000, -7000},
+            }));
+    const Client::DebugCliResult result = cli.executeLine("A ready");
+
+    EXPECT_TRUE(result.success);
+    EXPECT_NE(
+        result.output.find("DropListSnapshotV2(roomId=7, scatterSeed=12345, drops=2)"),
+        std::string::npos);
+
+    const std::vector<Client::DebugClientState> states = cli.clientStates();
+    ASSERT_EQ(states.size(), 1U);
+    ASSERT_TRUE(states[0].roomId.has_value());
+    EXPECT_EQ(*states[0].roomId, 7U);
+    ASSERT_EQ(states[0].drops.size(), 2U);
+    EXPECT_EQ(states[0].drops[0].dropId, 77U);
+    EXPECT_EQ(states[0].drops[1].dropId, 78U);
+}
+
+TEST(DebugCliTests, NamesAlreadyStartedErrorCode) {
+    const auto transportState = std::make_shared<FakeTransportState>();
+    transportState->incomingPackets.push_back(welcomePacket(1001));
+    Client::DebugCli cli = makeCliWithTransport(transportState);
+    ASSERT_TRUE(cli.executeLine("connect A 127.0.0.1 4000").success);
+
+    transportState->incomingPackets.push_back(
+        errorPacket(Net::TcpPacketType::kJoinRoomRequest, Net::TcpErrorCode::kAlreadyStarted));
+    const Client::DebugCliResult result = cli.executeLine("A join_room 7");
+
+    EXPECT_TRUE(result.success);
+    EXPECT_NE(
+        result.output.find("Error(failedType=JoinRoomRequest, code=AlreadyStarted)"),
+        std::string::npos);
 }
 
 TEST(DebugCliTests, PrintInventoryUsesLatestInventorySnapshot) {

@@ -4,12 +4,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Net {
 constexpr size_t kTcpHeaderSize = 4;
 constexpr uint16_t kMaxTcpPacketSize = 1024;
 constexpr size_t kWelcomePacketSize = 12;
+constexpr size_t kGameSessionTokenLengthFieldSize = 2;
+constexpr size_t kGameSessionTokenMaxLength = 512;
 constexpr size_t kSessionIdFieldSize = 8;
 constexpr size_t kRoomIdFieldSize = 4;
 constexpr size_t kPlayerCountFieldSize = 2;
@@ -20,8 +23,47 @@ constexpr size_t kReadyRoomStatusPacketSize =
     kTcpHeaderSize + kRoomIdFieldSize + (2 * kPlayerCountFieldSize);    // 준비한 사람 수 + 전체 멤버 수
 constexpr size_t kRoomIdPacketSize = kTcpHeaderSize + kRoomIdFieldSize;
 constexpr size_t kRoomListCountFieldSize = 2;
-constexpr size_t kRoomEntrySize = 8;
+constexpr size_t kRoomStatusFieldSize = 1;
+constexpr size_t kRoomTitleLengthFieldSize = 1;
+constexpr size_t kRoomEntrySize = kRoomIdFieldSize + (2 * kPlayerCountFieldSize) + kRoomStatusFieldSize;
+constexpr size_t kRoomListEntryMinSize = kRoomEntrySize + kRoomTitleLengthFieldSize;
+constexpr size_t kRoomMemberSessionIdFieldSize = 4;
+constexpr size_t kRoomTitleMaxLength = 64;
+constexpr size_t kRoomTitleMaxVisibleCharacters = 20;
+constexpr size_t kCreateRoomCapacityFieldSize = 1;
+constexpr uint8_t kCreateRoomMinCapacity = 2;
+constexpr uint8_t kCreateRoomMaxCapacity = 10;
+constexpr size_t kNicknameLengthFieldSize = 1;
+constexpr size_t kNicknameMaxLength = 32;
+constexpr size_t kReadyStateFieldSize = 1;
+constexpr size_t kRoomActionMaskFieldSize = 2;
+constexpr size_t kTargetActionCountFieldSize = 1;
+constexpr size_t kTargetActionEntrySize = kRoomMemberSessionIdFieldSize + kRoomActionMaskFieldSize;
+constexpr uint16_t kRoomDetailMaxMembers = 10;
+constexpr size_t kHostKickRequestPacketSize = kTcpHeaderSize + kRoomMemberSessionIdFieldSize;
+constexpr size_t kHostKickResponsePacketSize =
+    kTcpHeaderSize + kRoomIdFieldSize + kRoomMemberSessionIdFieldSize;
+constexpr size_t kLobbyReturnVisibilityPacketSize =
+    kTcpHeaderSize + kRoomIdFieldSize + 1;
 constexpr size_t kBattleStartPacketSize = kTcpHeaderSize + kRoomIdFieldSize + (2 * kSessionIdFieldSize);
+constexpr size_t kBattleStartRosterCountFieldSize = 2;
+constexpr size_t kBattleStartRosterEntrySize = kSessionIdFieldSize;
+constexpr uint16_t kBattleStartRosterMinPlayers = 2;
+constexpr uint16_t kBattleStartRosterMaxPlayers = 10;
+constexpr size_t kBattleInstanceIdFieldSize = 8;
+constexpr size_t kArenaLoadCompletePacketSize =
+    kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize;
+constexpr size_t kArenaGameplayStartPacketSize =
+    kTcpHeaderSize + kRoomIdFieldSize + kBattleInstanceIdFieldSize;
+constexpr size_t kBattleFinalRankingCountFieldSize = 1;
+constexpr size_t kBattleFinalRankingRankFieldSize = 2;
+constexpr size_t kFinalAssetValueFieldSize = 8;
+constexpr uint8_t kBattleFinalRankingMinRows = 1;
+constexpr uint8_t kBattleFinalRankingMaxRows = 10;
+constexpr size_t kBattleLoadEntryCountFieldSize = 2;
+constexpr size_t kBattleLoadEntryEntrySize = kSessionIdFieldSize;
+constexpr uint16_t kBattleLoadEntryMinPlayers = 2;
+constexpr uint16_t kBattleLoadEntryMaxPlayers = 10;
 constexpr size_t kMonsterIdFieldSize = 4;
 constexpr size_t kMonsterTypeIdFieldSize = 4;
 constexpr size_t kMonsterHpFieldSize = 2;
@@ -33,7 +75,15 @@ constexpr size_t kDropListCountFieldSize = 2;
 constexpr size_t kDropIdFieldSize = 4;
 constexpr size_t kItemIdFieldSize = 4;
 constexpr size_t kQuantityFieldSize = 2;
+constexpr size_t kPositionFieldSize = 4;
+constexpr size_t kScatterSeedFieldSize = 4;
 constexpr size_t kDropEntrySize = kDropIdFieldSize + kItemIdFieldSize + kQuantityFieldSize;
+constexpr size_t kMonsterHealthSnapshotPacketSize =
+    kTcpHeaderSize + kRoomIdFieldSize + kMonsterIdFieldSize + (2 * kMonsterHpFieldSize);
+constexpr size_t kDropListSnapshotV2FixedPacketSize =
+    kTcpHeaderSize + kRoomIdFieldSize + kScatterSeedFieldSize + kDropListCountFieldSize;
+constexpr size_t kDropEntryV2Size =
+    kDropIdFieldSize + kItemIdFieldSize + kQuantityFieldSize + (2 * kPositionFieldSize);
 constexpr size_t kWeightFieldSize = 2;
 constexpr size_t kLootRejectReasonFieldSize = 2;
 constexpr size_t kInventoryCountFieldSize = 2;
@@ -71,6 +121,9 @@ constexpr size_t kErrorPacketSize = 8;
 enum class TcpPacketType : uint16_t {
     kWelcome = 0x0001,
     kClientListSnapshot = 0x0002,
+    kAuthenticateGameSession = 0x0003,
+    kSessionReplaced = 0x0004,
+    kHeartbeatRequest = 0x0005,
     kCreateRoomRequest = 0x0101,
     kCreateRoomResponse = 0x0102,
     kJoinRoomRequest = 0x0103,
@@ -94,6 +147,21 @@ enum class TcpPacketType : uint16_t {
     kMetaResponse = 0x0115,
     kSmokeCreateCenterDropRequest = 0x0116,
     kSmokePlacePlayersAroundCenterDropRequest = 0x0117,
+    kBattleStartRoster = 0x0118,
+    kMonsterHealthSnapshot = 0x0119,
+    kDropListSnapshotV2 = 0x011A,
+    kArenaLoadComplete = 0x011B,
+    kLobbyReturnVisibility = 0x011C,
+    kRoomDetailState = 0x011D,
+    kUnreadyRoomRequest = 0x011E,
+    kUnreadyRoomResponse = 0x011F,
+    kHostStartBattleRequest = 0x0120,
+    kHostStartBattleResponse = 0x0121,
+    kHostKickRequest = 0x0122,
+    kHostKickResponse = 0x0123,
+    kArenaGameplayStart = 0x0124,
+    kBattleFinalRanking = 0x0125,
+    kBattleLoadEntry = 0x0126,
     kError = 0x01FF,
 };
 
@@ -103,7 +171,35 @@ enum class TcpErrorCode : uint16_t {
     kNotFound = 2,
     kAlreadyInRoom = 3,
     kNotInRoom = 4,
+    kAlreadyStarted = 5,
+    kNotHost = 6,
+    kNotAllReady = 7,
+    kNotEnoughPlayers = 8,
+    kInvalidTarget = 9,
 };
+
+enum class TcpRoomStatus : uint8_t {
+    kOpen = 0,
+    kInProgress = 1,
+};
+
+enum class TcpLobbyReturnReason : uint8_t {
+    kNone = 0,
+    kArenaLoadTimeout = 1,
+    kArenaLoadMinimumFailure = 2,
+    kHostKick = 3,
+    kResultGenerationFailure = 4,
+};
+
+constexpr uint16_t kTcpRoomActionLeaveRoom = 1u << 0;
+constexpr uint16_t kTcpRoomActionReady = 1u << 1;
+constexpr uint16_t kTcpRoomActionUnready = 1u << 2;
+constexpr uint16_t kTcpRoomActionHostStartBattle = 1u << 3;
+constexpr uint16_t kTcpRoomActionMaskAll =
+    kTcpRoomActionLeaveRoom | kTcpRoomActionReady | kTcpRoomActionUnready |
+    kTcpRoomActionHostStartBattle;
+constexpr uint16_t kTcpTargetActionHostKick = 1u << 0;
+constexpr uint16_t kTcpTargetActionMaskAll = kTcpTargetActionHostKick;
 
 struct TcpPacketHeader {
     uint16_t size{0};
@@ -114,12 +210,50 @@ struct TcpRoomEntry {
     uint32_t roomId{0};
     uint16_t playerCount{0};
     uint16_t maxPlayers{0};
+    TcpRoomStatus roomStatus{TcpRoomStatus::kOpen};
+    std::string title;
+};
+
+struct TcpRoomMemberEntry {
+    uint64_t sessionId{0};
+    std::string nickname;
+    bool ready{false};
+};
+
+struct TcpTargetActionEntry {
+    uint64_t targetSessionId{0};
+    uint16_t targetActionMask{0};
+};
+
+struct TcpRoomDetailState {
+    uint32_t roomId{0};
+    TcpRoomStatus roomStatus{TcpRoomStatus::kOpen};
+    std::string roomTitle;
+    uint8_t maxPlayers{0};
+    std::vector<TcpRoomMemberEntry> members;
+    uint16_t selfActionMask{0};
+    std::vector<TcpTargetActionEntry> targetActions;
+};
+
+struct BattleFinalRankingEntry {
+    uint16_t rank{0};
+    uint64_t sessionId{0};
+    std::string nickname;
+    int64_t totalAssetValue{0};
 };
 
 struct TcpDropEntry {
     uint32_t dropId{0};
     uint32_t itemId{0};
     uint16_t quantity{0};
+};
+
+struct TcpDropEntryV2 {
+    uint32_t dropId{0};
+    uint32_t itemId{0};
+    uint16_t quantity{0};
+    int32_t posX{0};
+    int32_t posY{0};
 };
 
 enum class TcpLootRejectReason : uint16_t {
@@ -180,7 +314,13 @@ struct TcpMetaResponse {
 };
 
 bool serializeWelcomePacket(uint64_t sessionId, std::array<uint8_t, kWelcomePacketSize>& outPacket);
-bool serializeCreateRoomRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket);
+bool serializeAuthenticateGameSessionPacket(std::string_view token, std::vector<uint8_t>& outPacket);
+bool serializeSessionReplacedPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket);
+bool serializeHeartbeatRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket);
+bool serializeCreateRoomRequestPacket(
+    std::string_view roomTitle,
+    uint8_t maxPlayers,
+    std::vector<uint8_t>& outPacket);
 bool serializeCreateRoomResponsePacket(
     uint32_t roomId,
     uint16_t playerCount,
@@ -194,7 +334,15 @@ bool serializeJoinRoomResponsePacket(
     std::array<uint8_t, kRoomStatusPacketSize>& outPacket);
 bool serializeLeaveRoomRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket);
 bool serializeReadyRoomRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket);
+bool serializeUnreadyRoomRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket);
+bool serializeHostStartBattleRequestPacket(std::array<uint8_t, kTcpHeaderSize>& outPacket);
 bool serializeLeaveRoomResponsePacket(
+    uint32_t roomId,
+    std::array<uint8_t, kRoomIdPacketSize>& outPacket);
+bool serializeUnreadyRoomResponsePacket(
+    uint32_t roomId,
+    std::array<uint8_t, kRoomIdPacketSize>& outPacket);
+bool serializeHostStartBattleResponsePacket(
     uint32_t roomId,
     std::array<uint8_t, kRoomIdPacketSize>& outPacket);
 bool serializeReadyRoomResponsePacket(
@@ -202,19 +350,60 @@ bool serializeReadyRoomResponsePacket(
     uint16_t readyPlayerCount,
     uint16_t totalPlayerCount,
     std::array<uint8_t, kReadyRoomStatusPacketSize>& outPacket);
+bool serializeHostKickRequestPacket(
+    uint32_t targetSessionId,
+    std::array<uint8_t, kHostKickRequestPacketSize>& outPacket);
+bool serializeHostKickResponsePacket(
+    uint32_t roomId,
+    uint32_t targetSessionId,
+    std::array<uint8_t, kHostKickResponsePacketSize>& outPacket);
+bool serializeLobbyReturnVisibilityPacket(
+    uint32_t previousRoomId,
+    TcpLobbyReturnReason reason,
+    std::array<uint8_t, kLobbyReturnVisibilityPacketSize>& outPacket);
 size_t clientListSnapshotPacketSize(size_t sessionCount);
 bool serializeClientListSnapshotPacket(
     const std::vector<uint64_t>& sessionIds,
     std::vector<uint8_t>& outPacket);
 size_t roomListSnapshotPacketSize(size_t roomCount);
+size_t roomListSnapshotPacketSize(const std::vector<TcpRoomEntry>& rooms);
 bool serializeRoomListSnapshotPacket(
     const std::vector<TcpRoomEntry>& rooms,
+    std::vector<uint8_t>& outPacket);
+size_t roomDetailStatePacketSize(const TcpRoomDetailState& detail);
+bool serializeRoomDetailStatePacket(
+    const TcpRoomDetailState& detail,
     std::vector<uint8_t>& outPacket);
 bool serializeBattleStartPacket(
     uint32_t roomId,
     uint64_t playerASessionId,
     uint64_t playerBSessionId,
     std::array<uint8_t, kBattleStartPacketSize>& outPacket);
+size_t battleStartRosterPacketSize(size_t playerCount);
+bool serializeBattleStartRosterPacket(
+    uint32_t roomId,
+    const std::vector<uint64_t>& playerSessionIds,
+    std::vector<uint8_t>& outPacket);
+size_t battleLoadEntryPacketSize(size_t playerCount);
+bool serializeBattleLoadEntryPacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    const std::vector<uint64_t>& playerSessionIds,
+    std::vector<uint8_t>& outPacket);
+size_t battleFinalRankingPacketSize(const std::vector<BattleFinalRankingEntry>& rankings);
+bool serializeBattleFinalRankingPacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    const std::vector<BattleFinalRankingEntry>& rankings,
+    std::vector<uint8_t>& outPacket);
+bool serializeArenaLoadCompletePacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    std::array<uint8_t, kArenaLoadCompletePacketSize>& outPacket);
+bool serializeArenaGameplayStartPacket(
+    uint32_t roomId,
+    uint64_t battleInstanceId,
+    std::array<uint8_t, kArenaGameplayStartPacketSize>& outPacket);
 bool serializeMonsterSpawnPacket(
     uint32_t roomId,
     uint32_t monsterId,
@@ -228,10 +417,22 @@ bool serializeMonsterDeathPacket(
     uint32_t roomId,
     uint32_t monsterId,
     std::array<uint8_t, kMonsterDeathPacketSize>& outPacket);
+bool serializeMonsterHealthSnapshotPacket(
+    uint32_t roomId,
+    uint32_t monsterId,
+    uint16_t currentHp,
+    uint16_t maxHp,
+    std::array<uint8_t, kMonsterHealthSnapshotPacketSize>& outPacket);
 size_t dropListSnapshotPacketSize(size_t dropCount);
 bool serializeDropListSnapshotPacket(
     uint32_t roomId,
     const std::vector<TcpDropEntry>& drops,
+    std::vector<uint8_t>& outPacket);
+size_t dropListSnapshotV2PacketSize(size_t dropCount);
+bool serializeDropListSnapshotV2Packet(
+    uint32_t roomId,
+    uint32_t scatterSeed,
+    const std::vector<TcpDropEntryV2>& drops,
     std::vector<uint8_t>& outPacket);
 bool serializeClickLootRequestPacket(
     uint32_t dropId,
@@ -279,7 +480,18 @@ bool parseWelcomePacket(
     size_t size,
     TcpPacketHeader& outHeader,
     uint64_t& outSessionId);
-bool parseCreateRoomRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
+bool parseAuthenticateGameSessionPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    std::string& outToken);
+bool parseHeartbeatRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
+bool parseCreateRoomRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    std::string& outRoomTitle,
+    uint8_t& outMaxPlayers);
 bool parseCreateRoomResponsePacket(
     const uint8_t* data,
     size_t size,
@@ -299,7 +511,19 @@ bool parseJoinRoomResponsePacket(
     uint16_t& outPlayerCount);
 bool parseLeaveRoomRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
 bool parseReadyRoomRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
+bool parseUnreadyRoomRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
+bool parseHostStartBattleRequestPacket(const uint8_t* data, size_t size, TcpPacketHeader& outHeader);
 bool parseLeaveRoomResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId);
+bool parseUnreadyRoomResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId);
+bool parseHostStartBattleResponsePacket(
     const uint8_t* data,
     size_t size,
     TcpPacketHeader& outHeader,
@@ -321,6 +545,28 @@ bool parseRoomListSnapshotPacket(
     size_t size,
     TcpPacketHeader& outHeader,
     std::vector<TcpRoomEntry>& outRooms);
+bool parseHostKickRequestPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outTargetSessionId);
+bool parseHostKickResponsePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint32_t& outTargetSessionId);
+bool parseLobbyReturnVisibilityPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outPreviousRoomId,
+    TcpLobbyReturnReason& outReason);
+bool parseRoomDetailStatePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    TcpRoomDetailState& outDetail);
 bool parseBattleStartPacket(
     const uint8_t* data,
     size_t size,
@@ -328,6 +574,38 @@ bool parseBattleStartPacket(
     uint32_t& outRoomId,
     uint64_t& outPlayerASessionId,
     uint64_t& outPlayerBSessionId);
+bool parseBattleStartRosterPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    std::vector<uint64_t>& outPlayerSessionIds);
+bool parseBattleLoadEntryPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId,
+    std::vector<uint64_t>& outPlayerSessionIds);
+bool parseBattleFinalRankingPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId,
+    std::vector<BattleFinalRankingEntry>& outRankings);
+bool parseArenaLoadCompletePacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId);
+bool parseArenaGameplayStartPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint64_t& outBattleInstanceId);
 bool parseMonsterSpawnPacket(
     const uint8_t* data,
     size_t size,
@@ -347,12 +625,27 @@ bool parseMonsterDeathPacket(
     TcpPacketHeader& outHeader,
     uint32_t& outRoomId,
     uint32_t& outMonsterId);
+bool parseMonsterHealthSnapshotPacket(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint32_t& outMonsterId,
+    uint16_t& outCurrentHp,
+    uint16_t& outMaxHp);
 bool parseDropListSnapshotPacket(
     const uint8_t* data,
     size_t size,
     TcpPacketHeader& outHeader,
     uint32_t& outRoomId,
     std::vector<TcpDropEntry>& outDrops);
+bool parseDropListSnapshotV2Packet(
+    const uint8_t* data,
+    size_t size,
+    TcpPacketHeader& outHeader,
+    uint32_t& outRoomId,
+    uint32_t& outScatterSeed,
+    std::vector<TcpDropEntryV2>& outDrops);
 bool parseClickLootRequestPacket(
     const uint8_t* data,
     size_t size,

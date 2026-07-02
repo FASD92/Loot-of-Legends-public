@@ -48,6 +48,10 @@ RoomEventApplyResult RoomActor::apply(
             roomManager.defeatMonster(event.sessionId, event.argument));
     case RoomEventType::kClickLoot:
         return fromCommandResult(roomManager.claimLoot(event.sessionId, event.argument));
+    case RoomEventType::kAttack:
+        return fromCommandResult(roomManager.attackMonster(event.sessionId, event.argument));
+    case RoomEventType::kSpaceLoot:
+        return fromCommandResult(roomManager.claimNearestLoot(event.sessionId));
     }
 
     return rejected(RoomEventApplyStatus::kInvalidEvent);
