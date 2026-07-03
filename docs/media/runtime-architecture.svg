@@ -13,8 +13,6 @@
       .label { font: 800 17px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #334155; }
       .small { font: 500 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
       .arrow { stroke: #334155; stroke-width: 4; fill: none; marker-end: url(#arrow); }
-      .soft { stroke: #94a3b8; stroke-width: 3; fill: none; stroke-dasharray: 10 8; marker-end: url(#arrow); }
-      .label-bg { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1; rx: 10; }
     </style>
   </defs>
 
@@ -50,30 +48,23 @@
   <text x="1426" y="492" class="box-text">정산 guard</text>
 
   <path class="arrow" d="M380 430 H510"/>
-  <rect x="404" y="391" width="86" height="28" class="label-bg"/>
-  <text x="415" y="411" class="label">게임 입력</text>
+  <text x="415" y="405" class="label">게임 입력</text>
 
   <path class="arrow" d="M930 430 H1030"/>
-  <rect x="950" y="391" width="60" height="28" class="label-bg"/>
-  <text x="961" y="411" class="label">정산</text>
+  <text x="961" y="405" class="label">정산</text>
 
   <path class="arrow" d="M1330 430 H1400"/>
-  <rect x="1342" y="391" width="44" height="28" class="label-bg"/>
-  <text x="1352" y="411" class="label">저장</text>
+  <text x="1352" y="405" class="label">저장</text>
 
   <path class="arrow" d="M230 280 V210 H1180 V280"/>
-  <rect x="625" y="190" width="170" height="32" class="label-bg"/>
-  <text x="643" y="213" class="label">로그인 / 입장 요청</text>
+  <text x="643" y="195" class="label">로그인 / 입장 요청</text>
 
-  <path class="arrow" d="M1180 580 V650 H230 V580"/>
-  <rect x="640" y="630" width="138" height="32" class="label-bg"/>
-  <text x="658" y="653" class="label">게임 세션 토큰</text>
+  <path class="arrow" d="M1180 580 V660 H230 V580"/>
+  <text x="658" y="690" class="label">게임 세션 토큰</text>
 
   <rect x="160" y="760" width="500" height="70" rx="18" fill="#f1f5f9" stroke="#94a3b8" stroke-width="3"/>
   <text x="194" y="804" class="small">C++ / Meta / Unity 회귀 테스트</text>
-  <path class="soft" d="M410 760 V610 H610"/>
 
   <rect x="940" y="760" width="500" height="70" rx="18" fill="#f1f5f9" stroke="#94a3b8" stroke-width="3"/>
   <text x="974" y="804" class="small">100세션 인계 / 부하 리포트 스크립트</text>
-  <path class="soft" d="M1190 760 V610 H820"/>
 </svg>
