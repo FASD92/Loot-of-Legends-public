@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Custom RUDP 복구 흐름</title>
+  <desc id="desc">InputCommand 순서 보장, ACK 추적, 재전송, 중복 서버 이벤트 차단을 보여주는 RUDP 흐름도</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      .title { font: 800 46px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 500 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
+      .head { font: 800 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
+      .body { font: 500 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
+      .head-invert { font: 800 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
+      .body-invert { font: 500 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #cbd5e1; }
+      .tag { font: 800 16px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
+      .edge { font: 700 17px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #334155; }
+      .edge-danger { font: 700 17px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #e11d48; }
+      .line { stroke: #334155; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+      .retry { stroke: #e11d48; stroke-width: 4; fill: none; marker-end: url(#arrow); stroke-dasharray: 12 9; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="#f8fafc"/>
+  <text x="70" y="86" class="title">Custom RUDP 복구 흐름</text>
+  <text x="72" y="126" class="subtitle">입력 순서 보장, ACK 추적, 재전송, 중복 서버 이벤트 차단을 분리해 구현했습니다.</text>
+
+  <rect x="90" y="210" width="210" height="95" rx="18" fill="#ecfeff" stroke="#06b6d4" stroke-width="4"/>
+  <text x="122" y="252" class="head">Client</text>
+  <text x="122" y="282" class="body">InputCommand</text>
+
+  <rect x="390" y="210" width="230" height="95" rx="18" fill="#fff7ed" stroke="#f97316" stroke-width="4"/>
+  <text x="422" y="252" class="head">UDP Socket</text>
+  <text x="422" y="282" class="body">datagram 수신</text>
+
+  <rect x="710" y="210" width="245" height="95" rx="18" fill="#eff6ff" stroke="#2563eb" stroke-width="4"/>
+  <text x="742" y="252" class="head">RUDP Peer</text>
+  <text x="742" y="282" class="body">session / sequence</text>
+
+  <rect x="1045" y="210" width="220" height="95" rx="18" fill="#f0fdf4" stroke="#16a34a" stroke-width="4"/>
+  <text x="1077" y="252" class="head">Room</text>
+  <text x="1077" y="282" class="body">권위 상태 적용</text>
+
+  <rect x="1345" y="210" width="210" height="95" rx="18" fill="#fdf4ff" stroke="#a855f7" stroke-width="4"/>
+  <text x="1377" y="252" class="head">Event Queue</text>
+  <text x="1377" y="282" class="body">ACK 대기</text>
+
+  <path class="line" d="M300 258 H390"/>
+  <text x="318" y="238" class="edge">cmdSeq=N</text>
+  <path class="line" d="M620 258 H710"/>
+  <text x="638" y="238" class="edge">parse/bind</text>
+  <path class="line" d="M955 258 H1045"/>
+  <text x="970" y="238" class="edge">RoomEvent</text>
+  <path class="line" d="M1265 258 H1345"/>
+  <text x="1280" y="238" class="edge">eventId</text>
+
+  <rect x="160" y="430" width="340" height="145" rx="22" fill="#ffffff" stroke="#06b6d4" stroke-width="4"/>
+  <rect x="188" y="402" width="118" height="42" rx="21" fill="#06b6d4"/>
+  <text x="215" y="430" class="tag">입력</text>
+  <text x="196" y="480" class="head">cmdSeq gate</text>
+  <text x="196" y="516" class="body">이전 입력과 중복 입력을 차단합니다.</text>
+  <text x="196" y="548" class="body">룸 상태는 한 번만 적용됩니다.</text>
+
+  <rect x="630" y="430" width="340" height="145" rx="22" fill="#ffffff" stroke="#2563eb" stroke-width="4"/>
+  <rect x="658" y="402" width="118" height="42" rx="21" fill="#2563eb"/>
+  <text x="690" y="430" class="tag">전송</text>
+  <text x="666" y="480" class="head">ACK / 재전송</text>
+  <text x="666" y="516" class="body">pending ACK 메타데이터를 보관합니다.</text>
+  <text x="666" y="548" class="body">deadline 초과 시 같은 packet을 재전송합니다.</text>
+
+  <rect x="1100" y="430" width="340" height="145" rx="22" fill="#ffffff" stroke="#a855f7" stroke-width="4"/>
+  <rect x="1128" y="402" width="118" height="42" rx="21" fill="#a855f7"/>
+  <text x="1160" y="430" class="tag">이벤트</text>
+  <text x="1136" y="480" class="head">중복 전달 방지</text>
+  <text x="1136" y="516" class="body">server-origin event id를 추적합니다.</text>
+  <text x="1136" y="548" class="body">같은 event는 한 번만 적용됩니다.</text>
+
+  <path class="line" d="M1450 305 V352 H830 V430"/>
+  <text x="1030" y="342" class="edge">ACK(eventId)</text>
+  <path class="retry" d="M1450 305 C1510 395 1510 585 1380 625 C1180 715 790 700 760 575"/>
+  <text x="1018" y="698" class="edge-danger">ACK 대기 초과 시 재전송</text>
+
+  <rect x="90" y="720" width="1465" height="90" rx="22" fill="#0f172a"/>
+  <text x="126" y="770" class="head-invert">현재 범위</text>
+  <text x="260" y="770" class="body-invert">프로토콜 계층과 이동 입력/서버 이벤트 신뢰성 검증이 중심입니다. 모든 게임 결과 전송이 RUDP로 완전히 전환됐다는 뜻은 아닙니다.</text>
+</svg>

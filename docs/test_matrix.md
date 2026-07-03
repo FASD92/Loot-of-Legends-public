@@ -2,25 +2,25 @@
 
 이 문서는 README에서 언급한 검증 근거를 파일 단위로 추적하기 위한 public 문서입니다.
 
-## Test Marker 집계
+## 테스트 선언 집계
 
-현재 public source 기준 단순 marker 집계:
+현재 공개 소스 기준 단순 테스트 선언 집계:
 
 | 영역 | 기준 | 개수 |
 | --- | --- | ---: |
-| C++ GoogleTest | `TEST`, `TEST_F` marker | 659 |
-| Meta Server JUnit | `@Test` marker | 227 |
-| Unity EditMode | `[Test]` marker | 388 |
-| 합계 | 단순 marker 합산 | 1,274 |
+| C++ GoogleTest | `TEST`, `TEST_F` | 659 |
+| Meta Server JUnit | `@Test`, `@ParameterizedTest` | 221 |
+| Unity EditMode | `[Test]` | 388 |
+| 합계 | 단순 테스트 선언 합산 | 1,268 |
 
-이 숫자는 “모든 테스트가 방금 실행됐다”는 뜻이 아닙니다. 공개 소스 안에 존재하는 regression case marker의 규모를 보여주는 지표입니다.
+이 숫자는 “모든 테스트가 방금 실행됐다”는 뜻이 아닙니다. 공개 소스 안에 존재하는 회귀 테스트 선언 규모를 보여주는 지표입니다.
 
 ## Gameplay Invariants
 
 | 불변식 / 동작 | 대표 테스트 |
 | --- | --- |
 | 한 세션은 동시에 하나의 Room에만 속함 | `tests/core/RoomManagerTests.cpp` |
-| room capacity 초과 join은 거절 | `tests/core/RoomManagerTests.cpp` |
+| 룸 정원 초과 join은 거절 | `tests/core/RoomManagerTests.cpp` |
 | 모든 현재 멤버 Ready 이후 `BattleStart` 발생 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
 | 중복 Ready가 BattleStart를 중복 발생시키지 않음 | `tests/core/RoomManagerTests.cpp` |
 | MonsterDeath 이후 DropListSnapshot 전파 | `tests/core/RoomManagerTests.cpp`, `tests/core/ServerRoomIntegrationTests.cpp` |
@@ -103,11 +103,11 @@
 
 | 항목 | 공개 근거 |
 | --- | --- |
-| 100-session handoff | `scripts/release0/handoff_100_sessions_harness.py`, `scripts/release0/test_handoff_100_sessions_harness.py` |
-| capacity report gate | `scripts/release1/capacity_report.py`, `scripts/release1/gate_config.json`, `scripts/release1/test_capacity_report.py` |
-| concurrent probe / sweep wrapper | `scripts/release1/concurrent_capacity_probe.py`, `scripts/release1/concurrent_capacity_sweep.py` |
+| 100세션 인계 검증 | `scripts/release0/handoff_100_sessions_harness.py`, `scripts/release0/test_handoff_100_sessions_harness.py` |
+| 부하 리포트 통과 기준 | `scripts/release1/capacity_report.py`, `scripts/release1/gate_config.json`, `scripts/release1/test_capacity_report.py` |
+| 병렬 접속 probe / sweep wrapper | `scripts/release1/concurrent_capacity_probe.py`, `scripts/release1/concurrent_capacity_sweep.py` |
 | artifact schema | `scripts/release1/schemas/run_config.schema.json`, `scripts/release1/schemas/summary.schema.json` |
-| 670-session local diagnostic | raw private artifact는 public mirror에서 제외. README에서는 safe capacity claim이 아니라 diagnostic boundary로만 언급 |
+| 670세션 로컬 진단 | raw private artifact는 공개 미러에서 제외. README에서는 안전 동접 수 주장이 아니라 진단 범위로만 언급 |
 
 ## 실행 명령
 

@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">서버 권위 루팅 판정 흐름</title>
+  <desc id="desc">두 클라이언트의 루팅 요청이 Core Server, Room 단일 처리 경계, 서버 검증을 거쳐 한 명에게만 소유권을 확정하는 흐름도</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#eef6ff"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      .title { font: 800 46px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 500 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
+      .box-title { font: 800 27px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
+      .box-text { font: 500 20px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
+      .badge { font: 800 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
+      .note { font: 700 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
+      .small { font: 500 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #64748b; }
+      .note-white { font: 700 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
+      .small-invert { font: 500 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #cbd5e1; }
+      .arrow { stroke: #334155; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <path d="M0 120 H1600 M0 240 H1600 M0 360 H1600 M0 480 H1600 M0 600 H1600 M0 720 H1600 M160 0 V900 M320 0 V900 M480 0 V900 M640 0 V900 M800 0 V900 M960 0 V900 M1120 0 V900 M1280 0 V900 M1440 0 V900" stroke="#dbeafe" stroke-width="1"/>
+
+  <text x="70" y="86" class="title">서버 권위 루팅 판정 흐름</text>
+  <text x="72" y="126" class="subtitle">클라이언트는 입력 의도만 전송하고, 서버가 Drop 소유권과 Inventory 변경을 최종 확정합니다.</text>
+
+  <rect x="70" y="210" width="260" height="120" rx="18" fill="#ffffff" stroke="#38bdf8" stroke-width="4"/>
+  <text x="96" y="258" class="box-title">Client A</text>
+  <text x="96" y="294" class="box-text">ClickLoot(dropId)</text>
+
+  <rect x="70" y="410" width="260" height="120" rx="18" fill="#ffffff" stroke="#a78bfa" stroke-width="4"/>
+  <text x="96" y="458" class="box-title">Client B</text>
+  <text x="96" y="494" class="box-text">ClickLoot(dropId)</text>
+
+  <rect x="450" y="270" width="260" height="180" rx="18" fill="#eff6ff" stroke="#2563eb" stroke-width="4"/>
+  <circle cx="488" cy="312" r="20" fill="#2563eb"/>
+  <text x="481" y="319" class="badge">1</text>
+  <text x="526" y="319" class="box-title">Core::Server</text>
+  <text x="488" y="360" class="box-text">TCP/RUDP 패킷 처리</text>
+  <text x="488" y="392" class="box-text">세션 인증 / 룸 라우팅</text>
+
+  <rect x="810" y="270" width="280" height="180" rx="18" fill="#f0fdf4" stroke="#16a34a" stroke-width="4"/>
+  <circle cx="848" cy="312" r="20" fill="#16a34a"/>
+  <text x="841" y="319" class="badge">2</text>
+  <text x="886" y="319" class="box-title">Room 단일 처리</text>
+  <text x="848" y="360" class="box-text">RoomManager / RoomActor</text>
+  <text x="848" y="392" class="box-text">같은 룸 이벤트 순차 적용</text>
+
+  <rect x="1190" y="250" width="300" height="220" rx="18" fill="#fff7ed" stroke="#f97316" stroke-width="4"/>
+  <circle cx="1228" cy="292" r="20" fill="#f97316"/>
+  <text x="1221" y="299" class="badge">3</text>
+  <text x="1266" y="299" class="box-title">서버 검증</text>
+  <text x="1228" y="342" class="box-text">룸 소속 확인</text>
+  <text x="1228" y="374" class="box-text">Drop 미획득 상태 확인</text>
+  <text x="1228" y="406" class="box-text">Inventory 무게 제한 확인</text>
+
+  <rect x="1145" y="600" width="315" height="90" rx="16" fill="#ecfdf5" stroke="#059669" stroke-width="4"/>
+  <text x="1175" y="640" class="box-title">LootResolved</text>
+  <text x="1175" y="674" class="box-text">소유권 확정 + InventorySnapshot</text>
+
+  <rect x="760" y="600" width="315" height="90" rx="16" fill="#fff1f2" stroke="#e11d48" stroke-width="4"/>
+  <text x="790" y="640" class="box-title">LootRejected</text>
+  <text x="790" y="674" class="box-text">기존 owner / Drop 상태 변경 없음</text>
+
+  <path class="arrow" d="M330 270 C380 270 392 330 450 340"/>
+  <path class="arrow" d="M330 470 C380 470 392 390 450 380"/>
+  <path class="arrow" d="M710 360 H810"/>
+  <path class="arrow" d="M1090 360 H1190"/>
+  <path class="arrow" d="M1310 470 C1310 530 1310 560 1306 600"/>
+  <path class="arrow" d="M1215 470 C1120 530 1010 560 940 600"/>
+
+  <rect x="70" y="760" width="1420" height="80" rx="18" fill="#0f172a"/>
+  <text x="105" y="808" class="note-white">불변식</text>
+  <text x="215" y="808" class="small-invert">같은 Drop은 한 번만 획득됩니다 · 중복 클릭은 owner를 바꾸지 않습니다 · 무게 초과 루팅은 Drop/Inventory를 변경하지 않습니다</text>
+</svg>

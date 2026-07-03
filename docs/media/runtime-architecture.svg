@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Loot of Legends 런타임 구조</title>
+  <desc id="desc">Unity Client, Spring Meta Server, C++ Game Server, MySQL Redis, 테스트와 부하 검증 스크립트의 관계</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      .title { font: 800 46px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 500 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
+      .lane { font: 800 22px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #334155; }
+      .box-title { font: 800 28px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
+      .box-text { font: 500 20px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
+      .edge { font: 700 17px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #334155; }
+      .arrow { stroke: #334155; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+      .soft { stroke: #94a3b8; stroke-width: 3; fill: none; stroke-dasharray: 10 8; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="#f8fafc"/>
+  <rect x="40" y="170" width="1520" height="610" rx="30" fill="#ffffff" stroke="#e2e8f0" stroke-width="3"/>
+  <rect x="80" y="220" width="310" height="500" rx="24" fill="#ecfeff" stroke="#06b6d4" stroke-width="4"/>
+  <rect x="460" y="220" width="360" height="500" rx="24" fill="#eff6ff" stroke="#2563eb" stroke-width="4"/>
+  <rect x="890" y="220" width="310" height="500" rx="24" fill="#f0fdf4" stroke="#16a34a" stroke-width="4"/>
+  <rect x="1270" y="220" width="250" height="500" rx="24" fill="#fff7ed" stroke="#f97316" stroke-width="4"/>
+
+  <text x="70" y="86" class="title">Loot of Legends 런타임 구조</text>
+  <text x="72" y="126" class="subtitle">인증/입장/정산은 Meta Server가 맡고, 게임 중 판정은 C++ Game Server가 소유합니다.</text>
+
+  <text x="112" y="262" class="lane">CLIENT</text>
+  <text x="492" y="262" class="lane">GAME SERVER</text>
+  <text x="922" y="262" class="lane">META SERVER</text>
+  <text x="1302" y="262" class="lane">STORAGE</text>
+
+  <text x="112" y="330" class="box-title">Unity Client</text>
+  <text x="112" y="372" class="box-text">Google 로그인</text>
+  <text x="112" y="405" class="box-text">로비 / 룸 / 전투 UI</text>
+  <text x="112" y="438" class="box-text">이동 / 루팅 입력 전송</text>
+  <text x="112" y="471" class="box-text">서버 확정 상태 렌더링</text>
+
+  <text x="492" y="330" class="box-title">C++ Game Server</text>
+  <text x="492" y="372" class="box-text">TCP/RUDP 세션 관리</text>
+  <text x="492" y="405" class="box-text">Room 권위 상태</text>
+  <text x="492" y="438" class="box-text">Monster / Drop / Inventory</text>
+  <text x="492" y="471" class="box-text">RoomActor 단일 처리 경계</text>
+  <text x="492" y="504" class="box-text">metrics / 응답 queue</text>
+
+  <text x="922" y="330" class="box-title">Spring Meta Server</text>
+  <text x="922" y="372" class="box-text">OAuth 계정 경계</text>
+  <text x="922" y="405" class="box-text">입장 대기열</text>
+  <text x="922" y="438" class="box-text">게임 세션 토큰</text>
+  <text x="922" y="471" class="box-text">정산 API 멱등성</text>
+
+  <text x="1302" y="330" class="box-title">MySQL / Redis</text>
+  <text x="1302" y="372" class="box-text">account / session row</text>
+  <text x="1302" y="405" class="box-text">settlement idempotency</text>
+  <text x="1302" y="438" class="box-text">processing guard</text>
+
+  <path class="arrow" d="M390 360 H460"/>
+  <text x="405" y="340" class="edge">TCP/RUDP 입력</text>
+  <path class="arrow" d="M890 360 H820"/>
+  <text x="810" y="340" class="edge">세션 토큰 검증</text>
+  <path class="arrow" d="M1200 390 H1270"/>
+  <text x="1218" y="370" class="edge">저장</text>
+  <path class="arrow" d="M390 520 C590 610 800 610 960 520"/>
+  <text x="578" y="645" class="edge">Google 로그인 / 입장 요청</text>
+  <path class="arrow" d="M960 540 C780 665 545 665 345 555"/>
+  <text x="595" y="704" class="edge">게임 세션 토큰</text>
+
+  <rect x="160" y="800" width="500" height="60" rx="18" fill="#f1f5f9" stroke="#94a3b8" stroke-width="3"/>
+  <text x="190" y="838" class="box-text">C++ / Meta / Unity 회귀 테스트</text>
+  <path class="soft" d="M410 800 C500 750 585 720 635 720"/>
+
+  <rect x="940" y="800" width="500" height="60" rx="18" fill="#f1f5f9" stroke="#94a3b8" stroke-width="3"/>
+  <text x="970" y="838" class="box-text">100세션 인계 / 부하 리포트 스크립트</text>
+  <path class="soft" d="M1185 800 C1050 748 850 720 690 720"/>
+</svg>

@@ -60,6 +60,7 @@ docs/*
 !docs/roadmap.md
 !docs/media/
 !docs/media/*.png
+!docs/media/*.svg
 experimental/
 AGENTS.md
 
