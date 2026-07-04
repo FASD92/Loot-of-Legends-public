@@ -2,7 +2,7 @@
 
 > 클라이언트 입력을 신뢰하지 않고, C++ 서버가 룸 상태와 루팅 결과를 최종 판정하는 서버 권위 멀티플레이 프로젝트입니다.
 
-`C++17` · `POSIX/BSD Socket` · `TCP/UDP` · `Custom RUDP` · `GoogleTest` · `Java 21` · `Spring Boot` · `MySQL/Redis` · `Unity`
+`C++17` · `POSIX/BSD Socket` · `TCP/UDP` · `Custom RUDP` · `RoomActor` · `GoogleTest` · `Java 21` · `Spring Boot` · `MySQL/Redis` · `Unity`
 
 ## 30초 요약
 
@@ -14,18 +14,31 @@
 
 ## 데모
 
-macOS 빌드:
+macOS demo build:
 
-[LootOfLegendsRelease0-macOS-latest.zip](https://drive.google.com/file/d/1-D2CrmA-sqj6L3-D1i6zU7nOo2w_Fqvp/view?usp=sharing)
+[Google Drive에서 다운로드](https://drive.google.com/file/d/1-D2CrmA-sqj6L3-D1i6zU7nOo2w_Fqvp/view?usp=sharing)
 
 실행 조건:
 
-- `LootOfLegendsRelease0.app` 실행
+- zip 해제 후 `.app` 실행
 - Google 로그인
 - 초대 코드 `0621`
 - 서버가 켜져 있어야 정상 접속
 
 zip 안의 `README.txt`에도 실행 순서와 macOS 보안 경고 대응 방법을 적어 두었습니다.
+
+## 전체 구조
+
+![Loot of Legends 런타임 구조](docs/media/runtime-architecture.svg)
+
+| 영역 | 현재 검증 수준 | 대표 위치 |
+| --- | --- | --- |
+| C++ 게임 서버 | TCP 기준 게임 루프, 룸 상태, 루팅 판정, 정산 payload 검증 | `server/`, `tests/core/` |
+| Custom RUDP | 프로토콜 계층과 서버 이벤트 신뢰성 검증 | `server/src/Net/`, `tests/protocol/` |
+| 룸 단위 단일 처리 | 같은 룸 이벤트 순차 처리와 다중 룸 격리 회귀 테스트 | `server/src/Game/RoomActor.cpp`, `tests/core/RoomActorTests.cpp` |
+| Spring Meta Server | OAuth, 입장 대기열, 게임 세션 토큰, 정산 멱등성 테스트 | `meta-server/src/main/java/com/lol/meta/`, `meta-server/src/test/` |
+| Unity Client | Standalone 로그인/로비/룸/네트워크/루팅 UI EditMode 테스트 | `client/unity_player_client/Assets/` |
+| 부하/안정성 | 측정 결과를 PASS/FAIL로 판정하는 스크립트와 schema | `scripts/release0/`, `scripts/release1/` |
 
 ## 서버 권위 루팅 흐름
 
@@ -42,24 +55,11 @@ zip 안의 `README.txt`에도 실행 순서와 macOS 보안 경고 대응 방법
 | 룸 단위 단일 처리 모델 | `server/src/Game/RoomActor.cpp`, `server/src/Game/RoomEventDispatcher.cpp` |
 | 응답/브로드캐스트 분리 | `server/src/Game/OutboundSendQueue.hpp` |
 
-## 전체 구조
-
-![Loot of Legends 런타임 구조](docs/media/runtime-architecture.svg)
-
-| 영역 | 현재 검증 수준 | 대표 위치 |
-| --- | --- | --- |
-| C++ 게임 서버 | TCP 기준 게임 루프, 룸 상태, 루팅 판정, 정산 payload 검증 | `server/`, `tests/core/` |
-| Custom RUDP | 프로토콜 계층과 서버 이벤트 신뢰성 검증 | `server/src/Net/`, `tests/protocol/` |
-| 룸 단위 단일 처리 | 같은 룸 이벤트 순차 처리와 다중 룸 격리 회귀 테스트 | `server/src/Game/RoomActor.cpp`, `tests/core/RoomActorTests.cpp` |
-| Spring Meta Server | OAuth, 입장 대기열, 게임 세션 토큰, 정산 멱등성 테스트 | `meta-server/src/main/java/com/lol/meta/`, `meta-server/src/test/` |
-| Unity Client | Standalone 로그인/로비/룸/네트워크/루팅 UI EditMode 테스트 | `client/unity_player_client/Assets/` |
-| 부하/안정성 | 측정 결과를 PASS/FAIL로 판정하는 스크립트와 schema | `scripts/release0/`, `scripts/release1/` |
-
 ## Custom RUDP
 
 이 프로젝트의 RUDP는 “UDP 소켓을 열었다” 수준이 아니라, 게임 입력과 서버 이벤트를 안전하게 싣기 위한 얇은 신뢰성 계층입니다.
 
-![Custom RUDP 복구 흐름](docs/media/custom-rudp-recovery-flow.svg)
+![Custom RUDP 신뢰성 계층](docs/media/custom-rudp-reliability-layer.svg)
 
 | 구성 | 역할 | 대표 파일 |
 | --- | --- | --- |
@@ -71,6 +71,21 @@ zip 안의 `README.txt`에도 실행 순서와 macOS 보안 경고 대응 방법
 | 룸 이벤트 연결 | 검증된 RUDP 입력을 `RoomEvent`로 변환 | `server/src/Core/RudpInputCommandRoomEventTranslator.cpp` |
 
 현재 기준 게임 플레이의 주 경로는 TCP입니다. RUDP는 이동 입력과 서버 이벤트 신뢰성 계층을 중심으로 구현/검증했으며, 모든 게임 결과 전송이 RUDP로 완전히 전환됐다고 주장하지 않습니다.
+
+## RoomActor / WorkerPool
+
+![RoomActor / WorkerPool 처리 모델](docs/media/room-actor-workerpool.svg)
+
+같은 Room의 상태 변경은 `RoomEventQueue`를 거쳐 `RoomActor` 단일 처리 경계에서 순차 적용합니다. `WorkerPool`과 `RoomEventDispatcher`는 여러 Room으로 확장하기 위한 기반이며, 현재 README에서는 전체 운영 런타임이 완전한 multi-worker 구조로 전환됐다고 주장하지 않습니다.
+
+| 구성 | 역할 | 대표 파일 |
+| --- | --- | --- |
+| `RoomEvent` | Ready, MonsterDeath, ClickLoot 같은 내부 이벤트 표면 | `server/src/Game/RoomEvent.hpp` |
+| `RoomEventQueue` | bounded FIFO, backpressure 경계, shutdown drain | `server/src/Game/RoomEventQueue.cpp` |
+| `RoomEventDispatcher` | `roomId` 기준 라우팅과 multi-room isolation | `server/src/Game/RoomEventDispatcher.cpp` |
+| `RoomActor` | 같은 Room 상태 변경의 single-writer 경계 | `server/src/Game/RoomActor.cpp` |
+| `OutboundSendQueue` | response/broadcast를 Room 처리와 network send 경계에서 분리 | `server/src/Game/OutboundSendQueue.hpp` |
+| `WorkerPool` | worker wake, shutdown lifecycle, 확장 실행 기반 | `server/src/Game/WorkerPool.cpp` |
 
 ## 검증 근거
 
@@ -173,4 +188,4 @@ Unity 테스트는 Unity Test Runner에서 `client/unity_player_client/Assets/Te
 - raw experiment logs와 private closeout 문서
 - Unity build output, generated artifacts, third-party asset package
 
-보강 문서: [아키텍처](docs/architecture.md), [테스트 매트릭스](docs/test_matrix.md), [로드맵](docs/roadmap.md)
+보강 문서: [아키텍처](docs/architecture.md), [RUDP 프로토콜](docs/protocol.md), [RoomActor 처리 모델](docs/room_actor.md), [테스트 매트릭스](docs/test_matrix.md), [로드맵](docs/roadmap.md)

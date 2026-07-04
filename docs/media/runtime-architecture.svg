@@ -1,70 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
-  <title id="title">Loot of Legends 런타임 구조</title>
-  <desc id="desc">Unity Client, Spring Meta Server, C++ Game Server, MySQL Redis, 테스트와 부하 검증 스크립트의 관계</desc>
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
-    </marker>
-    <style>
-      .title { font: 800 46px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
-      .subtitle { font: 500 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
-      .box-title { font: 800 28px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
-      .box-text { font: 500 20px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
-      .label { font: 800 17px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #334155; }
-      .small { font: 500 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
-      .arrow { stroke: #334155; stroke-width: 4; fill: none; marker-end: url(#arrow); }
-    </style>
-  </defs>
-
-  <rect width="1600" height="900" fill="#f8fafc"/>
-  <text x="70" y="86" class="title">Loot of Legends 런타임 구조</text>
-  <text x="72" y="126" class="subtitle">인증/입장/정산은 Meta Server가 맡고, 게임 중 판정은 C++ Game Server가 소유합니다.</text>
-
-  <rect x="80" y="280" width="300" height="300" rx="22" fill="#ecfeff" stroke="#06b6d4" stroke-width="4"/>
-  <text x="112" y="335" class="box-title">Unity Client</text>
-  <text x="112" y="382" class="box-text">Google 로그인</text>
-  <text x="112" y="418" class="box-text">로비 / 룸 / 전투 UI</text>
-  <text x="112" y="454" class="box-text">이동 / 루팅 입력</text>
-  <text x="112" y="490" class="box-text">서버 확정 상태 표시</text>
-
-  <rect x="510" y="280" width="420" height="300" rx="22" fill="#eff6ff" stroke="#2563eb" stroke-width="4"/>
-  <text x="548" y="335" class="box-title">C++ Game Server</text>
-  <text x="548" y="382" class="box-text">TCP/RUDP 세션</text>
-  <text x="548" y="418" class="box-text">Room 권위 상태</text>
-  <text x="548" y="454" class="box-text">Monster / Drop / Inventory</text>
-  <text x="548" y="490" class="box-text">RoomActor 단일 처리</text>
-
-  <rect x="1030" y="280" width="300" height="300" rx="22" fill="#f0fdf4" stroke="#16a34a" stroke-width="4"/>
-  <text x="1062" y="335" class="box-title">Spring Meta Server</text>
-  <text x="1062" y="382" class="box-text">OAuth 계정</text>
-  <text x="1062" y="418" class="box-text">입장 대기열</text>
-  <text x="1062" y="454" class="box-text">게임 세션 토큰</text>
-  <text x="1062" y="490" class="box-text">정산 API 멱등성</text>
-
-  <rect x="1400" y="320" width="150" height="220" rx="22" fill="#fff7ed" stroke="#f97316" stroke-width="4"/>
-  <text x="1426" y="374" class="box-title">DB</text>
-  <text x="1426" y="420" class="box-text">MySQL</text>
-  <text x="1426" y="456" class="box-text">Redis</text>
-  <text x="1426" y="492" class="box-text">정산 guard</text>
-
-  <path class="arrow" d="M380 430 H510"/>
-  <text x="415" y="405" class="label">게임 입력</text>
-
-  <path class="arrow" d="M930 430 H1030"/>
-  <text x="961" y="405" class="label">정산</text>
-
-  <path class="arrow" d="M1330 430 H1400"/>
-  <text x="1352" y="405" class="label">저장</text>
-
-  <path class="arrow" d="M230 280 V210 H1180 V280"/>
-  <text x="643" y="195" class="label">로그인 / 입장 요청</text>
-
-  <path class="arrow" d="M1180 580 V660 H230 V580"/>
-  <text x="658" y="690" class="label">게임 세션 토큰</text>
-
-  <rect x="160" y="760" width="500" height="70" rx="18" fill="#f1f5f9" stroke="#94a3b8" stroke-width="3"/>
-  <text x="194" y="804" class="small">C++ / Meta / Unity 회귀 테스트</text>
-
-  <rect x="940" y="760" width="500" height="70" rx="18" fill="#f1f5f9" stroke="#94a3b8" stroke-width="3"/>
-  <text x="974" y="804" class="small">100세션 인계 / 부하 리포트 스크립트</text>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="Loot of Legends 런타임 구조">
+  <rect width="1600" height="900" fill="#ffffff"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="46" font-weight="800" fill="#111827"><tspan x="72" y="98">Loot of Legends 런타임 구조</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="400" fill="#4b5563"><tspan x="74" y="142">인증/입장/정산은 Meta Server, 게임 중 권위 판정은 C++ Game Server가 소유합니다.</tspan></text>
+  <rect x="90" y="300" width="260" height="220" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="25" font-weight="700" fill="#111827"><tspan x="118" y="348">Game Client</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="18" font-weight="400" fill="#4b5563"><tspan x="118" y="388">Google 로그인</tspan><tspan x="118" dy="28">룸 / 전투 UI</tspan><tspan x="118" dy="28">입력 intent 전송</tspan><tspan x="118" dy="28">서버 확정 상태 표시</tspan></text>
+  <rect x="470" y="255" width="380" height="330" rx="10" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="28" font-weight="700" fill="#111827"><tspan x="498" y="303">C++ Game Server</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="20" font-weight="400" fill="#4b5563"><tspan x="498" y="351">TCP gameplay path</tspan><tspan x="498" dy="31">Custom RUDP reliability layer</tspan><tspan x="498" dy="31">Room / Loot / Inventory</tspan><tspan x="498" dy="31">RoomActor single-writer</tspan></text>
+  <rect x="970" y="300" width="300" height="250" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="25" font-weight="700" fill="#111827"><tspan x="998" y="348">Spring Meta Server</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="19" font-weight="400" fill="#4b5563"><tspan x="998" y="388">OAuth account</tspan><tspan x="998" dy="29">admission queue</tspan><tspan x="998" dy="29">game session token</tspan><tspan x="998" dy="29">settlement API</tspan></text>
+  <rect x="1360" y="344" width="160" height="150" rx="10" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="24" font-weight="700" fill="#111827"><tspan x="1388" y="392">Storage</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="19" font-weight="400" fill="#4b5563"><tspan x="1388" y="432">MySQL</tspan><tspan x="1388" dy="29">Redis</tspan></text>
+  <rect x="470" y="704" width="780" height="92" rx="10" fill="#f9fafb" stroke="#d1d5db" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="20" font-weight="700" fill="#111827"><tspan x="498" y="746">Regression / Capacity Harness</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="15" font-weight="400" fill="#4b5563"><tspan x="498" y="776">C++ / Meta / Client tests, 100-session handoff, capacity gate evaluator</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="15" font-weight="500" fill="#4b5563"><tspan x="560" y="230">login / admission</tspan></text>
+  <line x1="350" y1="240" x2="948" y2="240" stroke="#374151" stroke-width="3.5" stroke-linecap="square"/>
+  <polygon points="946,228 970,240 946,252" fill="#374151"/>
+  <line x1="360" y1="420" x2="446" y2="420" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="444,407 470,420 444,433" fill="#374151"/>
+  <line x1="470" y1="486" x2="384" y2="486" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="386,473 360,486 386,499" fill="#374151"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="14" font-weight="500" fill="#4b5563"><tspan x="866" y="424">settlement</tspan></text>
+  <line x1="858" y1="438" x2="946" y2="438" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="944,425 970,438 944,451" fill="#374151"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="14" font-weight="500" fill="#4b5563"><tspan x="1286" y="424">persist</tspan></text>
+  <line x1="1270" y1="438" x2="1338" y2="438" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="1336,426 1360,438 1336,450" fill="#374151"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="14" font-weight="500" fill="#4b5563"><tspan x="640" y="652">game session token</tspan></text>
+  <line x1="970" y1="660" x2="372" y2="660" stroke="#374151" stroke-width="3.5" stroke-linecap="square"/>
+  <polygon points="374,648 350,660 374,672" fill="#374151"/>
+  <rect x="72" y="820" width="1456" height="52" rx="8" fill="#f3f4f6"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="17" font-weight="400" fill="#4b5563"><tspan x="96" y="854">Client는 입력/표시, C++ Game Server는 Room 권위 상태, Meta Server는 account/session/settlement boundary를 담당합니다.</tspan></text>
 </svg>

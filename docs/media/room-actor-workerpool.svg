@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="RoomActor / WorkerPool 처리 모델">
+  <rect width="1600" height="900" fill="#ffffff"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="46" font-weight="800" fill="#111827"><tspan x="72" y="98">RoomActor / WorkerPool 처리 모델</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="400" fill="#4b5563"><tspan x="74" y="142">같은 Room의 상태 변경은 단일 처리 경계에서 순차 적용하고, 여러 Room으로 확장할 수 있는 기반을 둡니다.</tspan></text>
+  <rect x="90" y="330" width="245" height="180" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="24" font-weight="700" fill="#111827"><tspan x="118" y="378">RoomEvent</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="17" font-weight="400" fill="#4b5563"><tspan x="118" y="418">Ready</tspan><tspan x="118" dy="26">MonsterDeath</tspan><tspan x="118" dy="26">ClickLoot</tspan></text>
+  <rect x="430" y="315" width="285" height="210" rx="10" fill="#f9fafb" stroke="#6b7280" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="700" fill="#111827"><tspan x="458" y="363">RoomEventQueue</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="17" font-weight="400" fill="#4b5563"><tspan x="458" y="403">bounded FIFO</tspan><tspan x="458" dy="26">backpressure boundary</tspan><tspan x="458" dy="26">shutdown drain</tspan></text>
+  <rect x="815" y="315" width="300" height="210" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="24" font-weight="700" fill="#111827"><tspan x="843" y="363">Dispatcher</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="18" font-weight="400" fill="#4b5563"><tspan x="843" y="403">roomId 기준 routing</tspan><tspan x="843" dy="28">multi-room isolation</tspan></text>
+  <rect x="1210" y="285" width="320" height="240" rx="10" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="24" font-weight="700" fill="#111827"><tspan x="1238" y="333">RoomActor</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="18" font-weight="400" fill="#4b5563"><tspan x="1238" y="373">same-room single-writer</tspan><tspan x="1238" dy="28">Room state mutation</tspan><tspan x="1238" dy="28">response / broadcast 생성</tspan></text>
+  <rect x="430" y="640" width="285" height="120" rx="10" fill="#f9fafb" stroke="#d1d5db" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="19" font-weight="700" fill="#111827"><tspan x="458" y="682">RoomEventMetrics</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="15" font-weight="400" fill="#4b5563"><tspan x="458" y="726">queue / worker baseline</tspan></text>
+  <rect x="815" y="640" width="300" height="120" rx="10" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="22" font-weight="700" fill="#111827"><tspan x="843" y="684">WorkerPool</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="843" y="728">worker wake</tspan><tspan x="843" dy="25">shutdown lifecycle</tspan></text>
+  <rect x="1210" y="640" width="320" height="120" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="21" font-weight="700" fill="#111827"><tspan x="1238" y="684">OutboundSendQueue</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="15" font-weight="400" fill="#4b5563"><tspan x="1238" y="728">response / broadcast</tspan><tspan x="1238" dy="23">network send boundary</tspan></text>
+  <line x1="335" y1="420" x2="406" y2="420" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="404,407 430,420 404,433" fill="#374151"/>
+  <line x1="715" y1="420" x2="791" y2="420" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="789,407 815,420 789,433" fill="#374151"/>
+  <line x1="1115" y1="420" x2="1186" y2="420" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="1184,407 1210,420 1184,433" fill="#374151"/>
+  <line x1="572" y1="525" x2="572" y2="620" stroke="#374151" stroke-width="3.5" stroke-linecap="square"/>
+  <polygon points="561,618 583,618 572,640" fill="#374151"/>
+  <line x1="965" y1="525" x2="965" y2="620" stroke="#374151" stroke-width="3.5" stroke-linecap="square"/>
+  <polygon points="954,618 976,618 965,640" fill="#374151"/>
+  <line x1="1370" y1="525" x2="1370" y2="620" stroke="#374151" stroke-width="3.5" stroke-linecap="square"/>
+  <polygon points="1359,618 1381,618 1370,640" fill="#374151"/>
+  <rect x="72" y="801" width="1456" height="52" rx="8" fill="#f3f4f6"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="17" font-weight="400" fill="#4b5563"><tspan x="96" y="835">범위: Room 단위 단일 처리 모델과 WorkerPool 기반 확장 준비입니다. 전체 운영 런타임이 완전한 multi-worker 구조라고 주장하지 않습니다.</tspan></text>
+</svg>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="Custom RUDP 신뢰성 계층">
+  <rect width="1600" height="900" fill="#ffffff"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="46" font-weight="800" fill="#111827"><tspan x="72" y="98">Custom RUDP 신뢰성 계층</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="400" fill="#4b5563"><tspan x="74" y="142">UDP 위에 packet codec, seq/ACK, retransmission, duplicate guard, reliable ordered event queue를 분리했습니다.</tspan></text>
+  <rect x="80" y="305" width="235" height="155" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="700" fill="#111827"><tspan x="108" y="353">Packet codec</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="108" y="393">type / sequence</tspan><tspan x="108" dy="25">payload encode/decode</tspan></text>
+  <rect x="395" y="305" width="250" height="155" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="700" fill="#111827"><tspan x="423" y="353">Session binding</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="423" y="393">UDP endpoint</tspan><tspan x="423" dy="25">TCP-auth session</tspan></text>
+  <rect x="725" y="305" width="250" height="155" rx="10" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="700" fill="#111827"><tspan x="753" y="353">cmdSeq gate</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="753" y="393">old input reject</tspan><tspan x="753" dy="25">duplicate input reject</tspan></text>
+  <rect x="1055" y="305" width="250" height="155" rx="10" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="23" font-weight="700" fill="#111827"><tspan x="1083" y="353">ACK tracking</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="1083" y="393">pending metadata</tspan><tspan x="1083" dy="25">deadline scan</tspan></text>
+  <rect x="1345" y="305" width="185" height="155" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="21" font-weight="700" fill="#111827"><tspan x="1373" y="353">Retransmit</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="1373" y="393">resend flush</tspan></text>
+  <rect x="470" y="610" width="305" height="135" rx="10" fill="#f8fff9" stroke="#16a34a" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="22" font-weight="700" fill="#111827"><tspan x="498" y="656">Duplicate guard</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="498" y="698">server event id</tspan><tspan x="498" dy="25">idempotency tracker</tspan></text>
+  <rect x="850" y="610" width="340" height="135" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="20" font-weight="700" fill="#111827"><tspan x="878" y="656">Reliable ordered event queue</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="878" y="698">pending ACK</tspan><tspan x="878" dy="25">ordered delivery</tspan></text>
+  <rect x="1260" y="610" width="270" height="135" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="20" font-weight="700" fill="#111827"><tspan x="1288" y="656">RoomEvent translation</tspan></text>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="16" font-weight="400" fill="#4b5563"><tspan x="1288" y="698">validated input</tspan><tspan x="1288" dy="25">Room event boundary</tspan></text>
+  <line x1="315" y1="382" x2="373" y2="382" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="371,370 395,382 371,394" fill="#374151"/>
+  <line x1="645" y1="382" x2="703" y2="382" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="701,370 725,382 701,394" fill="#374151"/>
+  <line x1="975" y1="382" x2="1033" y2="382" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="1031,370 1055,382 1031,394" fill="#374151"/>
+  <line x1="1305" y1="382" x2="1323" y2="382" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="1321,370 1345,382 1321,394" fill="#374151"/>
+  <polyline points="850,460 850,545 623,545 623,610" fill="none" stroke="#374151" stroke-width="3.5" stroke-linecap="square" stroke-linejoin="round"/>
+  <polygon points="612,588 634,588 623,610" fill="#374151"/>
+  <polyline points="1180,460 1180,545 1020,545 1020,610" fill="none" stroke="#374151" stroke-width="3.5" stroke-linecap="square" stroke-linejoin="round"/>
+  <polygon points="1009,588 1031,588 1020,610" fill="#374151"/>
+  <line x1="1190" y1="678" x2="1238" y2="678" stroke="#374151" stroke-width="4" stroke-linecap="square"/>
+  <polygon points="1236,666 1260,678 1236,690" fill="#374151"/>
+  <rect x="72" y="801" width="1456" height="52" rx="8" fill="#f3f4f6"/>
+  <text text-anchor="start" font-family="'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', Arial, sans-serif" font-size="17" font-weight="400" fill="#4b5563"><tspan x="96" y="835">구현/테스트: codec, seq/ACK, retransmission, duplicate guard, reliable server event. 비주장: 모든 gameplay 결과 전송의 RUDP 완전 이전.</tspan></text>
+</svg>

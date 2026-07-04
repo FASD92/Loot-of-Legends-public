@@ -56,6 +56,8 @@ client/unity_player_client/*_BurstDebugInformation_DoNotShip/
 docs/*
 !docs/
 !docs/architecture.md
+!docs/protocol.md
+!docs/room_actor.md
 !docs/test_matrix.md
 !docs/roadmap.md
 !docs/media/
