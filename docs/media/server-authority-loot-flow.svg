@@ -10,7 +10,7 @@
       .subtitle { font: 500 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
       .box-title { font: 800 27px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #0f172a; }
       .box-text { font: 500 20px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #475569; }
-      .badge { font: 800 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
+      .badge { font: 800 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; text-anchor: middle; dominant-baseline: central; }
       .note { font: 700 23px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
       .small { font: 500 18px "Apple SD Gothic Neo", "Noto Sans KR", Arial, sans-serif; fill: #cbd5e1; }
       .arrow { stroke: #334155; stroke-width: 4; fill: none; marker-end: url(#arrow); }
@@ -31,21 +31,21 @@
 
   <rect x="470" y="315" width="250" height="145" rx="18" fill="#eff6ff" stroke="#2563eb" stroke-width="4"/>
   <circle cx="508" cy="357" r="20" fill="#2563eb"/>
-  <text x="501" y="364" class="badge">1</text>
+  <text x="508" y="357" class="badge">1</text>
   <text x="548" y="364" class="box-title">Core::Server</text>
   <text x="508" y="406" class="box-text">패킷 처리</text>
   <text x="508" y="438" class="box-text">세션 / 룸 라우팅</text>
 
-  <rect x="840" y="315" width="270" height="145" rx="18" fill="#f0fdf4" stroke="#16a34a" stroke-width="4"/>
-  <circle cx="878" cy="357" r="20" fill="#16a34a"/>
-  <text x="871" y="364" class="badge">2</text>
-  <text x="918" y="364" class="box-title">Room 단일 처리</text>
-  <text x="878" y="406" class="box-text">RoomManager / RoomActor</text>
-  <text x="878" y="438" class="box-text">같은 룸 이벤트 순차 적용</text>
+  <rect x="820" y="315" width="320" height="145" rx="18" fill="#f0fdf4" stroke="#16a34a" stroke-width="4"/>
+  <circle cx="858" cy="357" r="20" fill="#16a34a"/>
+  <text x="858" y="357" class="badge">2</text>
+  <text x="898" y="364" class="box-title">Room 단일 처리</text>
+  <text x="858" y="406" class="box-text">RoomManager / RoomActor</text>
+  <text x="858" y="438" class="box-text">같은 룸 이벤트 순차 적용</text>
 
   <rect x="1220" y="285" width="300" height="205" rx="18" fill="#fff7ed" stroke="#f97316" stroke-width="4"/>
   <circle cx="1258" cy="327" r="20" fill="#f97316"/>
-  <text x="1251" y="334" class="badge">3</text>
+  <text x="1258" y="327" class="badge">3</text>
   <text x="1298" y="334" class="box-title">서버 검증</text>
   <text x="1258" y="380" class="box-text">룸 소속 확인</text>
   <text x="1258" y="414" class="box-text">Drop 상태 확인</text>
@@ -61,8 +61,8 @@
 
   <path class="arrow" d="M330 278 C390 278 410 355 470 365"/>
   <path class="arrow" d="M330 488 C390 488 410 420 470 410"/>
-  <path class="arrow" d="M720 388 H840"/>
-  <path class="arrow" d="M1110 388 H1220"/>
+  <path class="arrow" d="M720 388 H820"/>
+  <path class="arrow" d="M1140 388 H1220"/>
   <path class="arrow" d="M1370 490 V630"/>
   <path class="arrow" d="M1300 490 V560 H970 V630"/>
 
