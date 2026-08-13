@@ -1,0 +1,111 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "LOOT_WARNINGS_AS_ERRORS": "OFF"
+      }
+    },
+    {
+      "name": "dev-debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "ci-gcc-debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++-13",
+        "LOOT_REQUIRED_COMPILER_ID": "GNU",
+        "LOOT_REQUIRED_COMPILER_MAJOR": "13",
+        "LOOT_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "ci-clang-debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "LOOT_REQUIRED_COMPILER_ID": "Clang",
+        "LOOT_REQUIRED_COMPILER_MAJOR": "18",
+        "LOOT_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "inherits": "ci-clang-debug",
+      "cacheVariables": {
+        "LOOT_SANITIZERS": "address,undefined"
+      }
+    },
+    {
+      "name": "tsan",
+      "inherits": "ci-clang-debug",
+      "cacheVariables": {
+        "LOOT_SANITIZERS": "thread"
+      }
+    },
+    {
+      "name": "release-evidence",
+      "inherits": "ci-gcc-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "LOOT_REQUIRE_CLEAN_SOURCE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev-debug", "configurePreset": "dev-debug" },
+    { "name": "ci-gcc-debug", "configurePreset": "ci-gcc-debug" },
+    { "name": "ci-clang-debug", "configurePreset": "ci-clang-debug" },
+    { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "release-evidence", "configurePreset": "release-evidence" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "ci-gcc-debug",
+      "configurePreset": "ci-gcc-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "ci-clang-debug",
+      "configurePreset": "ci-clang-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "release-evidence",
+      "configurePreset": "release-evidence",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

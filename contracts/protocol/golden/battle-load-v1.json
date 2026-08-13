@@ -1,0 +1,151 @@
+{
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "releaseDispatch": {
+    "HostStartRequest": "ENABLED_IN_SLICE_3",
+    "ArenaGameplayStart": "BLOCKED_WITHOUT_GAMEPLAY_TRANSPORT_READINESS"
+  },
+  "battleResultCodes": {
+    "OK": 0,
+    "INVALID_ARGUMENT": 1,
+    "ROOM_NOT_FOUND": 2,
+    "ROOM_NOT_OPEN": 3,
+    "NOT_IN_ROOM": 4,
+    "NOT_HOST": 5,
+    "NOT_ENOUGH_PLAYERS": 6,
+    "NOT_ALL_READY": 7,
+    "START_GATE_CLOSED": 8,
+    "STALE_SESSION": 9,
+    "STALE_BATTLE": 10,
+    "NOT_ELIGIBLE": 11,
+    "OVERLOADED": 12
+  },
+  "loadCancelReasons": {
+    "NOT_ENOUGH_READY": 1
+  },
+  "constraints": {
+    "battleInstanceId": {
+      "wireType": "uint64",
+      "scope": "room-local",
+      "firstValue": 1,
+      "reuse": false
+    },
+    "loadDeadlineMillis": 10000,
+    "minimumCapturedParticipants": 2,
+    "maximumCandidates": 10
+  },
+  "tcpWire": {
+    "byteOrder": "big-endian",
+    "frame": {
+      "lengthPrefixType": "uint32",
+      "lengthValue": "payload-bytes"
+    },
+    "envelope": [
+      { "name": "protocolMajor", "type": "uint8", "value": 1 },
+      { "name": "messageId", "type": "uint32" }
+    ],
+    "structures": {
+      "BattleParticipant": {
+        "fields": [
+          { "name": "sessionId", "type": "uint64", "minimum": 1 },
+          { "name": "sessionGeneration", "type": "uint64", "minimum": 1 },
+          { "name": "nicknameLength", "type": "uint16", "minimum": 1 },
+          { "name": "nickname", "type": "utf8", "lengthFrom": "nicknameLength" }
+        ]
+      }
+    },
+    "messages": {
+      "HostStartRequest": {
+        "messageId": 14,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 }
+        ]
+      },
+      "BattleCommandResponse": {
+        "messageId": 15,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "resultCode", "type": "uint16", "enum": "battleResultCodes" }
+        ]
+      },
+      "ArenaLoadEntry": {
+        "messageId": 16,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "roomId", "type": "uint64", "minimum": 1 },
+          { "name": "battleInstanceId", "type": "uint64", "minimum": 1 }
+        ]
+      },
+      "ArenaLoadComplete": {
+        "messageId": 17,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "roomId", "type": "uint64", "minimum": 1 },
+          { "name": "battleInstanceId", "type": "uint64", "minimum": 1 }
+        ]
+      },
+      "ArenaGameplayStart": {
+        "messageId": 18,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "roomId", "type": "uint64", "minimum": 1 },
+          { "name": "battleInstanceId", "type": "uint64", "minimum": 1 },
+          { "name": "participantCount", "type": "uint8", "minimum": 2, "maximum": 10 },
+          { "name": "participants", "type": "repeated", "countFrom": "participantCount", "element": "BattleParticipant" }
+        ]
+      },
+      "ArenaLoadCancelled": {
+        "messageId": 19,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "roomId", "type": "uint64", "minimum": 1 },
+          { "name": "battleInstanceId", "type": "uint64", "minimum": 1 },
+          { "name": "reasonCode", "type": "uint16", "enum": "loadCancelReasons" }
+        ]
+      }
+    }
+  },
+  "tcpGoldenVectors": [
+    {
+      "semanticName": "HostStartRequest",
+      "values": { "requestId": 1 },
+      "frameHex": "0000000d010000000e0000000000000001"
+    },
+    {
+      "semanticName": "BattleCommandResponse",
+      "values": { "requestId": 1, "resultCode": "OK" },
+      "frameHex": "0000000f010000000f00000000000000010000"
+    },
+    {
+      "semanticName": "ArenaLoadEntry",
+      "values": { "roomId": 7, "battleInstanceId": 1 },
+      "frameHex": "00000015010000001000000000000000070000000000000001"
+    },
+    {
+      "semanticName": "ArenaLoadComplete",
+      "values": { "requestId": 1, "roomId": 7, "battleInstanceId": 1 },
+      "frameHex": "0000001d0100000011000000000000000100000000000000070000000000000001"
+    },
+    {
+      "semanticName": "ArenaGameplayStart",
+      "values": {
+        "roomId": 7,
+        "battleInstanceId": 1,
+        "participants": [
+          { "sessionId": 1, "sessionGeneration": 2, "nickname": "neo" },
+          { "sessionId": 3, "sessionGeneration": 4, "nickname": "trinity" }
+        ]
+      },
+      "frameHex": "00000044010000001200000000000000070000000000000001020000000000000001000000000000000200036e656f0000000000000003000000000000000400077472696e697479"
+    },
+    {
+      "semanticName": "ArenaLoadCancelled",
+      "values": { "roomId": 7, "battleInstanceId": 1, "reasonCode": "NOT_ENOUGH_READY" },
+      "frameHex": "000000170100000013000000000000000700000000000000010001"
+    }
+  ]
+}

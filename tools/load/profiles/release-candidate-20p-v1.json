@@ -1,0 +1,21 @@
+{
+  "capacityClaimEligible": false,
+  "gateClass": "PRODUCT_RELEASE",
+  "measurementSeconds": 300,
+  "networkImpairment": {
+    "enabled": false,
+    "jitterMilliseconds": 0,
+    "lossPercent": 0,
+    "reorderPercent": 0
+  },
+  "overallDeadlineSeconds": 420,
+  "participantCount": 20,
+  "participantsPerRoom": 10,
+  "profileId": "release-candidate-20p",
+  "requiredCyclesPerRoom": 4,
+  "roomCount": 2,
+  "schemaVersion": 1,
+  "seed": 20260811,
+  "version": "1.0.0",
+  "warmupSeconds": 60
+}

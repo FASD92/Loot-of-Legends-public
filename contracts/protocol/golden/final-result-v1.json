@@ -1,0 +1,56 @@
+{
+  "contractId": "LOL-V2-FINAL-RESULT-V1",
+  "status": "Accepted",
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "byteOrder": "big-endian",
+  "tcpWire": {
+    "frame": {
+      "lengthPrefixType": "uint32",
+      "lengthValue": "payload-bytes"
+    },
+    "envelope": [
+      { "name": "protocolMajor", "type": "uint8", "value": 1 },
+      { "name": "messageId", "type": "uint32", "value": 36 }
+    ],
+    "payloadPrefix": [
+      { "name": "roomId", "type": "uint64" },
+      { "name": "battleInstanceId", "type": "uint64" },
+      { "name": "outcome", "type": "uint8" },
+      { "name": "entryCount", "type": "uint16" }
+    ],
+    "repeatedEntry": [
+      { "name": "sessionId", "type": "uint64" },
+      { "name": "nicknameLength", "type": "uint16" },
+      { "name": "nickname", "type": "utf8" },
+      { "name": "exitStatus", "type": "uint8" },
+      { "name": "finalAssetValue", "type": "uint64" },
+      { "name": "rank", "type": "uint32", "zeroMeans": "none" },
+      { "name": "isTop", "type": "uint8" }
+    ]
+  },
+  "outcomeCodes": {
+    "MONSTER_DEFEATED": 1,
+    "COMBAT_TIMEOUT": 2,
+    "CANCELLED_NO_ACTIVE_PARTICIPANTS": 3
+  },
+  "exitStatusCodes": {
+    "TERMINAL_PRESENT": 1,
+    "TERMINAL_EXITED": 2
+  },
+  "tcpGoldenVectors": [
+    {
+      "semanticName": "MonsterDefeatedFinalResult",
+      "frameHex": "00000052010000002400000000000000070000000000000009010002000000000000000100036e656f01000000000000012c0000000101000000000000000200077472696e6974790200000000000000640000000200"
+    },
+    {
+      "semanticName": "CombatTimeoutFinalResult",
+      "frameHex": "0000005201000000240000000000000007000000000000000a020002000000000000000100036e656f0100000000000000000000000000000000000000000200077472696e6974790100000000000000000000000000"
+    },
+    {
+      "semanticName": "CancelledNoActiveParticipantsFinalResult",
+      "frameHex": "0000005201000000240000000000000007000000000000000b030002000000000000000100036e656f02000000000000012c0000000000000000000000000200077472696e6974790200000000000000000000000000"
+    }
+  ]
+}

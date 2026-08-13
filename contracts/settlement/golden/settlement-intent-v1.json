@@ -1,0 +1,182 @@
+{
+  "contractVersion": "1.0.1",
+  "status": "Accepted",
+  "module": "lol_settlement",
+  "scope": "pure-immutable-values",
+  "encoding": {
+    "byteOrder": "big-endian",
+    "integer": "unsigned",
+    "asciiPrefix": "no-length-prefix-no-nul",
+    "canonicalPayloadHeader": "settlement-intent-v1",
+    "settlementIdDomain": "first16(SHA256(settlement-v1 || RoomId:u64 || BattleId:u64 || AccountId:16))",
+    "settlementBatchIdDomain": "first16(SHA256(settlement-batch-v1 || RoomId:u64 || BattleId:u64))",
+    "canonicalPayloadHash": "SHA256(canonical payload)"
+  },
+  "enums": {
+    "BattleOutcome": {
+      "MonsterDefeated": 1,
+      "CombatTimeout": 2,
+      "CancelledNoActiveParticipants": 3
+    },
+    "ParticipantExitStatus": {
+      "TerminalPresent": 1,
+      "TerminalExited": 2
+    }
+  },
+  "constraints": {
+    "roomId": { "minimum": 1 },
+    "battleInstanceId": { "minimum": 1 },
+    "catalogVersion": { "minimum": 1, "maximum": 65535 },
+    "participants": { "minimum": 2, "maximum": 10 },
+    "accountId": "unique",
+    "itemId": "nonzero-unique-per-participant",
+    "quantity": { "minimum": 1 },
+    "itemCountPerParticipant": { "maximum": 65535 },
+    "combatTimeout": "no-items-and-value-zero",
+    "cancelledNoActiveParticipants": "all-terminal-exited; frozen-positive-item-deltas-and-zero-holdings-allowed"
+  },
+  "goldenBatches": [
+    {
+      "semanticName": "MonsterDefeated",
+      "values": {
+        "roomId": 7,
+        "battleInstanceId": 11,
+        "outcome": "MonsterDefeated",
+        "catalogVersion": 1,
+        "committedAt": {
+          "wallUnixMilliseconds": 1760000000123,
+          "monotonicNanoseconds": 9876543210
+        }
+      },
+      "expectedBatchId": "620b39c0db2793374d8a5ef7e3441536",
+      "expectedIntents": [
+        {
+          "accountId": "000102030405060708090a0b0c0d0e0f",
+          "exitStatus": "TerminalPresent",
+          "itemDeltas": [
+            { "itemId": 2, "quantity": 1 }
+          ],
+          "finalAssetValue": 300,
+          "expectedId": "d78f45fdc179931d82a4d1c390e84eae",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d7631d78f45fdc179931d82a4d1c390e84eae000102030405060708090a0b0c0d0e0f0000000000000007000000000000000b01010001000100000000000000020000000000000001000000000000012c00000199c82cc07b000000024cb016ea",
+          "expectedHash": "e29758929c2b28eeb609f9f3f5f321de183e9f0acd0ff91ebe11d13e9ef51fd9"
+        },
+        {
+          "accountId": "101112131415161718191a1b1c1d1e1f",
+          "exitStatus": "TerminalExited",
+          "itemDeltas": [
+            { "itemId": 1, "quantity": 1 }
+          ],
+          "finalAssetValue": 100,
+          "expectedId": "9428b0d4de2bda88d25124440f4e575d",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d76319428b0d4de2bda88d25124440f4e575d101112131415161718191a1b1c1d1e1f0000000000000007000000000000000b01020001000100000000000000010000000000000001000000000000006400000199c82cc07b000000024cb016ea",
+          "expectedHash": "f979114411a3e75e428df7e508d8e500efa9e7ce13e3fc733978493d61c7c321"
+        }
+      ]
+    },
+    {
+      "semanticName": "CombatTimeout",
+      "values": {
+        "roomId": 7,
+        "battleInstanceId": 12,
+        "outcome": "CombatTimeout",
+        "catalogVersion": 1,
+        "committedAt": {
+          "wallUnixMilliseconds": 1760000001123,
+          "monotonicNanoseconds": 9876544210
+        }
+      },
+      "expectedBatchId": "a9487234b9dc1783019d7c1617db461c",
+      "expectedIntents": [
+        {
+          "accountId": "000102030405060708090a0b0c0d0e0f",
+          "exitStatus": "TerminalPresent",
+          "itemDeltas": [],
+          "finalAssetValue": 0,
+          "expectedId": "72d371240fe83e824850c102c181c640",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d763172d371240fe83e824850c102c181c640000102030405060708090a0b0c0d0e0f0000000000000007000000000000000c020100010000000000000000000000000199c82cc463000000024cb01ad2",
+          "expectedHash": "2193598d897d76aa8936893e220e8c15c274e506e4928989c94fb253af386af8"
+        },
+        {
+          "accountId": "101112131415161718191a1b1c1d1e1f",
+          "exitStatus": "TerminalExited",
+          "itemDeltas": [],
+          "finalAssetValue": 0,
+          "expectedId": "716296a90f6d821ffde72e52d63cc326",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d7631716296a90f6d821ffde72e52d63cc326101112131415161718191a1b1c1d1e1f0000000000000007000000000000000c020200010000000000000000000000000199c82cc463000000024cb01ad2",
+          "expectedHash": "cccb88ac136625ef1dde3371814926c363d24c23041fc1b9839a0b0f51196c27"
+        }
+      ]
+    },
+    {
+      "semanticName": "CancelledNoHoldings",
+      "values": {
+        "roomId": 7,
+        "battleInstanceId": 13,
+        "outcome": "CancelledNoActiveParticipants",
+        "catalogVersion": 1,
+        "committedAt": {
+          "wallUnixMilliseconds": 1760000002123,
+          "monotonicNanoseconds": 9876545210
+        }
+      },
+      "expectedBatchId": "3ff37077fe0c48a3ba3ef9b8fa9a8873",
+      "expectedIntents": [
+        {
+          "accountId": "000102030405060708090a0b0c0d0e0f",
+          "exitStatus": "TerminalExited",
+          "itemDeltas": [],
+          "finalAssetValue": 0,
+          "expectedId": "eb938ba20377c4d08499ae6711acdd3f",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d7631eb938ba20377c4d08499ae6711acdd3f000102030405060708090a0b0c0d0e0f0000000000000007000000000000000d030200010000000000000000000000000199c82cc84b000000024cb01eba",
+          "expectedHash": "884d15b88a413c138053e3571acd879ceb950c52d03a1210d55c64ef8dab8c74"
+        },
+        {
+          "accountId": "101112131415161718191a1b1c1d1e1f",
+          "exitStatus": "TerminalExited",
+          "itemDeltas": [],
+          "finalAssetValue": 0,
+          "expectedId": "3195536bd39f4cb7937a127be77333b1",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d76313195536bd39f4cb7937a127be77333b1101112131415161718191a1b1c1d1e1f0000000000000007000000000000000d030200010000000000000000000000000199c82cc84b000000024cb01eba",
+          "expectedHash": "34e6e943454b98eafd718ed10cec845d1e0cc194fea8e5079f581179c9917a98"
+        }
+      ]
+    },
+    {
+      "semanticName": "CancelledPartialHoldings",
+      "values": {
+        "roomId": 7,
+        "battleInstanceId": 14,
+        "outcome": "CancelledNoActiveParticipants",
+        "catalogVersion": 1,
+        "committedAt": {
+          "wallUnixMilliseconds": 1760000003123,
+          "monotonicNanoseconds": 9876546210
+        }
+      },
+      "expectedBatchId": "eb1c7fcc0af24bdd54380b8b9b0c3f2f",
+      "expectedIntents": [
+        {
+          "accountId": "000102030405060708090a0b0c0d0e0f",
+          "exitStatus": "TerminalExited",
+          "itemDeltas": [
+            { "itemId": 2, "quantity": 1 }
+          ],
+          "finalAssetValue": 300,
+          "expectedId": "43eca108368cdc1278fea78b755851d9",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d763143eca108368cdc1278fea78b755851d9000102030405060708090a0b0c0d0e0f0000000000000007000000000000000e03020001000100000000000000020000000000000001000000000000012c00000199c82ccc33000000024cb022a2",
+          "expectedHash": "ec7e01d56a468e0d140eea4cff20d1f65be2be5b50ed10f629512157c883201a"
+        },
+        {
+          "accountId": "101112131415161718191a1b1c1d1e1f",
+          "exitStatus": "TerminalExited",
+          "itemDeltas": [],
+          "finalAssetValue": 0,
+          "expectedId": "65391736861a52e68a81c8c53b72e815",
+          "expectedPayloadHex": "736574746c656d656e742d696e74656e742d763165391736861a52e68a81c8c53b72e815101112131415161718191a1b1c1d1e1f0000000000000007000000000000000e030200010000000000000000000000000199c82ccc33000000024cb022a2",
+          "expectedHash": "d0263bd506ad8066ec040d15e0737d7ee121de5acac9e960c1bb054e9434f213"
+        }
+      ]
+    }
+  ]
+}

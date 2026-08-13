@@ -1,0 +1,9 @@
+{
+  "name": "LootOfLegends.LobbyRoom",
+  "rootNamespace": "LootOfLegends.LobbyRoom",
+  "references": [
+    "LootOfLegends.Protocol",
+    "LootOfLegends.Transport"
+  ],
+  "noEngineReferences": true
+}

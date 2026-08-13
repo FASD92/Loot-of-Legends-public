@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loot-of-legends.invalid/contracts/settlement/collection-v1.schema.json",
+  "title": "Loot of Legends V2 Collection HTTP Contract",
+  "status": "Accepted",
+  "version": "1.0.0",
+  "authority": "Meta MySQL Applied assets",
+  "endpoint": {
+    "method": "GET",
+    "path": "/api/v1/collection",
+    "authentication": "PLAYER",
+    "responses": {
+      "200": { "schemaRef": "#/$defs/collection" },
+      "401": { "code": "UNAUTHORIZED" },
+      "503": { "code": "DEPENDENCY_UNAVAILABLE" }
+    }
+  },
+  "semantics": {
+    "itemOrder": "itemId ascending",
+    "confirmedAssets": "Applied only",
+    "pending": "aggregate count only; never predict item quantity"
+  },
+  "$defs": {
+    "uint64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "positiveUint64": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "item": {
+      "type": "object",
+      "required": ["itemId", "quantity", "value"],
+      "properties": {
+        "itemId": { "$ref": "#/$defs/positiveUint64" },
+        "quantity": { "$ref": "#/$defs/positiveUint64" },
+        "value": { "$ref": "#/$defs/positiveUint64" }
+      },
+      "additionalProperties": false
+    },
+    "collection": {
+      "type": "object",
+      "required": ["items", "wallet", "pendingSettlementCount", "freshness"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/item" }
+        },
+        "wallet": { "$ref": "#/$defs/uint64" },
+        "pendingSettlementCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "freshness": {
+          "type": "string",
+          "const": "Fresh"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

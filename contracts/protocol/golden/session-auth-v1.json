@@ -1,0 +1,146 @@
+{
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "metaApi": {
+    "issueSuccess": {
+      "request": null,
+      "responseStatus": 201,
+      "response": {
+        "credential": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "expiresAt": "2026-08-08T00:00:30Z"
+      }
+    },
+    "claimSuccess": {
+      "request": {
+        "credential": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "audience": "loot-game-server-v1"
+      },
+      "responseStatus": 200,
+      "response": {
+        "accountId": "00000000-0000-4000-8000-000000000001",
+        "nickname": "player-one"
+      }
+    },
+    "claimReplay": {
+      "request": {
+        "credential": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "audience": "loot-game-server-v1"
+      },
+      "responseStatus": 409,
+      "response": { "code": "ALREADY_CONSUMED" }
+    },
+    "claimExpired": {
+      "responseStatus": 410,
+      "response": { "code": "EXPIRED" }
+    }
+  },
+  "tcpWire": {
+    "byteOrder": "big-endian",
+    "frame": {
+      "lengthPrefixType": "uint32",
+      "lengthValue": "payload-bytes"
+    },
+    "envelope": [
+      { "name": "protocolMajor", "type": "uint8", "value": 1 },
+      { "name": "messageId", "type": "uint32" }
+    ],
+    "messages": {
+      "AuthenticateGameSession": {
+        "messageId": 1,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "credentialLength", "type": "uint16", "value": 43 },
+          {
+            "name": "credential",
+            "type": "ascii",
+            "lengthFrom": "credentialLength",
+            "encoding": "base64url-without-padding"
+          }
+        ]
+      },
+      "Welcome": {
+        "messageId": 2,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "sessionId", "type": "uint64", "minimum": 1 },
+          { "name": "sessionGeneration", "type": "uint64", "minimum": 1 },
+          { "name": "serverTimeUnixMillis", "type": "uint64" },
+          { "name": "nicknameLength", "type": "uint16", "minimum": 1 },
+          {
+            "name": "nickname",
+            "type": "utf8",
+            "lengthFrom": "nicknameLength"
+          }
+        ]
+      },
+      "AuthenticationRejected": {
+        "messageId": 3,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "reason", "type": "uint16" }
+        ],
+        "reasonCodes": {
+          "INVALID": 1,
+          "EXPIRED": 2,
+          "ALREADY_CONSUMED": 3,
+          "WRONG_AUDIENCE": 4,
+          "DEPENDENCY_UNAVAILABLE": 5,
+          "PRE_AUTH_COMMAND": 6
+        }
+      },
+      "SessionReplaced": {
+        "messageId": 4,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [{ "name": "reason", "type": "uint16" }],
+        "reasonCodes": { "SAME_ACCOUNT_LOGIN": 1 }
+      }
+    }
+  },
+  "tcpGoldenVectors": [
+    {
+      "name": "authenticate-request-1",
+      "semanticName": "AuthenticateGameSession",
+      "values": {
+        "protocolMajor": 1,
+        "requestId": 1,
+        "credential": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "frameHex": "0000003a01000000010000000000000001002b41414141414141414141414141414141414141414141414141414141414141414141414141414141414141"
+    },
+    {
+      "name": "welcome-request-1",
+      "semanticName": "Welcome",
+      "values": {
+        "protocolMajor": 1,
+        "requestId": 1,
+        "sessionId": 2,
+        "sessionGeneration": 3,
+        "serverTimeUnixMillis": 1700000000000,
+        "nickname": "player-one"
+      },
+      "frameHex": "0000003101000000020000000000000001000000000000000200000000000000030000018bcfe56800000a706c617965722d6f6e65"
+    },
+    {
+      "name": "rejected-expired-request-1",
+      "semanticName": "AuthenticationRejected",
+      "values": {
+        "protocolMajor": 1,
+        "requestId": 1,
+        "reason": "EXPIRED"
+      },
+      "frameHex": "0000000f010000000300000000000000010002"
+    },
+    {
+      "name": "replaced-same-account",
+      "semanticName": "SessionReplaced",
+      "values": {
+        "protocolMajor": 1,
+        "reason": "SAME_ACCOUNT_LOGIN"
+      },
+      "frameHex": "0000000701000000040001"
+    }
+  ]
+}

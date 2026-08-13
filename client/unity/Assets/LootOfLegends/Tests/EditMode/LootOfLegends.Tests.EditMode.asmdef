@@ -1,0 +1,20 @@
+{
+  "name": "LootOfLegends.Tests.EditMode",
+  "rootNamespace": "LootOfLegends.Tests.EditMode",
+  "references": [
+    "LootOfLegends.Protocol",
+    "LootOfLegends.Transport",
+    "LootOfLegends.Battle",
+    "LootOfLegends.LobbyRoom",
+    "LootOfLegends.Collection",
+    "LootOfLegends.Session",
+    "LootOfLegends.Bootstrap",
+    "LootOfLegends.Presentation"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

@@ -1,0 +1,286 @@
+{
+  "contractId": "LOL-V2-COMBAT-V1",
+  "status": "Accepted",
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "ruleset": {
+    "rulesetVersion": 1,
+    "monsterCount": 1,
+    "monsterId": 1,
+    "spawnPositionMillimeters": {
+      "x": 0,
+      "y": 0
+    },
+    "monsterHitPoints": 1600,
+    "attackDamage": 20,
+    "attackRangeMillimeters": 3000,
+    "perPlayerCooldownMillis": 750,
+    "combatDeadlineMillis": 30000,
+    "attackRatePerSecond": 8,
+    "attackBurst": 4
+  },
+  "resultRetention": {
+    "maximumResultsPerSession": 256,
+    "afterBattleCompletedMillis": 30000,
+    "atCapacity": "OVERLOADED_BEFORE_MUTATION",
+    "expiredEviction": "OLDEST_FIRST",
+    "silentDrop": false
+  },
+  "attackResultCodes": {
+    "OK": 0,
+    "NOT_ELIGIBLE": 1,
+    "STALE_SESSION": 2,
+    "STALE_BATTLE": 3,
+    "INVALID_TARGET": 4,
+    "OUT_OF_RANGE": 5,
+    "COOLDOWN": 6,
+    "OVERLOADED": 7,
+    "COMMAND_CONFLICT": 8,
+    "TERMINAL_ALREADY_DECIDED": 9
+  },
+  "combatOutcomes": {
+    "NONE": 0,
+    "MONSTER_DEFEATED": 1,
+    "COMBAT_TIMEOUT": 2
+  },
+  "monsterStates": {
+    "ALIVE": 0,
+    "DYING": 1,
+    "DEAD": 2,
+    "TIMED_OUT": 3
+  },
+  "eventStreamKinds": {
+    "COMBAT_LIFECYCLE": 1
+  },
+  "rudpWire": {
+    "byteOrder": "big-endian",
+    "commandId": [
+      {
+        "name": "commandIdHigh",
+        "type": "uint64"
+      },
+      {
+        "name": "commandIdLow",
+        "type": "uint64"
+      }
+    ],
+    "eventId": [
+      {
+        "name": "eventIdHigh",
+        "type": "uint64"
+      },
+      {
+        "name": "eventIdLow",
+        "type": "uint64"
+      }
+    ],
+    "messages": {
+      "AttackIntent": {
+        "messageId": 27,
+        "direction": "CLIENT_TO_SERVER",
+        "reliable": true,
+        "fields": [
+          {
+            "name": "commandIdHigh",
+            "type": "uint64"
+          },
+          {
+            "name": "commandIdLow",
+            "type": "uint64"
+          },
+          {
+            "name": "battleInstanceId",
+            "type": "uint64"
+          },
+          {
+            "name": "targetHint",
+            "type": "uint64"
+          }
+        ]
+      },
+      "AttackTerminalResult": {
+        "messageId": 28,
+        "direction": "SERVER_TO_CLIENT",
+        "reliable": true,
+        "fields": [
+          {
+            "name": "commandIdHigh",
+            "type": "uint64"
+          },
+          {
+            "name": "commandIdLow",
+            "type": "uint64"
+          },
+          {
+            "name": "battleInstanceId",
+            "type": "uint64"
+          },
+          {
+            "name": "resultCode",
+            "type": "uint16"
+          },
+          {
+            "name": "monsterId",
+            "type": "uint64"
+          },
+          {
+            "name": "remainingHitPoints",
+            "type": "uint32"
+          },
+          {
+            "name": "rulesetVersion",
+            "type": "uint16"
+          },
+          {
+            "name": "combatOutcome",
+            "type": "uint8"
+          }
+        ]
+      },
+      "MonsterSpawned": {
+        "messageId": 29,
+        "direction": "SERVER_TO_CLIENT",
+        "reliable": true,
+        "fields": [
+          {
+            "name": "eventIdHigh",
+            "type": "uint64"
+          },
+          {
+            "name": "eventIdLow",
+            "type": "uint64"
+          },
+          {
+            "name": "battleInstanceId",
+            "type": "uint64"
+          },
+          {
+            "name": "eventStreamKind",
+            "type": "uint8"
+          },
+          {
+            "name": "eventSequence",
+            "type": "uint32"
+          },
+          {
+            "name": "monsterId",
+            "type": "uint64"
+          },
+          {
+            "name": "posXMillimeter",
+            "type": "int32"
+          },
+          {
+            "name": "posYMillimeter",
+            "type": "int32"
+          },
+          {
+            "name": "maximumHitPoints",
+            "type": "uint32"
+          },
+          {
+            "name": "rulesetVersion",
+            "type": "uint16"
+          }
+        ]
+      },
+      "CombatTerminalEvent": {
+        "messageId": 30,
+        "direction": "SERVER_TO_CLIENT",
+        "reliable": true,
+        "fields": [
+          {
+            "name": "eventIdHigh",
+            "type": "uint64"
+          },
+          {
+            "name": "eventIdLow",
+            "type": "uint64"
+          },
+          {
+            "name": "battleInstanceId",
+            "type": "uint64"
+          },
+          {
+            "name": "eventStreamKind",
+            "type": "uint8"
+          },
+          {
+            "name": "eventSequence",
+            "type": "uint32"
+          },
+          {
+            "name": "combatOutcome",
+            "type": "uint8"
+          },
+          {
+            "name": "monsterId",
+            "type": "uint64"
+          },
+          {
+            "name": "serverTick",
+            "type": "uint32"
+          },
+          {
+            "name": "rulesetVersion",
+            "type": "uint16"
+          }
+        ]
+      },
+      "MonsterStateSnapshot": {
+        "messageId": 31,
+        "direction": "SERVER_TO_CLIENT",
+        "reliable": false,
+        "fields": [
+          {
+            "name": "battleInstanceId",
+            "type": "uint64"
+          },
+          {
+            "name": "snapshotSequence",
+            "type": "uint32"
+          },
+          {
+            "name": "serverTick",
+            "type": "uint32"
+          },
+          {
+            "name": "monsterId",
+            "type": "uint64"
+          },
+          {
+            "name": "hitPoints",
+            "type": "uint32"
+          },
+          {
+            "name": "monsterState",
+            "type": "uint8"
+          }
+        ]
+      }
+    }
+  },
+  "rudpGoldenVectors": [
+    {
+      "semanticName": "AttackIntent",
+      "datagramHex": "4c4f4c32010100300000000000000001000000000000000200000003000000040000000300000003001b00203955f74a0102030405060708111213141516171800000000000000070000000000000001"
+    },
+    {
+      "semanticName": "AttackTerminalResult",
+      "datagramHex": "4c4f4c32010100300000000000000001000000000000000200000003000000050000000400000007001c0029e1ce5cdd010203040506070811121314151617180000000000000007000000000000000000010000062c000100"
+    },
+    {
+      "semanticName": "MonsterSpawned",
+      "datagramHex": "4c4f4c32010100300000000000000001000000000000000200000003000000060000000400000007001d0033173b8ec4212223242526272831323334353637380000000000000007010000000100000000000000010000000000000000000006400001"
+    },
+    {
+      "semanticName": "CombatTerminalEvent",
+      "datagramHex": "4c4f4c32010100300000000000000001000000000000000200000003000000070000000400000007001e002c7fabaa444142434445464748515253545556575800000000000000070100000002010000000000000001000002580001"
+    },
+    {
+      "semanticName": "MonsterStateSnapshot",
+      "datagramHex": "4c4f4c32010000300000000000000001000000000000000200000003000000080000000400000007001f001dce0ab87d0000000000000007000000090000025900000000000000010000000002"
+    }
+  ]
+}

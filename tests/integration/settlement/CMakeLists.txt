@@ -1,0 +1,26 @@
+add_executable(settlement_capacity_tests
+  SettlementCapacityTests.cpp)
+target_link_libraries(settlement_capacity_tests PRIVATE
+  lol_settlement
+  lol_settlement_storage)
+loot_apply_compile_policy(settlement_capacity_tests)
+add_test(NAME settlement_capacity COMMAND settlement_capacity_tests)
+
+add_executable(final_result_protocol_tests
+  FinalResultProtocolTests.cpp)
+target_compile_definitions(final_result_protocol_tests PRIVATE
+  LOOT_FINAL_RESULT_GOLDEN_PATH="${CMAKE_SOURCE_DIR}/contracts/protocol/golden/final-result-v1.json")
+target_link_libraries(final_result_protocol_tests PRIVATE
+  lol_transport_tcp)
+loot_apply_compile_policy(final_result_protocol_tests)
+add_test(NAME final_result_protocol COMMAND final_result_protocol_tests)
+
+add_executable(settlement_publisher_tests
+  SettlementPublisherTests.cpp)
+target_compile_definitions(settlement_publisher_tests PRIVATE
+  LOOT_OUTBOX_GOLDEN_DIR="${PROJECT_SOURCE_DIR}/contracts/settlement/golden")
+target_link_libraries(settlement_publisher_tests PRIVATE
+  lol_meta_adapter
+  lol_settlement_storage)
+loot_apply_compile_policy(settlement_publisher_tests)
+add_test(NAME settlement_publisher COMMAND settlement_publisher_tests)

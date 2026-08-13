@@ -1,0 +1,42 @@
+{
+  "contractVersion": "1.0.0",
+  "byteOrder": "big-endian",
+  "crc32": "IEEE",
+  "batchId": "620b39c0db2793374d8a5ef7e3441536",
+  "fixtures": [
+    {
+      "name": "valid",
+      "file": "outbox-journal-valid.hex",
+      "decodedBytes": 506,
+      "sha256": "b7d3c24f7f69873706d245caf4e7b9a7f5a9e6e4897ef6349a1104382f8ffb6b",
+      "recovery": "one-unretired-committed-batch",
+      "durableBytes": 506
+    },
+    {
+      "name": "partial",
+      "file": "outbox-journal-partial.hex",
+      "decodedBytes": 489,
+      "sha256": "f38c955d48640354e3949f6715de610691044c72d0f87d25236512c4944f8206",
+      "recovery": "incomplete-tail-quarantined-no-batch",
+      "durableBytes": 0,
+      "quarantineOffset": 0
+    },
+    {
+      "name": "corrupt",
+      "file": "outbox-journal-corrupt.hex",
+      "decodedBytes": 590,
+      "sha256": "e74a214884b76422d923ff07066ae8b44a57ac800089327058c55e4ec0e6f6d4",
+      "recovery": "valid-batch-plus-degraded-corrupt-tail",
+      "durableBytes": 506,
+      "quarantineOffset": 506
+    },
+    {
+      "name": "retired",
+      "file": "outbox-journal-retired.hex",
+      "decodedBytes": 590,
+      "sha256": "6c1aca43bf247c5b6bd31e8e71a6abc60b63cf784a5294f32efe999cba31e65b",
+      "recovery": "one-retired-committed-batch",
+      "durableBytes": 590
+    }
+  ]
+}

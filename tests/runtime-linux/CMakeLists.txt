@@ -1,0 +1,6 @@
+add_executable(runtime_linux_readiness_tests
+  RuntimeLinuxReadinessTests.cpp)
+target_link_libraries(runtime_linux_readiness_tests PRIVATE
+  lol_runtime_linux)
+loot_apply_compile_policy(runtime_linux_readiness_tests)
+add_test(NAME runtime_linux_readiness COMMAND runtime_linux_readiness_tests)

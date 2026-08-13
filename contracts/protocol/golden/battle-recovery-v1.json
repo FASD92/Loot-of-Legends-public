@@ -1,0 +1,63 @@
+{
+  "contractId": "LOL-V2-BATTLE-RECOVERY-V1",
+  "status": "Accepted",
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "byteOrder": "big-endian",
+  "tcpWire": {
+    "frame": {
+      "lengthPrefixType": "uint32",
+      "lengthValue": "payload-bytes"
+    },
+    "envelope": [
+      { "name": "protocolMajor", "type": "uint8", "value": 1 },
+      { "name": "messageId", "type": "uint32", "value": 37 }
+    ],
+    "payload": [
+      { "name": "roomId", "type": "uint64", "constraint": "nonzero" },
+      { "name": "battleInstanceId", "type": "uint64", "constraint": "nonzero" },
+      { "name": "reasonCode", "type": "uint8", "allowed": [1, 2] }
+    ]
+  },
+  "reasonCodes": {
+    "RESULT_GENERATION_FAILED": 1,
+    "SETTLEMENT_RECOVERY_PENDING": 2
+  },
+  "tcpGoldenVectors": [
+    {
+      "semanticName": "ResultGenerationFailed",
+      "frameHex": "0000001601000000250000000000000007000000000000000901"
+    },
+    {
+      "semanticName": "SettlementRecoveryPending",
+      "frameHex": "0000001601000000250000000000000007000000000000000a02"
+    }
+  ],
+  "tcpNegativeCorpus": [
+    {
+      "semanticName": "UnknownVersion",
+      "frameHex": "0000001602000000250000000000000007000000000000000901"
+    },
+    {
+      "semanticName": "UnknownReasonCode",
+      "frameHex": "0000001601000000250000000000000007000000000000000903"
+    },
+    {
+      "semanticName": "ZeroRoomId",
+      "frameHex": "0000001601000000250000000000000000000000000000000901"
+    },
+    {
+      "semanticName": "ZeroBattleInstanceId",
+      "frameHex": "0000001601000000250000000000000007000000000000000001"
+    },
+    {
+      "semanticName": "TrailingByte",
+      "frameHex": "000000170100000025000000000000000700000000000000090100"
+    },
+    {
+      "semanticName": "TruncatedPayload",
+      "frameHex": "00000016010000002500000000000000070000000000000009"
+    }
+  ]
+}

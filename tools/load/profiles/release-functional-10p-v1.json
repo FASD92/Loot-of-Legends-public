@@ -1,0 +1,21 @@
+{
+  "capacityClaimEligible": false,
+  "gateClass": "SLICE_VERIFICATION",
+  "measurementSeconds": 0,
+  "networkImpairment": {
+    "enabled": false,
+    "jitterMilliseconds": 0,
+    "lossPercent": 0,
+    "reorderPercent": 0
+  },
+  "overallDeadlineSeconds": 180,
+  "participantCount": 10,
+  "participantsPerRoom": 10,
+  "profileId": "release-functional-10p",
+  "requiredCyclesPerRoom": 2,
+  "roomCount": 1,
+  "schemaVersion": 1,
+  "seed": 20260811,
+  "version": "1.0.0",
+  "warmupSeconds": 0
+}

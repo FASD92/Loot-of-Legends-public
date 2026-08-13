@@ -1,0 +1,94 @@
+{
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "constraints": {
+    "boundsMillimeters": {
+      "minimum": -10000,
+      "maximum": 10000
+    },
+    "speedMillimetersPerSecond": 5000,
+    "integrationRateHz": 20,
+    "snapshotRateHz": 10,
+    "inputRatePerSecond": 30,
+    "inputBurst": 6,
+    "desiredAxis": {
+      "minimum": -32767,
+      "maximum": 32767
+    },
+    "maximumPlayers": 10,
+    "maximumTenPlayerDatagramBytes": 226
+  },
+  "rudpPayloads": {
+    "MoveIntent": {
+      "messageId": 25,
+      "direction": "CLIENT_TO_SERVER",
+      "flags": 0,
+      "fields": [
+        { "name": "battleInstanceId", "type": "uint64", "minimum": 1 },
+        { "name": "actionSequence", "type": "uint32" },
+        { "name": "desiredX", "type": "int16", "minimum": -32767, "maximum": 32767 },
+        { "name": "desiredY", "type": "int16", "minimum": -32767, "maximum": 32767 },
+        { "name": "inputFlags", "type": "uint16", "value": 0 }
+      ]
+    },
+    "StateSnapshot": {
+      "messageId": 26,
+      "direction": "SERVER_TO_CLIENT",
+      "flags": 0,
+      "fields": [
+        { "name": "battleInstanceId", "type": "uint64", "minimum": 1 },
+        { "name": "snapshotSequence", "type": "uint32" },
+        { "name": "serverTick", "type": "uint32" },
+        { "name": "playerCount", "type": "uint16", "minimum": 0, "maximum": 10 },
+        {
+          "name": "players",
+          "type": "repeated",
+          "countFrom": "playerCount",
+          "fields": [
+            { "name": "sessionId", "type": "uint64", "minimum": 1 },
+            { "name": "posXMillimeter", "type": "int32", "minimum": -10000, "maximum": 10000 },
+            { "name": "posYMillimeter", "type": "int32", "minimum": -10000, "maximum": 10000 }
+          ]
+        }
+      ]
+    }
+  },
+  "rudpGoldenVectors": [
+    {
+      "semanticName": "MoveIntent",
+      "values": {
+        "sessionId": 1,
+        "sessionGeneration": 2,
+        "transportEpoch": 3,
+        "sequence": 2,
+        "ack": 1,
+        "battleInstanceId": 7,
+        "actionSequence": 9,
+        "desiredX": 32767,
+        "desiredY": -32767,
+        "inputFlags": 0
+      },
+      "datagramHex": "4c4f4c3201000030000000000000000100000000000000020000000300000002000000010000000000190012b93257110000000000000007000000097fff80010000"
+    },
+    {
+      "semanticName": "StateSnapshot",
+      "values": {
+        "sessionId": 1,
+        "sessionGeneration": 2,
+        "transportEpoch": 3,
+        "sequence": 3,
+        "ack": 2,
+        "ackBits": 1,
+        "battleInstanceId": 7,
+        "snapshotSequence": 11,
+        "serverTick": 20,
+        "players": [
+          { "sessionId": 1, "posXMillimeter": 1000, "posYMillimeter": -2000 },
+          { "sessionId": 3, "posXMillimeter": -10000, "posYMillimeter": 10000 }
+        ]
+      },
+      "datagramHex": "4c4f4c32010000300000000000000001000000000000000200000003000000030000000200000001001a00321c16400f00000000000000070000000b0000001400020000000000000001000003e8fffff8300000000000000003ffffd8f000002710"
+    }
+  ]
+}
