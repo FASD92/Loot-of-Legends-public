@@ -1,0 +1,21 @@
+{
+  "capacityClaimEligible": true,
+  "gateClass": "OFFICIAL_CAPACITY",
+  "measurementSeconds": 3600,
+  "networkImpairment": {
+    "enabled": false,
+    "jitterMilliseconds": 0,
+    "lossPercent": 0,
+    "reorderPercent": 0
+  },
+  "overallDeadlineSeconds": 3840,
+  "participantCount": 10,
+  "participantsPerRoom": 10,
+  "profileId": "official-capacity",
+  "requiredCyclesPerRoom": 30,
+  "roomCount": 1,
+  "schemaVersion": 1,
+  "seed": 20260811,
+  "version": "1.0.0",
+  "warmupSeconds": 120
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "contractId": "LOL-V2-RUDP-TRANSPORT-CONFIG",
+  "status": "Accepted",
+  "version": "1.0.0",
+  "rudp": {
+    "magicHex": "4c4f4c32",
+    "protocolMajor": 1,
+    "headerBytes": 48,
+    "maximumDatagramBytes": 1200,
+    "applicationFragmentation": false,
+    "sequenceFirstValue": 1,
+    "sequenceZeroReserved": true,
+    "ackHistoryPackets": 32,
+    "crc32": "CRC-32/ISO-HDLC"
+  },
+  "binding": {
+    "capabilityBytes": 32,
+    "capabilityEntropyBits": 256,
+    "capabilityTtlMillis": 15000,
+    "capabilitySingleUse": true,
+    "transportEpoch": "random-nonzero-uint32",
+    "heartbeatIntervalMillis": 1000,
+    "confirmedPeerTimeoutMillis": 5000
+  },
+  "reliability": {
+    "initialRtoMillis": 200,
+    "backoffMultiplier": 2,
+    "maximumRtoMillis": 1000,
+    "maximumTotalTransmissions": 5,
+    "wallClockExpiryMillis": 5000,
+    "queueTotalEntries": 256,
+    "queueApplicationEntryLimit": 224,
+    "queueControlReserveEntries": 32,
+    "queueTotalBytes": 262144
+  },
+  "movement": {
+    "boundsMillimeters": {
+      "minimum": -10000,
+      "maximum": 10000
+    },
+    "speedMillimetersPerSecond": 5000,
+    "integrationRateHz": 20,
+    "integrationTickMillis": 50,
+    "snapshotRateHz": 10,
+    "snapshotIntervalMillis": 100,
+    "inputRatePerSecond": 30,
+    "inputBurst": 6,
+    "minimumPlayers": 2,
+    "maximumPlayers": 10
+  }
+}

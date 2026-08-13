@@ -1,0 +1,8 @@
+{
+  "name": "LootOfLegends.Session",
+  "rootNamespace": "LootOfLegends.Session",
+  "references": [
+    "LootOfLegends.Protocol",
+    "LootOfLegends.Transport"
+  ]
+}

@@ -1,0 +1,211 @@
+{
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "releaseDispatch": {
+    "HostStartRequest": "RESERVED_DISABLED_UNTIL_SLICE_3"
+  },
+  "roomResultCodes": {
+    "OK": 0,
+    "INVALID_ARGUMENT": 1,
+    "ALREADY_IN_ROOM": 2,
+    "ROOM_NOT_FOUND": 3,
+    "ROOM_CLOSED": 4,
+    "ROOM_FULL": 5,
+    "NOT_IN_ROOM": 6,
+    "NOT_HOST": 7,
+    "NOT_ENOUGH_PLAYERS": 8,
+    "NOT_ALL_READY": 9,
+    "INVALID_TARGET": 10,
+    "ROOM_OVERLOADED": 11,
+    "STALE_SESSION": 12
+  },
+  "constraints": {
+    "roomCapacity": { "minimum": 2, "maximum": 10 },
+    "roomTitle": {
+      "encoding": "utf8",
+      "minimumBytes": 1,
+      "maximumBytes": 48,
+      "asciiTrimBeforeValidation": true,
+      "rejectControlAndNul": true
+    },
+    "ready": { "wireType": "uint8", "values": [0, 1] }
+  },
+  "tcpWire": {
+    "byteOrder": "big-endian",
+    "frame": {
+      "lengthPrefixType": "uint32",
+      "lengthValue": "payload-bytes"
+    },
+    "envelope": [
+      { "name": "protocolMajor", "type": "uint8", "value": 1 },
+      { "name": "messageId", "type": "uint32" }
+    ],
+    "structures": {
+      "RoomSummary": {
+        "fields": [
+          { "name": "roomId", "type": "uint64", "minimum": 1 },
+          { "name": "titleLength", "type": "uint8", "minimum": 1, "maximum": 48 },
+          { "name": "title", "type": "utf8", "lengthFrom": "titleLength" },
+          { "name": "memberCount", "type": "uint8", "minimum": 1, "maximum": 10 },
+          { "name": "capacity", "type": "uint8", "minimum": 2, "maximum": 10 }
+        ]
+      },
+      "RoomMember": {
+        "fields": [
+          { "name": "sessionId", "type": "uint64", "minimum": 1 },
+          { "name": "sessionGeneration", "type": "uint64", "minimum": 1 },
+          { "name": "nicknameLength", "type": "uint16", "minimum": 1 },
+          { "name": "nickname", "type": "utf8", "lengthFrom": "nicknameLength" },
+          { "name": "ready", "type": "uint8", "values": [0, 1] }
+        ]
+      }
+    },
+    "messages": {
+      "LobbyEntrySnapshot": {
+        "messageId": 5,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "sessionId", "type": "uint64", "minimum": 1 },
+          { "name": "sessionGeneration", "type": "uint64", "minimum": 1 },
+          { "name": "nicknameLength", "type": "uint16", "minimum": 1 },
+          { "name": "nickname", "type": "utf8", "lengthFrom": "nicknameLength" },
+          { "name": "roomCount", "type": "uint16" },
+          { "name": "rooms", "type": "repeated", "countFrom": "roomCount", "element": "RoomSummary" }
+        ]
+      },
+      "LobbyRoomListUpdate": {
+        "messageId": 6,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "roomCount", "type": "uint16" },
+          { "name": "rooms", "type": "repeated", "countFrom": "roomCount", "element": "RoomSummary" }
+        ]
+      },
+      "CreateRoom": {
+        "messageId": 7,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "titleLength", "type": "uint8", "minimum": 1, "maximum": 48 },
+          { "name": "title", "type": "utf8", "lengthFrom": "titleLength" },
+          { "name": "capacity", "type": "uint8", "minimum": 2, "maximum": 10 }
+        ]
+      },
+      "JoinRoom": {
+        "messageId": 8,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "roomId", "type": "uint64", "minimum": 1 }
+        ]
+      },
+      "LeaveRoom": {
+        "messageId": 9,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 }
+        ]
+      },
+      "SetReady": {
+        "messageId": 10,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "ready", "type": "uint8", "values": [0, 1] }
+        ]
+      },
+      "KickRoomMember": {
+        "messageId": 11,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "targetSessionId", "type": "uint64", "minimum": 1 },
+          { "name": "targetSessionGeneration", "type": "uint64", "minimum": 1 }
+        ]
+      },
+      "RoomCommandResponse": {
+        "messageId": 12,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "resultCode", "type": "uint16", "enum": "roomResultCodes" }
+        ]
+      },
+      "RoomDetailProjection": {
+        "messageId": 13,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "roomId", "type": "uint64", "minimum": 1 },
+          { "name": "titleLength", "type": "uint8", "minimum": 1, "maximum": 48 },
+          { "name": "title", "type": "utf8", "lengthFrom": "titleLength" },
+          { "name": "capacity", "type": "uint8", "minimum": 2, "maximum": 10 },
+          { "name": "hostSessionId", "type": "uint64", "minimum": 1 },
+          { "name": "hostSessionGeneration", "type": "uint64", "minimum": 1 },
+          { "name": "memberCount", "type": "uint8", "minimum": 1, "maximum": 10 },
+          { "name": "members", "type": "repeated", "countFrom": "memberCount", "element": "RoomMember" }
+        ]
+      },
+      "HostStartRequest": {
+        "messageId": 14,
+        "direction": "CLIENT_TO_SERVER",
+        "releaseDispatch": "RESERVED_DISABLED_UNTIL_SLICE_3",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 }
+        ]
+      }
+    }
+  },
+  "tcpGoldenVectors": [
+    {
+      "semanticName": "LobbyEntrySnapshot",
+      "values": { "sessionId": 1, "sessionGeneration": 2, "nickname": "neo", "roomId": 7, "title": "room", "memberCount": 1, "capacity": 2 },
+      "frameHex": "0000002b01000000050000000000000001000000000000000200036e656f0001000000000000000704726f6f6d0102"
+    },
+    {
+      "semanticName": "LobbyRoomListUpdate",
+      "values": { "roomId": 7, "title": "room", "memberCount": 1, "capacity": 2 },
+      "frameHex": "0000001601000000060001000000000000000704726f6f6d0102"
+    },
+    {
+      "semanticName": "CreateRoom",
+      "values": { "requestId": 1, "title": "room", "capacity": 2 },
+      "frameHex": "000000130100000007000000000000000104726f6f6d02"
+    },
+    {
+      "semanticName": "JoinRoom",
+      "values": { "requestId": 1, "roomId": 7 },
+      "frameHex": "00000015010000000800000000000000010000000000000007"
+    },
+    {
+      "semanticName": "LeaveRoom",
+      "values": { "requestId": 1 },
+      "frameHex": "0000000d01000000090000000000000001"
+    },
+    {
+      "semanticName": "SetReady",
+      "values": { "requestId": 1, "ready": true },
+      "frameHex": "0000000e010000000a000000000000000101"
+    },
+    {
+      "semanticName": "KickRoomMember",
+      "values": { "requestId": 1, "targetSessionId": 2, "targetSessionGeneration": 3 },
+      "frameHex": "0000001d010000000b000000000000000100000000000000020000000000000003"
+    },
+    {
+      "semanticName": "RoomCommandResponse",
+      "values": { "requestId": 1, "resultCode": "OK" },
+      "frameHex": "0000000f010000000c00000000000000010000"
+    },
+    {
+      "semanticName": "RoomDetailProjection",
+      "values": { "roomId": 7, "title": "room", "capacity": 2, "hostSessionId": 1, "hostSessionGeneration": 2, "memberSessionId": 1, "memberSessionGeneration": 2, "nickname": "neo", "ready": false },
+      "frameHex": "0000003a010000000d000000000000000704726f6f6d0200000000000000010000000000000002010000000000000001000000000000000200036e656f00"
+    },
+    {
+      "semanticName": "HostStartRequest",
+      "values": { "requestId": 1, "releaseDispatch": "RESERVED_DISABLED_UNTIL_SLICE_3" },
+      "frameHex": "0000000d010000000e0000000000000001"
+    }
+  ]
+}

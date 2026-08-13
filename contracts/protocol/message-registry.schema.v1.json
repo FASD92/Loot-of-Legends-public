@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FASD92/Loot-of-Legends-public/contracts/protocol/message-registry.schema.v1.json",
+  "title": "Loot of Legends V2 Game Message Registry v1",
+  "description": "Schema for the versioned canonical public message registry. Exact messages are added by approved Slice Contracts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contractId",
+    "status",
+    "version",
+    "messages"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "contractId": {
+      "const": "LOL-V2-PROTOCOL-MESSAGE-REGISTRY"
+    },
+    "status": {
+      "enum": [
+        "Draft",
+        "Accepted",
+        "Superseded"
+      ]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/message"
+      },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semanticName",
+        "messageId",
+        "direction",
+        "canonicalChannel",
+        "deliveryClass",
+        "ownerModule",
+        "lifecycleScope",
+        "requiresRequestId",
+        "requiresCommandId",
+        "requiresEventId",
+        "schemaVersion",
+        "releaseSince"
+      ],
+      "properties": {
+        "semanticName": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*$"
+        },
+        "messageId": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "direction": {
+          "enum": [
+            "CLIENT_TO_SERVER",
+            "SERVER_TO_CLIENT"
+          ]
+        },
+        "canonicalChannel": {
+          "enum": [
+            "HTTPS",
+            "TCP",
+            "RUDP_UNRELIABLE",
+            "RUDP_RELIABLE"
+          ]
+        },
+        "deliveryClass": {
+          "enum": [
+            "HTTPS_REQUEST_RESPONSE",
+            "TCP_CONTROL",
+            "UNRELIABLE_SEQUENCED",
+            "RELIABLE_IDEMPOTENT_COMMAND",
+            "RELIABLE_GAMEPLAY_EVENT",
+            "TRANSPORT_CONTROL"
+          ]
+        },
+        "ownerModule": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "lifecycleScope": {
+          "enum": [
+            "SESSION",
+            "LOBBY",
+            "ROOM",
+            "BATTLE",
+            "SETTLEMENT",
+            "TRANSPORT"
+          ]
+        },
+        "requiresRequestId": {
+          "type": "boolean"
+        },
+        "requiresCommandId": {
+          "type": "boolean"
+        },
+        "requiresEventId": {
+          "type": "boolean"
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "releaseSince": {
+          "type": "string",
+          "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+        }
+      }
+    }
+  }
+}

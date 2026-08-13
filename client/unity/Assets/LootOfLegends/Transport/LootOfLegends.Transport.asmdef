@@ -1,0 +1,8 @@
+{
+  "name": "LootOfLegends.Transport",
+  "rootNamespace": "LootOfLegends.Transport",
+  "references": [
+    "LootOfLegends.Protocol"
+  ],
+  "noEngineReferences": true
+}

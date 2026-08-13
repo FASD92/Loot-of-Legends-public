@@ -1,0 +1,6 @@
+{
+  "targets": {
+    "lol_runtime": [],
+    "lol_game_server": ["lol_runtime"]
+  }
+}

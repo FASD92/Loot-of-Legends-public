@@ -1,0 +1,10 @@
+{
+  "name": "LootOfLegends.Presentation",
+  "rootNamespace": "LootOfLegends.Presentation",
+  "references": [
+    "LootOfLegends.Battle",
+    "LootOfLegends.Session",
+    "LootOfLegends.LobbyRoom",
+    "LootOfLegends.Collection"
+  ]
+}

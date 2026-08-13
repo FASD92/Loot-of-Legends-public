@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "contract_id": "ARCH-TARGET-GRAPH-001",
+  "status": "Accepted",
+  "version": "1.0.0",
+  "first_party_target_prefix": "lol_",
+  "activation_policy": "A planned target may exist in CMake only after it has first-party source and a real consumer or composition role.",
+  "toolchain": {
+    "cxx_standard": 20,
+    "cxx_extensions": false,
+    "official_linux": "ubuntu-24.04",
+    "primary_compiler": "gcc-13",
+    "secondary_compiler": "clang-18",
+    "cmake_minimum": "3.28",
+    "generator": "Ninja"
+  },
+  "planned_targets": [
+    "lol_shared_kernel",
+    "lol_session",
+    "lol_lobby_room",
+    "lol_battle",
+    "lol_settlement",
+    "lol_game_flow",
+    "lol_runtime",
+    "lol_runtime_linux",
+    "lol_transport_tcp",
+    "lol_transport_rudp",
+    "lol_meta_adapter",
+    "lol_settlement_storage",
+    "lol_observability",
+    "lol_game_server"
+  ],
+  "allowed_direct_dependencies": {
+    "lol_shared_kernel": [],
+    "lol_session": [
+      "lol_shared_kernel"
+    ],
+    "lol_lobby_room": [
+      "lol_shared_kernel"
+    ],
+    "lol_battle": [
+      "lol_shared_kernel"
+    ],
+    "lol_settlement": [
+      "lol_shared_kernel"
+    ],
+    "lol_game_flow": [
+      "lol_shared_kernel",
+      "lol_session",
+      "lol_lobby_room",
+      "lol_battle",
+      "lol_settlement",
+      "lol_runtime"
+    ],
+    "lol_runtime": [],
+    "lol_runtime_linux": [
+      "lol_runtime"
+    ],
+    "lol_transport_tcp": [
+      "lol_session",
+      "lol_game_flow",
+      "lol_runtime"
+    ],
+    "lol_transport_rudp": [
+      "lol_session",
+      "lol_game_flow",
+      "lol_runtime"
+    ],
+    "lol_meta_adapter": [
+      "lol_session",
+      "lol_settlement",
+      "lol_shared_kernel"
+    ],
+    "lol_settlement_storage": [
+      "lol_settlement",
+      "lol_shared_kernel"
+    ],
+    "lol_observability": [
+      "lol_shared_kernel",
+      "lol_session",
+      "lol_lobby_room",
+      "lol_battle",
+      "lol_settlement",
+      "lol_game_flow",
+      "lol_runtime"
+    ],
+    "lol_game_server": [
+      "lol_shared_kernel",
+      "lol_session",
+      "lol_lobby_room",
+      "lol_battle",
+      "lol_settlement",
+      "lol_game_flow",
+      "lol_runtime",
+      "lol_runtime_linux",
+      "lol_transport_tcp",
+      "lol_transport_rudp",
+      "lol_meta_adapter",
+      "lol_settlement_storage",
+      "lol_observability"
+    ]
+  },
+  "forbidden_edge_examples": [
+    [
+      "lol_battle",
+      "lol_lobby_room"
+    ],
+    [
+      "lol_battle",
+      "lol_settlement"
+    ],
+    [
+      "lol_lobby_room",
+      "lol_battle"
+    ],
+    [
+      "lol_session",
+      "lol_lobby_room"
+    ],
+    [
+      "lol_session",
+      "lol_battle"
+    ],
+    [
+      "lol_shared_kernel",
+      "lol_runtime"
+    ],
+    [
+      "lol_meta_adapter",
+      "lol_transport_tcp"
+    ]
+  ],
+  "source_boundary": {
+    "public_include_pattern": "<target-root>/include/lol/<module>/...",
+    "private_source_pattern": "<target-root>/src/...",
+    "forbid_cross_module_src_include": true,
+    "forbid_parent_path_boundary_escape": true
+  }
+}

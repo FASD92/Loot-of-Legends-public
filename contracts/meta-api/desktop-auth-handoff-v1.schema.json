@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loot-of-legends.invalid/contracts/meta-api/desktop-auth-handoff-v1.schema.json",
+  "title": "Loot of Legends V2 Desktop Auth Handoff HTTP Contract",
+  "status": "Accepted",
+  "version": "1.0.0",
+  "provider": {
+    "name": "GOOGLE_OIDC",
+    "adapterOwner": "META_SERVER",
+    "browser": "SYSTEM_EXTERNAL_BROWSER",
+    "callbackOwner": "META_SERVER_HTTPS",
+    "callbackPath": "/v1/identity/google/callback",
+    "scopes": ["openid", "email"],
+    "identityFields": ["issuer", "subject"]
+  },
+  "pkcePolicy": {
+    "method": "S256",
+    "providerAuthorizationCode": true,
+    "handoffExchange": true,
+    "minimumVerifierLength": 43,
+    "maximumVerifierLength": 128
+  },
+  "loopbackPolicy": {
+    "scheme": "http",
+    "host": "127.0.0.1",
+    "minimumPort": 49152,
+    "maximumPort": 65535,
+    "path": "/callback",
+    "queryAndFragmentInRegistration": false
+  },
+  "handoffPolicy": {
+    "entropyBytes": 32,
+    "encoding": "base64url-without-padding",
+    "ttlSeconds": 120,
+    "singleUse": true,
+    "stateRequired": true,
+    "storesRawCode": false
+  },
+  "metaSessionPolicy": {
+    "entropyBytes": 32,
+    "encoding": "base64url-without-padding",
+    "ttlSeconds": 3600,
+    "authenticationHeader": "Authorization: Bearer <meta-session>",
+    "clientStorage": "MEMORY_ONLY"
+  },
+  "endpoints": {
+    "start": {
+      "method": "POST",
+      "path": "/api/v1/desktop-auth/attempts",
+      "authentication": "NONE",
+      "requestSchemaRef": "#/$defs/startRequest",
+      "responses": {
+        "201": { "schemaRef": "#/$defs/startResponse" },
+        "400": { "code": "INVALID", "schemaRef": "#/$defs/error" },
+        "503": { "code": "DEPENDENCY_UNAVAILABLE", "schemaRef": "#/$defs/error" }
+      }
+    },
+    "providerCallback": {
+      "method": "GET",
+      "path": "/v1/identity/google/callback",
+      "authentication": "PROVIDER_STATE",
+      "query": ["code", "state"],
+      "responses": {
+        "302": { "location": "http://127.0.0.1:<high-port>/callback?code=<handoff>&state=<client-state>" },
+        "400": { "code": "INVALID", "schemaRef": "#/$defs/error" },
+        "410": { "code": "EXPIRED", "schemaRef": "#/$defs/error" },
+        "502": { "code": "PROVIDER_REJECTED", "schemaRef": "#/$defs/error" }
+      }
+    },
+    "exchange": {
+      "method": "POST",
+      "path": "/api/v1/desktop-auth/exchanges",
+      "authentication": "ONE_TIME_HANDOFF",
+      "requestSchemaRef": "#/$defs/exchangeRequest",
+      "responses": {
+        "200": { "schemaRef": "#/$defs/metaSession" },
+        "400": { "code": "INVALID", "schemaRef": "#/$defs/error" },
+        "409": { "code": "ALREADY_USED", "schemaRef": "#/$defs/error" },
+        "410": { "code": "EXPIRED", "schemaRef": "#/$defs/error" },
+        "422": { "code": "STATE_OR_PKCE_MISMATCH", "schemaRef": "#/$defs/error" },
+        "503": { "code": "DEPENDENCY_UNAVAILABLE", "schemaRef": "#/$defs/error" }
+      }
+    }
+  },
+  "$defs": {
+    "state": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._~-]+$"
+    },
+    "codeChallenge": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "codeVerifier": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._~-]+$"
+    },
+    "opaqueCode": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "loopbackRedirectUri": {
+      "type": "string",
+      "pattern": "^http://127\\.0\\.0\\.1:(4915[2-9]|491[6-9][0-9]|49[2-9][0-9]{2}|5[0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])/callback$"
+    },
+    "startRequest": {
+      "type": "object",
+      "required": ["state", "codeChallenge", "loopbackRedirectUri"],
+      "properties": {
+        "state": { "$ref": "#/$defs/state" },
+        "codeChallenge": { "$ref": "#/$defs/codeChallenge" },
+        "loopbackRedirectUri": { "$ref": "#/$defs/loopbackRedirectUri" }
+      },
+      "additionalProperties": false
+    },
+    "startResponse": {
+      "type": "object",
+      "required": ["authorizationUrl", "expiresAt"],
+      "properties": {
+        "authorizationUrl": { "type": "string", "format": "uri" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "exchangeRequest": {
+      "type": "object",
+      "required": ["handoffCode", "state", "codeVerifier"],
+      "properties": {
+        "handoffCode": { "$ref": "#/$defs/opaqueCode" },
+        "state": { "$ref": "#/$defs/state" },
+        "codeVerifier": { "$ref": "#/$defs/codeVerifier" }
+      },
+      "additionalProperties": false
+    },
+    "metaSession": {
+      "type": "object",
+      "required": ["metaSession", "expiresAt"],
+      "properties": {
+        "metaSession": { "$ref": "#/$defs/opaqueCode" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID",
+            "ALREADY_USED",
+            "EXPIRED",
+            "STATE_OR_PKCE_MISMATCH",
+            "PROVIDER_REJECTED",
+            "DEPENDENCY_UNAVAILABLE"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

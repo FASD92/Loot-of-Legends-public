@@ -1,0 +1,16 @@
+{
+  "name": "LootOfLegends.Tests.PlayMode",
+  "rootNamespace": "LootOfLegends.Tests.PlayMode",
+  "references": [
+    "LootOfLegends.Protocol",
+    "LootOfLegends.Transport",
+    "LootOfLegends.Battle",
+    "LootOfLegends.LobbyRoom",
+    "LootOfLegends.Collection",
+    "LootOfLegends.Session",
+    "LootOfLegends.Presentation"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

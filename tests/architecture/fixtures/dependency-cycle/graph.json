@@ -1,0 +1,6 @@
+{
+  "targets": {
+    "lol_battle": ["lol_settlement"],
+    "lol_settlement": ["lol_battle"]
+  }
+}

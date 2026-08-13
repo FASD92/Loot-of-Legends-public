@@ -1,0 +1,12 @@
+{
+  "name": "LootOfLegends.Bootstrap",
+  "rootNamespace": "LootOfLegends.Bootstrap",
+  "references": [
+    "LootOfLegends.Transport",
+    "LootOfLegends.Session",
+    "LootOfLegends.LobbyRoom",
+    "LootOfLegends.Battle",
+    "LootOfLegends.Collection",
+    "LootOfLegends.Presentation"
+  ]
+}

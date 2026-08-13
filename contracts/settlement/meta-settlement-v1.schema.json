@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loot-of-legends.invalid/contracts/settlement/meta-settlement-v1.schema.json",
+  "title": "Loot of Legends V2 Meta Settlement HTTP Contract",
+  "status": "Accepted",
+  "version": "1.0.0",
+  "canonicalSource": "contracts/settlement/settlement-intent-v1.md@1.0.1",
+  "acceptance": {
+    "new": "AcceptedPending",
+    "sameIdSameHash": "existing AcceptedPending or Applied",
+    "sameIdDifferentHash": "Conflict",
+    "persistentAuthority": "MySQL"
+  },
+  "endpoints": {
+    "accept": {
+      "method": "POST",
+      "path": "/internal/v1/settlements",
+      "authentication": "SERVICE_BEARER",
+      "requestSchemaRef": "#/$defs/submission",
+      "responses": {
+        "200": { "schemaRef": "#/$defs/settlement" },
+        "400": { "code": "INVALID", "schemaRef": "#/$defs/error" },
+        "401": { "code": "UNAUTHORIZED", "schemaRef": "#/$defs/error" },
+        "409": { "code": "CONFLICT", "schemaRef": "#/$defs/error" },
+        "503": { "code": "DEPENDENCY_UNAVAILABLE", "schemaRef": "#/$defs/error" }
+      }
+    },
+    "status": {
+      "method": "GET",
+      "path": "/internal/v1/settlements/{settlementId}",
+      "authentication": "SERVICE_BEARER",
+      "responses": {
+        "200": { "schemaRef": "#/$defs/settlement" },
+        "400": { "code": "INVALID", "schemaRef": "#/$defs/error" },
+        "401": { "code": "UNAUTHORIZED", "schemaRef": "#/$defs/error" },
+        "404": { "code": "NOT_FOUND", "schemaRef": "#/$defs/error" },
+        "503": { "code": "DEPENDENCY_UNAVAILABLE", "schemaRef": "#/$defs/error" }
+      }
+    }
+  },
+  "$defs": {
+    "settlementId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "payloadHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "canonicalPayload": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "minLength": 132,
+      "maxLength": 1398212
+    },
+    "submission": {
+      "type": "object",
+      "required": ["settlementId", "payloadHash", "canonicalPayload"],
+      "properties": {
+        "settlementId": { "$ref": "#/$defs/settlementId" },
+        "payloadHash": { "$ref": "#/$defs/payloadHash" },
+        "canonicalPayload": { "$ref": "#/$defs/canonicalPayload" }
+      },
+      "additionalProperties": false
+    },
+    "settlement": {
+      "type": "object",
+      "required": ["settlementId", "status"],
+      "properties": {
+        "settlementId": { "$ref": "#/$defs/settlementId" },
+        "status": {
+          "type": "string",
+          "enum": ["AcceptedPending", "Applied"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["INVALID", "UNAUTHORIZED", "CONFLICT", "NOT_FOUND", "DEPENDENCY_UNAVAILABLE"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

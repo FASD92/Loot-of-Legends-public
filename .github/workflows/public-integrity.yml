@@ -1,0 +1,80 @@
+name: Public portfolio integrity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  claims:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Test claim verifier
+        run: python3 -m unittest scripts/public/test_verify_portfolio_claims.py -v
+
+      - name: Verify tracked public claims
+        run: python3 scripts/public/verify_portfolio_claims.py
+
+  cpp-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install C++ dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes g++-13 libcurl4-openssl-dev libssl-dev ninja-build openssl
+
+      - name: Configure and verify architecture
+        run: |
+          cmake --preset ci-gcc-debug
+          python3 -m unittest discover -s scripts/architecture/tests -p 'test_*.py' -v
+          python3 scripts/architecture/check_architecture.py \
+            --source-root . \
+            --build-dir build/ci-gcc-debug \
+            --contract contracts/architecture/target-graph.v1.json \
+            --report build/ci-gcc-debug/architecture-report.json
+
+      - name: Build and test
+        run: |
+          cmake --build --preset ci-gcc-debug
+          ctest --preset ci-gcc-debug --output-on-failure
+
+  load-harness:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run load harness tests
+        run: python3 -m unittest discover -s tools/load/tests -p 'test_*.py' -v
+
+  meta-settlement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Java 21
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openjdk-21-jdk
+          echo "JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64" >> "$GITHUB_ENV"
+          echo "/usr/lib/jvm/java-21-openjdk-amd64/bin" >> "$GITHUB_PATH"
+
+      - name: Run locked Meta checks
+        working-directory: meta-server
+        run: ./gradlew --no-daemon --dependency-verification strict clean check

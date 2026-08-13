@@ -1,85 +1,45 @@
-# ===== macOS =====
-.DS_Store
-Icon?
-Icon?.meta
-
-# ===== Logs =====
-*.log
-
-# IDE
-.idea/
-
-# ===== Unity client generated artifacts =====
-client/unity_thin_client/[Ll]ibrary/
-client/unity_thin_client/[Tt]emp/
-client/unity_thin_client/[Oo]bj/
-client/unity_thin_client/[Bb]uild/
-client/unity_thin_client/[Bb]uilds/
-client/unity_thin_client/[Ll]ogs/
-client/unity_thin_client/[Uu]ser[Ss]ettings/
-client/unity_thin_client/MemoryCaptures/
-client/unity_thin_client/Recordings/
-client/unity_thin_client/.vs/
-client/unity_thin_client/.vscode/
-client/unity_thin_client/*.csproj
-client/unity_thin_client/*.sln
-client/unity_thin_client/*.slnx
-client/unity_thin_client/*.suo
-client/unity_thin_client/*.user
-client/unity_thin_client/*.userprefs
-client/unity_thin_client/*.pidb
-client/unity_thin_client/*.booproj
-
-client/unity_player_client/[Ll]ibrary/
-client/unity_player_client/[Tt]emp/
-client/unity_player_client/[Oo]bj/
-client/unity_player_client/[Bb]uild/
-client/unity_player_client/[Bb]uilds/
-client/unity_player_client/[Ll]ogs/
-client/unity_player_client/[Uu]ser[Ss]ettings/
-client/unity_player_client/MemoryCaptures/
-client/unity_player_client/Recordings/
-client/unity_player_client/.vs/
-client/unity_player_client/.vscode/
-client/unity_player_client/*.csproj
-client/unity_player_client/*.sln
-client/unity_player_client/*.slnx
-client/unity_player_client/*.suo
-client/unity_player_client/*.user
-client/unity_player_client/*.userprefs
-client/unity_player_client/*.pidb
-client/unity_player_client/*.booproj
-client/unity_player_client/*.app/
-client/unity_player_client/*_BurstDebugInformation_DoNotShip/
-
-# Public repository excludes
-docs/*
-!docs/
-!docs/architecture.md
-!docs/protocol.md
-!docs/room_actor.md
-!docs/test_matrix.md
-!docs/roadmap.md
-!docs/media/
-!docs/media/*.png
-!docs/media/*.svg
-experimental/
-AGENTS.md
-
-# ===== CMake / Build artifacts =====
+# Build outputs
 build/
-build-linux-epoll/
 cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
-Testing/
-CTestTestfile.cmake
-cmake_install.cmake
-install_manifest.txt
-compile_commands.json
-*.ninja
-.ninja_*
+out/
+.local-ci/
 
-# ===== Gradle / Java build artifacts =====
-meta-server/.gradle/
-meta-server/build/
+# Generated foundation packages
+dist/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Java / Gradle
+.gradle/
+**/build/
+
+# Unity generated directories
+client/unity/[Ll]ibrary/
+client/unity/[Tt]emp/
+client/unity/[Oo]bj/
+client/unity/[Bb]uild/
+client/unity/[Bb]uilds/
+client/unity/[Ll]ogs/
+client/unity/[Uu]ser[Ss]ettings/
+client/unity/MemoryCaptures/
+client/unity/Recordings/
+client/unity/*.csproj
+client/unity/*.sln
+
+# Local secrets and runtime state
+.env
+.env.*
+!.env.example
+*.log
+*.pid
+*.pcap
+artifacts/
+.ci-artifacts/

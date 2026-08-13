@@ -1,0 +1,14 @@
+#pragma once
+
+namespace lol::build {
+
+inline constexpr auto kProduct = "loot-of-legends-v2-game-server";
+inline constexpr auto kProductVersion = "@LOOT_PRODUCT_VERSION@";
+inline constexpr auto kSourceRevision = "@LOOT_SOURCE_REVISION@";
+inline constexpr bool kSourceDirty = @LOOT_SOURCE_DIRTY@;
+inline constexpr int kCxxStandard = 20;
+inline constexpr auto kCompilerId = "@LOOT_COMPILER_ID@";
+inline constexpr auto kCompilerVersion = "@LOOT_COMPILER_VERSION@";
+inline constexpr auto kCMakeVersion = "@LOOT_CMAKE_VERSION@";
+
+} // namespace lol::build

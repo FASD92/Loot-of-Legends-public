@@ -1,0 +1,126 @@
+{
+  "contractId": "LOL-V2-LOOT-V1",
+  "status": "Accepted",
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "byteOrder": "big-endian",
+  "releaseDispatch": {
+    "ClaimLootIntent": "ENABLED_IN_SLICE_6",
+    "ClaimLootTerminalResult": "ENABLED_IN_SLICE_6",
+    "DropSpawned": "ENABLED_IN_SLICE_6",
+    "DropStateSnapshot": "ENABLED_IN_SLICE_6",
+    "FinalResult": "DISABLED_UNTIL_SLICE_7_DURABILITY"
+  },
+  "constraints": {
+    "maximumDrops": 10,
+    "minimumPositionMillimeters": -10000,
+    "maximumPositionMillimeters": 10000,
+    "noOwnerSessionId": 0
+  },
+  "rudpWire": {
+    "ClaimLootIntent": {
+      "messageId": 32,
+      "direction": "CLIENT_TO_SERVER",
+      "flag": "RELIABLE",
+      "payload": [
+        {"name": "commandIdHigh", "type": "uint64"},
+        {"name": "commandIdLow", "type": "uint64"},
+        {"name": "battleInstanceId", "type": "uint64"},
+        {"name": "dropId", "type": "uint64"}
+      ]
+    },
+    "ClaimLootTerminalResult": {
+      "messageId": 33,
+      "direction": "SERVER_TO_CLIENT",
+      "flag": "RELIABLE",
+      "payload": [
+        {"name": "commandIdHigh", "type": "uint64"},
+        {"name": "commandIdLow", "type": "uint64"},
+        {"name": "battleInstanceId", "type": "uint64"},
+        {"name": "dropId", "type": "uint64"},
+        {"name": "resultCode", "type": "uint16"}
+      ]
+    },
+    "DropSpawned": {
+      "messageId": 34,
+      "direction": "SERVER_TO_CLIENT",
+      "flag": "RELIABLE",
+      "payload": [
+        {"name": "eventIdHigh", "type": "uint64"},
+        {"name": "eventIdLow", "type": "uint64"},
+        {"name": "battleInstanceId", "type": "uint64"},
+        {"name": "eventStreamKind", "type": "uint8", "value": 2},
+        {"name": "eventSequence", "type": "uint32"},
+        {"name": "dropId", "type": "uint64"},
+        {"name": "itemId", "type": "uint64"},
+        {"name": "quantity", "type": "uint64"},
+        {"name": "positionXMillimeters", "type": "int32"},
+        {"name": "positionYMillimeters", "type": "int32"},
+        {"name": "rulesetVersion", "type": "uint16"}
+      ]
+    },
+    "DropStateSnapshot": {
+      "messageId": 35,
+      "direction": "SERVER_TO_CLIENT",
+      "flag": "UNRELIABLE",
+      "payloadPrefix": [
+        {"name": "battleInstanceId", "type": "uint64"},
+        {"name": "snapshotSequence", "type": "uint32"},
+        {"name": "resolutionState", "type": "uint8"},
+        {"name": "dropCount", "type": "uint16"}
+      ],
+      "repeatedDrop": [
+        {"name": "dropId", "type": "uint64"},
+        {"name": "itemId", "type": "uint64"},
+        {"name": "quantity", "type": "uint64"},
+        {"name": "positionXMillimeters", "type": "int32"},
+        {"name": "positionYMillimeters", "type": "int32"},
+        {"name": "state", "type": "uint8"},
+        {"name": "ownerSessionId", "type": "uint64", "zeroMeans": "none"}
+      ]
+    }
+  },
+  "resultCodes": {
+    "OK": 0,
+    "NOT_ELIGIBLE": 1,
+    "STALE_SESSION": 2,
+    "STALE_BATTLE": 3,
+    "INVALID_DROP": 4,
+    "UNKNOWN_DROP": 5,
+    "OUT_OF_RANGE": 6,
+    "ALREADY_CLAIMED": 7,
+    "OVERLOADED": 8,
+    "COMMAND_CONFLICT": 9,
+    "CATALOG_REJECTED": 10,
+    "RESOLUTION_CLOSED": 11
+  },
+  "resolutionStates": {
+    "NOT_STARTED": 0,
+    "OPEN": 1,
+    "RESOLVED": 2
+  },
+  "dropStates": {
+    "AVAILABLE": 0,
+    "CLAIMED": 1,
+    "UNCLAIMED": 2
+  },
+  "rudpGoldenVectors": [
+    {
+      "semanticName": "ClaimLootIntent",
+      "datagramHex": "4c4f4c3201010030000000000000000100000000000000020000000300000009000000080000000f00200020586215000102030405060708111213141516171800000000000000070000000000000002"
+    },
+    {
+      "semanticName": "ClaimLootTerminalResult",
+      "datagramHex": "4c4f4c320101003000000000000000010000000000000002000000030000000a000000090000001f002100221f534a2201020304050607081112131415161718000000000000000700000000000000020000"
+    },
+    {
+      "semanticName": "DropSpawned",
+      "datagramHex": "4c4f4c320101003000000000000000010000000000000002000000030000000b0000000a0000003f0022003f891fdb002122232425262728313233343536373800000000000000070200000001000000000000000100000000000000020000000000000001000003e8fffff8300001"
+    },
+    {
+      "semanticName": "DropStateSnapshot",
+      "datagramHex": "4c4f4c320100003000000000000000010000000000000002000000030000000c0000000a0000003f00230061f9d4b682000000000000000700000009010002000000000000000100000000000000020000000000000001fffffc18000007d0000000000000000000000000000000000200000000000000010000000000000001000003e8fffff830010000000000000001"
+    }
+  ]
+}

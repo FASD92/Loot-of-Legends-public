@@ -1,0 +1,24 @@
+add_executable(journal_recovery_tests
+  JournalRecoveryTests.cpp)
+target_link_libraries(journal_recovery_tests PRIVATE lol_settlement_storage)
+target_compile_definitions(journal_recovery_tests PRIVATE
+  LOOT_OUTBOX_GOLDEN_DIR="${PROJECT_SOURCE_DIR}/contracts/settlement/golden")
+loot_apply_compile_policy(journal_recovery_tests)
+add_test(NAME journal_recovery COMMAND journal_recovery_tests)
+
+add_executable(journal_component_tests
+  JournalComponentTests.cpp)
+target_link_libraries(journal_component_tests PRIVATE lol_settlement_storage)
+target_compile_definitions(journal_component_tests PRIVATE
+  LOOT_OUTBOX_GOLDEN_DIR="${PROJECT_SOURCE_DIR}/contracts/settlement/golden")
+loot_apply_compile_policy(journal_component_tests)
+add_test(NAME journal_component COMMAND journal_component_tests)
+
+add_executable(storage_worker_tests
+  StorageWorkerTests.cpp)
+target_link_libraries(storage_worker_tests PRIVATE
+  lol_settlement_storage)
+target_compile_definitions(storage_worker_tests PRIVATE
+  LOOT_OUTBOX_GOLDEN_DIR="${PROJECT_SOURCE_DIR}/contracts/settlement/golden")
+loot_apply_compile_policy(storage_worker_tests)
+add_test(NAME storage_worker COMMAND storage_worker_tests)

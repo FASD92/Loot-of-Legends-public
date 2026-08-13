@@ -1,0 +1,2 @@
+*.meta -whitespace
+ProjectSettings/*.asset -whitespace
