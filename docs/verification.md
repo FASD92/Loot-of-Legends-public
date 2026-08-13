@@ -23,7 +23,8 @@
 | Architecture contract | `python3 scripts/architecture/check_architecture.py ...` | **PASS, 0 findings** | configured CMake target graph와 source include policy |
 | C++ configure | `cmake --preset dev-debug` | PASS | build graph 생성 |
 | C++ build | `cmake --build --preset dev-debug --parallel 4` | PASS | public C++ tree compile/link |
-| C++ registered tests | `ctest --preset dev-debug --output-on-failure` | **46/46 PASS** | macOS local; Linux `epoll` runtime은 public CI가 별도 실행 |
+| C++ registered tests | `ctest --preset dev-debug --output-on-failure` | **46/46 PASS** | macOS local |
+| Linux public CI | [main workflow run](https://github.com/FASD92/Loot-of-Legends-public/actions/runs/31663426685) | **PASS** | Ubuntu CMake/build/CTest에서 Linux `epoll` 경로 실행 |
 | Load harness | `python3 -m unittest discover -s tools/load/tests -p 'test_*.py' -v` | **47/47 PASS** | runner/workload/classifier/sanitizer/package unit/contract |
 | Local boundary fixture | `python3 tools/load/run_local_fixture.py ...` | **COMPLETE** | 10명·1 Room·2 cycle, package COMPLETE; `fixtureOnly=true`, `qualificationEligible=false`, `NOT_CLASSIFIED` |
 | Fixture package | `python3 tools/load/verify_artifacts.py ...` | **COMPLETE** | missing/reason code 없음, checksum 검증 |
@@ -38,11 +39,10 @@
 | Scope | Status | Reason / consequence |
 | --- | --- | --- |
 | Unity EditMode/PlayMode | NOT RUN | Unity Editor 없음 |
-| Linux `epoll` execution | CI CONFIGURED, NOT YET OBSERVED | workflow는 Ubuntu CMake/build/CTest를 실행하지만 아직 push하지 않음 |
 | Official capacity | NOT PROVEN | qualifying public run/evidence package 없음 |
 
 CI 파일은 [public-integrity workflow](../.github/workflows/public-integrity.yml)에서 확인할 수 있다.
-Push하지 않았으므로 workflow 상태를 local PASS로 대체하지 않는다.
+GitHub run과 local 실행 결과를 서로 대체하지 않고 각각 위 표에 기록한다.
 
 ## Reproduce
 
