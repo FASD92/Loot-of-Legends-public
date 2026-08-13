@@ -15,7 +15,6 @@
 | 모든 race condition 제거 | Not provable | 현재는 per-room writer와 특정 gateway/terminal race 회귀만 증명 |
 | Java settlement의 임의 장애 전반 exactly-once | Not claimed | 현재 근거는 same-ID/hash replay, conflict, transaction rollback/apply-once 경계 |
 | Unity tests passing on this branch | Not run | matching Unity Editor 또는 public CI result 필요 |
-| Linux `epoll` runtime passing on this branch | Not yet observed | push 이후 Ubuntu workflow 결과 또는 별도 Linux 실행 필요 |
 
 ## What the public load fixture proves
 

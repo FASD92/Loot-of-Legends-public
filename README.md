@@ -64,6 +64,7 @@ Movement는 newest-only이고, attack/loot은 재정렬된 고유 command를 허
 | --- | --- | --- |
 | Architecture contract | **PASS** | CMake target graph와 module include policy, 0 findings |
 | C++ configure/build + CTest | **46/46 PASS** | tracked CTest 등록 전체의 local 실행 |
+| Linux public CI | **PASS** | Ubuntu CMake/build/CTest에서 Linux `epoll` 경로 검증 |
 | Load harness unit/contract | **47/47 PASS** | runner, workload, classifier, sanitizer, package 검증 |
 | Local boundary fixture | **COMPLETE** | 실제 game-server에 10명·1 Room·2 loot cycle; `NOT_CLASSIFIED` |
 | Meta locked Gradle check | **BUILD SUCCESSFUL** | Java 21 + MySQL/Redis Testcontainers |
