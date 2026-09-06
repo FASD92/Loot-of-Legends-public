@@ -4,6 +4,10 @@ C++ 게임 서버가 이동과 전투 및 루팅을 판정하는 멀티플레이
 
 [플레이 시연](https://www.youtube.com/watch?v=rjpUEDnBJJg)
 
+[![5인 전투에서 고가 전리품을 획득하는 장면](docs/gameplay-loot.png)](https://www.youtube.com/watch?v=rjpUEDnBJJg&t=50s)
+
+*5인 전투의 고가 전리품 획득 단계*
+
 ## 개발 사례
 
 | 사례 | 코드와 테스트 | 실행 기록 |
