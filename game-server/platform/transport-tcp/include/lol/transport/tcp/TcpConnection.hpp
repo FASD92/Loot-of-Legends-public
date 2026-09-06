@@ -46,6 +46,9 @@ struct NormalizedAuthRequest final {
   std::uint64_t requestId;
   std::uint16_t protocolMajor;
   std::string credential;
+  bool resumeRequested{false};
+  std::uint64_t previousSessionId{0};
+  std::uint64_t previousSessionGeneration{0};
 };
 
 struct DecodedPreAuthFrame final {

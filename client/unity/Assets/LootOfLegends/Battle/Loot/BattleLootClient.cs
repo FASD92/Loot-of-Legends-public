@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using LootOfLegends.Protocol;
 using LootOfLegends.Transport.Rudp;
 
 namespace LootOfLegends.Battle.Loot
@@ -89,6 +90,17 @@ namespace LootOfLegends.Battle.Loot
             State = RudpLootDropState.Available;
         }
 
+        internal BattleLootDropView(BattleResumeDropState drop)
+        {
+            DropId = drop.DropId;
+            ItemId = drop.ItemId;
+            Quantity = drop.Quantity;
+            PositionXMillimeters = drop.PositionXMillimeters;
+            PositionYMillimeters = drop.PositionYMillimeters;
+            State = (RudpLootDropState)drop.State;
+            OwnerSessionId = drop.OwnerSessionId;
+        }
+
         public ulong DropId { get; }
         public ulong ItemId { get; }
         public ulong Quantity { get; }
@@ -132,6 +144,32 @@ namespace LootOfLegends.Battle.Loot
         public RudpCommandId LastClaimCommandId { get; private set; }
         public RudpClaimLootResultCode? LastClaimResult { get; private set; }
 
+        public BattleLootDropView FindNearestAvailable(
+            int positionXMillimeters,
+            int positionYMillimeters)
+        {
+            BattleLootDropView nearest = null;
+            long nearestDistance = long.MaxValue;
+            foreach (BattleLootDropView drop in drops)
+            {
+                if (!drop.IsAvailable)
+                {
+                    continue;
+                }
+                long deltaX = (long)drop.PositionXMillimeters - positionXMillimeters;
+                long deltaY = (long)drop.PositionYMillimeters - positionYMillimeters;
+                long distance = deltaX * deltaX + deltaY * deltaY;
+                if (distance < nearestDistance ||
+                    (distance == nearestDistance &&
+                     (nearest == null || drop.DropId < nearest.DropId)))
+                {
+                    nearest = drop;
+                    nearestDistance = distance;
+                }
+            }
+            return nearest;
+        }
+
         public bool Apply(object serverMessage)
         {
             if (Thread.CurrentThread.ManagedThreadId != ownerThreadId)
@@ -154,6 +192,35 @@ namespace LootOfLegends.Battle.Loot
                 default:
                     return false;
             }
+        }
+
+        public bool ApplyResumeSnapshot(BattleResumeSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+            if (snapshot.BattleInstanceId != battleInstanceId)
+            {
+                return false;
+            }
+            drops = new ReadOnlyCollection<BattleLootDropView>(
+                snapshot.Drops
+                    .Select(drop => new BattleLootDropView(drop))
+                    .OrderBy(drop => drop.DropId)
+                    .ToList());
+            ResolutionState = snapshot.Phase == BattleResumePhase.Loot
+                ? RudpLootResolutionState.Open
+                : snapshot.Phase == BattleResumePhase.Result
+                    ? RudpLootResolutionState.Resolved
+                    : RudpLootResolutionState.NotStarted;
+            // TCP snapshotId and the fresh-generation RUDP sequence are
+            // independent ordering domains.
+            SnapshotSequence = 0;
+            LastClaimCommandId = null;
+            LastClaimResult = null;
+            hasSnapshot = false;
+            return true;
         }
 
         private bool Apply(RudpDropSpawned spawned)

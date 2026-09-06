@@ -1,5 +1,6 @@
 #pragma once
 
+#include <lol/battle/BattleAdmission.hpp>
 #include <lol/battle/CombatApi.hpp>
 #include <lol/shared/Identifiers.hpp>
 
@@ -81,8 +82,15 @@ struct RelicRuleset final {
 // Captured participant 수 N(2..10)에 대해 Rare 1개 + Common N-1개를 순서대로
 // 생성한다. 범위 밖 N은 nullopt로 거부하며 절대 clamp/fabricate하지 않는다.
 // DropId는 1부터 시작해 Battle-local로 strictly increasing하고, 위치는
-// (RoomId, BattleInstanceId, rulesetVersion)에서 유도된 결정적 PRNG로
-// arena bounds 안에 생성된다. 호출 간 상태는 없다.
+// 명시적으로 고정한 nonzero BattleSeed의 결정적 PRNG로 arena bounds 안에
+// 생성된다. 호출 간 상태는 없다.
+[[nodiscard]] std::optional<std::vector<RelicDrop>>
+generateDrops(shared::RoomId roomId, shared::BattleInstanceId battleId,
+              BattleSeed seed, std::uint16_t rulesetVersion,
+              std::uint32_t capturedCount, const RelicCatalog &catalog);
+
+// Compatibility overload for pre-continuity callers. Production Battle
+// creation always uses the explicit nonzero BattleSeed overload above.
 [[nodiscard]] std::optional<std::vector<RelicDrop>>
 generateDrops(shared::RoomId roomId, shared::BattleInstanceId battleId,
               std::uint16_t rulesetVersion, std::uint32_t capturedCount,

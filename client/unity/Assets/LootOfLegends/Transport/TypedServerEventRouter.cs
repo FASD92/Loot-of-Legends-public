@@ -44,6 +44,8 @@ namespace LootOfLegends.Transport
             new List<RoutedSink<IFinalResultInboundMessageSink>>();
         private readonly List<RoutedSink<IBattleRecoveryInboundMessageSink>> recoverySinks =
             new List<RoutedSink<IBattleRecoveryInboundMessageSink>>();
+        private readonly List<RoutedSink<IBattleResumeInboundMessageSink>> resumeSinks =
+            new List<RoutedSink<IBattleResumeInboundMessageSink>>();
         private readonly List<RoutedSink<IRudpBindCapabilitySink>> rudpBindSinks =
             new List<RoutedSink<IRudpBindCapabilitySink>>();
 
@@ -75,6 +77,11 @@ namespace LootOfLegends.Transport
         public IDisposable Subscribe(IBattleRecoveryInboundMessageSink sink)
         {
             return AddUnique(recoverySinks, sink, "Battle recovery");
+        }
+
+        public IDisposable Subscribe(IBattleResumeInboundMessageSink sink)
+        {
+            return AddUnique(resumeSinks, sink, "Battle session resume");
         }
 
         public IDisposable Subscribe(IRudpBindCapabilitySink sink)
@@ -109,6 +116,12 @@ namespace LootOfLegends.Transport
         public void Dispatch(BattleRecoveryNotice message)
         {
             DispatchSnapshot(Snapshot(recoverySinks), message, (sink, value) =>
+                sink.OnMessage(value));
+        }
+
+        public void Dispatch(BattleResumeSnapshot message)
+        {
+            DispatchSnapshot(Snapshot(resumeSinks), message, (sink, value) =>
                 sink.OnMessage(value));
         }
 

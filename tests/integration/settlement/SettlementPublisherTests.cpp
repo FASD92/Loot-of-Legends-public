@@ -245,8 +245,7 @@ bool responseLossReconcilesStatusBeforeRetirement() {
   ScriptedMeta meta;
   meta.publishResults = {MetaPublishOutcome::ResponseLost,
                          MetaPublishOutcome::Applied};
-  meta.statusResults = {MetaStatusOutcome::AcceptedPending,
-                        MetaStatusOutcome::Applied};
+  meta.statusResults = {MetaStatusOutcome::AcceptedPending};
   SettlementPublisher publisher{outbox, meta};
   auto now = std::chrono::steady_clock::time_point{};
 
@@ -256,21 +255,41 @@ bool responseLossReconcilesStatusBeforeRetirement() {
   }
   now += result.retryAfter;
   result = publisher.step(now);
-  if (result.code != PublisherStepCode::Retrying || meta.publishCalls != 1u ||
+  if (result.code != PublisherStepCode::Progress || meta.publishCalls != 1u ||
       meta.statusCalls != 1u) {
     return false;
   }
-  now += result.retryAfter;
   if (publisher.step(now).code != PublisherStepCode::Progress ||
+      meta.publishCalls != 2u || outbox.retireCalls != 0u) {
+    return false;
+  }
+  return publisher.step(now).code == PublisherStepCode::Retired &&
+         meta.statusCalls == 1u && outbox.retireCalls == 1u &&
+         outbox.compactCalls == 1u;
+}
+
+bool acceptedPendingPublishesAdvanceBatchWithoutStatusPolls() {
+  FakeOutbox outbox;
+  ScriptedMeta meta;
+  meta.publishResults = {MetaPublishOutcome::AcceptedPending,
+                         MetaPublishOutcome::AcceptedPending};
+  SettlementPublisher publisher{outbox, meta};
+  const auto now = std::chrono::steady_clock::time_point{};
+
+  if (publisher.step(now).code != PublisherStepCode::Progress ||
+      meta.publishCalls != 1u || meta.statusCalls != 0u ||
       outbox.retireCalls != 0u) {
     return false;
   }
   if (publisher.step(now).code != PublisherStepCode::Progress ||
+      meta.publishCalls != 2u || meta.statusCalls != 0u ||
       outbox.retireCalls != 0u) {
     return false;
   }
   return publisher.step(now).code == PublisherStepCode::Retired &&
-         outbox.retireCalls == 1u && outbox.compactCalls == 1u;
+         meta.publishCalls == 2u && meta.statusCalls == 0u &&
+         outbox.retireCalls == 1u && outbox.compactCalls == 1u &&
+         outbox.retired;
 }
 
 bool responseLossBeforeAcceptRepostsAfterNotFound() {
@@ -452,25 +471,34 @@ bool retirementCompactionAndRestartKeepOnlyUnretiredBatches() {
       restarted.nextUnretired().status != OutboxLoadStatus::Loaded) {
     return false;
   }
-  return restarted.retire(firstId, *first.commitSequence) ==
-             OutboxRetireResult::AlreadyRetired &&
-         restarted.retire(secondId,
-                          loadedBeforeCompaction.batch->commitSequence) ==
-             OutboxRetireResult::Retired &&
-         restarted.nextUnretired().status == OutboxLoadStatus::Empty;
+  if (restarted.retire(firstId, *first.commitSequence) !=
+          OutboxRetireResult::AlreadyRetired ||
+      restarted.retire(secondId,
+                       loadedBeforeCompaction.batch->commitSequence) !=
+          OutboxRetireResult::Retired ||
+      restarted.nextUnretired().status != OutboxLoadStatus::Empty ||
+      !restarted.compact()) {
+    return false;
+  }
+
+  SegmentJournal emptyRestarted{path};
+  const auto emptyRecovered = emptyRestarted.recoverAndRepair();
+  return emptyRecovered.has_value() && emptyRecovered->batches.empty() &&
+         emptyRecovered->lastSequence == 8u;
 }
 
 } // namespace
 
 int main() {
   return retriesWithFakeClockFrom250MillisecondsTo30Seconds() &&
-                 storageFailureIsRetryableRatherThanSilentIdle() &&
-                 responseLossReconcilesStatusBeforeRetirement() &&
-                 responseLossBeforeAcceptRepostsAfterNotFound() &&
-                 conflictNeverRetiresOrRetries() &&
-                 duplicatePublishersProduceOneEffectPerIntent() &&
-                 metaClientUsesCanonicalContractAndClassifiesFailures() &&
-                 retirementCompactionAndRestartKeepOnlyUnretiredBatches()
-             ? EXIT_SUCCESS
-             : EXIT_FAILURE;
+         storageFailureIsRetryableRatherThanSilentIdle() &&
+         responseLossReconcilesStatusBeforeRetirement() &&
+         acceptedPendingPublishesAdvanceBatchWithoutStatusPolls() &&
+         responseLossBeforeAcceptRepostsAfterNotFound() &&
+         conflictNeverRetiresOrRetries() &&
+         duplicatePublishersProduceOneEffectPerIntent() &&
+         metaClientUsesCanonicalContractAndClassifiesFailures() &&
+         retirementCompactionAndRestartKeepOnlyUnretiredBatches()
+      ? EXIT_SUCCESS
+      : EXIT_FAILURE;
 }

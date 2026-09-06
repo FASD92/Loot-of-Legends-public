@@ -7,6 +7,9 @@
 #include "RudpMovementFlow.hpp"
 #include "SessionAuthFlow.hpp"
 
+#include <lol/battle/BattleTime.hpp>
+#include <lol/battle_continuity_storage/ContinuityStorage.hpp>
+#include <lol/game_flow/BattleContinuityRecovery.hpp>
 #include <lol/meta/CurlHttpsExchange.hpp>
 #include <lol/meta/MetaClaimClient.hpp>
 #include <lol/meta/MetaSettlementClient.hpp>
@@ -18,6 +21,7 @@
 #include <lol/runtime/linux/EpollReactor.hpp>
 #include <lol/session/SessionRegistry.hpp>
 #include <lol/settlement/SettlementCapacityGate.hpp>
+#include <lol/settlement/SettlementIntent.hpp>
 #include <lol/settlement/SettlementPublisher.hpp>
 #include <lol/settlement_storage/JournalRecovery.hpp>
 #include <lol/settlement_storage/SegmentJournal.hpp>
@@ -56,6 +60,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -82,8 +87,11 @@ constexpr std::size_t kMaximumDatagramsPerTurn = 64u;
 constexpr std::size_t kApplicationQueueCapacity = 4096u;
 constexpr auto kIngressPollInterval = 10ms;
 constexpr auto kShutdownTimeout = 5s;
-constexpr auto kMovementTickInterval = 50ms;
+constexpr auto kMovementTickInterval =
+    std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::nanoseconds{battle::BattleTime::tickNanos});
 constexpr auto kRudpExpiryInterval = 250ms;
+constexpr auto kBattleReconnectGrace = 30s;
 constexpr std::uint64_t kJournalRecordOverhead = 60u;
 
 volatile std::sig_atomic_t gStopSignal = 0;
@@ -97,6 +105,8 @@ struct ServerConfig final {
   std::uint16_t tcpPort{};
   std::uint16_t udpPort{};
   std::filesystem::path journalPath;
+  std::optional<std::filesystem::path> battleContinuityRoot;
+  std::optional<std::filesystem::path> battleContinuityKeyFile;
   std::string metaClaimUrl;
   std::string metaSettlementsUrl;
   std::string metaServiceCredential;
@@ -237,7 +247,8 @@ loadConfig(const std::filesystem::path &configPath) {
   std::set<std::string, std::less<>> allowed = required;
   for (const auto *key :
        {"metrics_allocated_cpu_count", "metrics_bind_address", "metrics_port",
-        "metrics_read_credential_file", "metrics_source_identity_digest"}) {
+        "metrics_read_credential_file", "metrics_source_identity_digest",
+        "battle_continuity_root", "battle_continuity_key_file"}) {
     allowed.insert(key);
   }
 #if defined(LOOT_ENABLE_TEST_META_FIXTURE)
@@ -266,6 +277,18 @@ loadConfig(const std::filesystem::path &configPath) {
   const auto maxConnections = parseUnsigned<std::size_t>(
       values.at("max_connections"), std::size_t{65536u});
   const std::filesystem::path journalPath{values.at("journal_path")};
+  const bool continuityEnabled = values.contains("battle_continuity_root");
+  if (continuityEnabled != values.contains("battle_continuity_key_file")) {
+    return std::nullopt;
+  }
+  const auto continuityRoot =
+      continuityEnabled ? std::optional<std::filesystem::path>{values.at(
+                              "battle_continuity_root")}
+                        : std::nullopt;
+  const auto continuityKeyFile =
+      continuityEnabled ? std::optional<std::filesystem::path>{values.at(
+                              "battle_continuity_key_file")}
+                        : std::nullopt;
   auto credential = readPrivateCredential(
       std::filesystem::path{values.at("meta_service_credential_file")});
   if (values.at("metrics_enabled") != "true" &&
@@ -298,6 +321,10 @@ loadConfig(const std::filesystem::path &configPath) {
       !deadlineCapacity.has_value() || *deadlineCapacity == 0u ||
       !maxConnections.has_value() || *maxConnections == 0u ||
       !journalPath.is_absolute() || journalPath.filename().empty() ||
+      (continuityEnabled &&
+       (!continuityRoot->is_absolute() || continuityRoot->filename().empty() ||
+        !continuityKeyFile->is_absolute() ||
+        continuityKeyFile->filename().empty())) ||
       !credential.has_value() ||
       (metricsEnabled &&
        (!metricsPort.has_value() || *metricsPort == 0u ||
@@ -328,6 +355,8 @@ loadConfig(const std::filesystem::path &configPath) {
       .tcpPort = *tcpPort,
       .udpPort = *udpPort,
       .journalPath = journalPath,
+      .battleContinuityRoot = continuityRoot,
+      .battleContinuityKeyFile = continuityKeyFile,
       .metaClaimUrl = values.at("meta_claim_url"),
       .metaSettlementsUrl = values.at("meta_settlements_url"),
       .metaServiceCredential = std::move(*credential),
@@ -806,19 +835,49 @@ std::uint64_t unixTimeMilliseconds() {
           .count());
 }
 
+shared::SessionGeneration firstSessionGeneration(
+    const battle_continuity_storage::ContinuityStorage *storage) noexcept {
+  if (storage == nullptr) {
+    return shared::SessionGeneration{1U};
+  }
+  return shared::SessionGeneration{
+      (static_cast<std::uint64_t>(storage->writerRecoveryEpoch()) << 32U) |
+      1ULL};
+}
+
 class ConfiguredGameServer final {
 public:
-  ConfiguredGameServer(ServerConfig config,
-                       settlement_storage::JournalRecoveryResult recovery)
+  ConfiguredGameServer(
+      ServerConfig config, settlement_storage::JournalRecoveryResult recovery,
+      std::unique_ptr<battle_continuity_storage::ContinuityStorage>
+          continuityStorage,
+      battle_continuity_storage::ScanResult continuityScan)
       : config_(std::move(config)), recovery_(std::move(recovery)),
+        continuityStorage_(std::move(continuityStorage)),
+        continuityScan_(std::move(continuityScan)),
         claimCompletions_(kApplicationQueueCapacity),
         roomOutbounds_(kApplicationQueueCapacity),
-        movementDatagrams_(kApplicationQueueCapacity) {}
+        movementSnapshots_(kApplicationQueueCapacity),
+        combatOutbounds_(kApplicationQueueCapacity),
+        movementDatagrams_(kApplicationQueueCapacity),
+        sessions_(firstSessionGeneration(continuityStorage_.get())) {}
 
   ~ConfiguredGameServer() { static_cast<void>(stop()); }
 
   bool start() {
     if (started_) {
+      return false;
+    }
+    const auto firstRoomId =
+        continuityStorage_ != nullptr
+            ? std::optional{shared::RoomId{
+                  (static_cast<std::uint64_t>(
+                       continuityStorage_->writerRecoveryEpoch())
+                   << 32U) |
+                  1ULL}}
+            : game_flow::RoomCommandGateway::firstRoomIdForSettlementHistory(
+                  recovery_.lastSequence);
+    if (!firstRoomId.has_value()) {
       return false;
     }
     try {
@@ -857,40 +916,32 @@ public:
           });
       authFlow_ =
           std::make_unique<SessionAuthFlow>(*correlations_, *claimClient_);
-      gateway_ = std::make_unique<game_flow::RoomCommandGateway>(
-          *workers_, *readiness_,
-          [this](game_flow::LobbyRoomOutboundIntent intent) {
-            if (!roomOutbounds_.push(std::move(intent))) {
-              fatalStop_.store(true, std::memory_order_release);
-            }
-          },
-          [this](battle::StateSnapshotProjection snapshot) {
-            if (gameMetrics_ != nullptr) {
-              gameMetrics_->recordSnapshot(std::chrono::steady_clock::now());
-            }
-            if (movementFlow_ == nullptr) {
-              fatalStop_.store(true, std::memory_order_release);
-              return;
-            }
-            auto datagrams = movementFlow_->encodeSnapshot(snapshot);
-            if (!datagrams.has_value()) {
-              fatalStop_.store(true, std::memory_order_release);
-              return;
-            }
-            for (auto &datagram : *datagrams) {
-              if (!movementDatagrams_.push(std::move(datagram))) {
-                break;
-              }
-            }
-          },
-          [this](game_flow::CombatOutboundIntent intent) {
-            if (combatFlow_ == nullptr) {
-              fatalStop_.store(true, std::memory_order_release);
-              return;
-            }
-            combatFlow_->handleCombatOutbound(std::move(intent));
-          },
-          *deadlines_, capacity_, *observedStorage_);
+      auto roomOutbound = [this](game_flow::LobbyRoomOutboundIntent intent) {
+        if (!roomOutbounds_.push(std::move(intent))) {
+          fatalStop_.store(true, std::memory_order_release);
+        }
+      };
+      auto movementSnapshot = [this](battle::StateSnapshotProjection snapshot) {
+        if (!movementSnapshots_.push(std::move(snapshot))) {
+          fatalStop_.store(true, std::memory_order_release);
+        }
+      };
+      auto combatOutbound = [this](game_flow::CombatOutboundIntent intent) {
+        if (!combatOutbounds_.push(std::move(intent))) {
+          fatalStop_.store(true, std::memory_order_release);
+        }
+      };
+      if (continuityStorage_ != nullptr) {
+        gateway_ = std::make_unique<game_flow::RoomCommandGateway>(
+            *workers_, *readiness_, std::move(roomOutbound),
+            std::move(movementSnapshot), std::move(combatOutbound), *deadlines_,
+            capacity_, *observedStorage_, *continuityStorage_, *firstRoomId);
+      } else {
+        gateway_ = std::make_unique<game_flow::RoomCommandGateway>(
+            *workers_, *readiness_, std::move(roomOutbound),
+            std::move(movementSnapshot), std::move(combatOutbound), *deadlines_,
+            capacity_, *observedStorage_, *firstRoomId);
+      }
       movementFlow_ = std::make_unique<RudpMovementFlow>(bindings_, *gateway_);
       combatFlow_ = std::make_unique<RudpCombatFlow>(bindings_, *gateway_);
       lobbyFlow_ = std::make_unique<LobbyRoomFlow>(*gateway_);
@@ -907,6 +958,118 @@ public:
           *observedStorage_, *settlementClient_);
       publisherDriver_ =
           std::make_unique<SettlementPublisherDriver>(*publisher_);
+      if (continuityStorage_ != nullptr) {
+        recovering_ = true;
+        std::vector<game_flow::StoredBattleRecovery> battles;
+        battles.reserve(continuityScan_.healthy.size());
+        for (auto &stored : continuityScan_.healthy) {
+          battles.push_back(game_flow::StoredBattleRecovery{
+              .identity = stored.identity,
+              .committedJournal = std::move(stored.committedJournal),
+              .privateEnvelope = std::move(stored.privateEnvelope),
+          });
+        }
+
+        auto dispose = [this](game_flow::BattleRecoveryRequest request) {
+          const auto epoch = continuityStorage_->writerRecoveryEpoch();
+          const auto error =
+              request.disposition ==
+                      game_flow::BattleRecoveryDisposition::Retire
+                  ? continuityStorage_->retireBattle(request.stored.identity,
+                                                     epoch)
+                  : continuityStorage_->quarantineBattle(
+                        request.stored.identity, epoch);
+          if (error != battle_continuity_storage::StorageError::None) {
+            return false;
+          }
+          std::cerr << "battle recovery disposition room="
+                    << request.stored.identity.roomId.value() << " battle="
+                    << request.stored.identity.battleInstanceId.value()
+                    << " disposition="
+                    << (request.disposition ==
+                                game_flow::BattleRecoveryDisposition::Retire
+                            ? "retire"
+                            : "quarantine");
+          if (request.reason.has_value()) {
+            std::cerr << " reason="
+                      << static_cast<unsigned int>(*request.reason);
+          }
+          std::cerr << '\n';
+          return true;
+        };
+        auto settlementDurable =
+            [this](const settlement::SettlementIntentBatch &batch) {
+              std::vector<std::vector<std::uint8_t>> canonicalIntents;
+              canonicalIntents.reserve(batch.intents().size());
+              for (const auto &intent : batch.intents()) {
+                canonicalIntents.push_back(settlement::canonicalPayload(intent));
+              }
+              return std::ranges::any_of(
+                  recovery_.batches, [&](const auto &candidate) {
+                    return candidate.batchId == batch.id().bytes() &&
+                           candidate.canonicalIntents == canonicalIntents;
+                  });
+            };
+        auto install = [this](game_flow::StartupRecoveredBattleInstall recovered) {
+          if (!recovered.reconstruction.room.has_value() ||
+              !recovered.reconstruction.roomRecoveryState.has_value()) {
+            return false;
+          }
+          auto seed = makeRecoveredRuntimeSeed(recovered.reconstruction);
+          if (!seed.has_value()) {
+            return false;
+          }
+          if (!gateway_->installRecoveredBattle(
+                  game_flow::RecoveredBattleInstall{
+                      .room = std::move(*recovered.reconstruction.room),
+                      .battle = std::move(recovered.reconstruction.battle),
+                      .recording =
+                          std::move(recovered.reconstruction.recording),
+                      .nextBattleOrdinal = recovered.reconstruction
+                                               .roomRecoveryState
+                                               ->nextBattleOrdinal,
+                      .settlementBatch =
+                          std::move(recovered.reconstruction.settlementBatch),
+                      .settlementAlreadyDurable =
+                          recovered.settlementAlreadyDurable,
+                  })) {
+            return false;
+          }
+          applyRecoveredRuntimeSeed(std::move(*seed),
+                                    recovered.reconnectExpiresAt);
+          return true;
+        };
+        if (!game_flow::recoverBattlesAtStartup(
+                game_flow::StartupRecoveryInput{
+                    .battles = std::move(battles),
+                    .currentWriterRecoveryEpoch =
+                        continuityStorage_->writerRecoveryEpoch(),
+                    .reconnectExpiresAt =
+                        std::chrono::steady_clock::now() +
+                        kBattleReconnectGrace,
+                    .sessions = sessions_,
+                    .settlementStorage = *observedStorage_,
+                    .dispose = std::move(dispose),
+                    .settlementDurable = std::move(settlementDurable),
+                    .install = std::move(install),
+                })) {
+          std::cerr << "startup failed: battle recovery\n";
+          return false;
+        }
+        if (!workers_->waitUntilIdle(kShutdownTimeout) ||
+            !observedStorage_->waitUntilIdle(kShutdownTimeout) ||
+            !workers_->waitUntilIdle(kShutdownTimeout)) {
+          std::cerr << "startup failed: battle recovery drain\n";
+          return false;
+        }
+        processRoomOutbounds();
+        processCombatOutbounds();
+        if (fatalStop_.load(std::memory_order_acquire) || recoveryFailed_) {
+          std::cerr << "startup failed: battle recovery outcome\n";
+          return false;
+        }
+        continuityScan_.healthy.clear();
+      }
       if (config_.metricsEnabled) {
         metricsServer_ = std::make_unique<observability::PrivateMetricsServer>(
             observability::PrivateMetricsServerConfig{
@@ -928,29 +1091,44 @@ public:
         reactor_ = std::make_unique<runtime::linux::EpollReactor>(
             config_.maxConnections + 2u);
         if (!reactor_->valid()) {
+          std::cerr << "startup failed: reactor\n";
           return false;
         }
       }
 
       auto tcp = bindSocket(SOCK_STREAM, config_.bindAddress, config_.tcpPort,
                             tcpPort_);
+      const int tcpBindError = tcp.has_value() ? 0 : errno;
       auto udp = bindSocket(SOCK_DGRAM, config_.bindAddress, config_.udpPort,
                             udpPort_);
+      const int udpBindError = udp.has_value() ? 0 : errno;
       if (!tcp.has_value() || !udp.has_value()) {
+        std::cerr << "startup failed: bind tcp_errno=" << tcpBindError
+                  << " udp_errno=" << udpBindError << '\n';
         return false;
       }
       tcpListener_ = std::move(*tcp);
       udpSocket_ = std::move(*udp);
       if (reactor_ != nullptr && (!reactor_->watch(tcpListener_.get()) ||
                                   !reactor_->watch(udpSocket_.get()))) {
+        std::cerr << "startup failed: reactor watch\n";
         return false;
       }
       if ((metricsServer_ != nullptr && !metricsServer_->start()) ||
           !publisherDriver_->start() || !lifecycle_.start()) {
+        std::cerr << "startup failed: lifecycle\n";
         return false;
       }
       if (::listen(tcpListener_.get(), 128) != 0) {
+        std::cerr << "startup failed: listen\n";
         return false;
+      }
+      if (continuityStorage_ != nullptr) {
+        if (!gateway_->activateRecoveredBattles()) {
+          std::cerr << "startup failed: recovered activation\n";
+          return false;
+        }
+        recovering_ = false;
       }
       nextMovementTick_ =
           std::chrono::steady_clock::now() + kMovementTickInterval;
@@ -959,7 +1137,11 @@ public:
       std::cout << "READY tcp=" << tcpPort_ << " udp=" << udpPort_ << '\n'
                 << std::flush;
       return true;
+    } catch (const std::exception &error) {
+      std::cerr << "startup failed: exception: " << error.what() << '\n';
+      return false;
     } catch (...) {
+      std::cerr << "startup failed: unknown exception\n";
       return false;
     }
   }
@@ -971,6 +1153,8 @@ public:
     while (gStopSignal == 0 && !fatalStop_.load(std::memory_order_acquire)) {
       processClaimCompletions();
       processRoomOutbounds();
+      processMovementSnapshots();
+      processCombatOutbounds();
       processUdpOutbounds();
       processPeriodicWork();
       waitForIngress();
@@ -1001,13 +1185,197 @@ private:
     std::uint64_t epoch;
     transport::tcp::TcpConnection connection;
     std::optional<game_flow::AuthenticatedRoomSession> session;
+    std::optional<std::uint64_t> resumeRequestId;
+    std::optional<std::uint64_t> pendingResumeSnapshotId;
     std::vector<std::byte> postAuthInbound;
   };
 
   struct ActiveBattleTick final {
     shared::BattleInstanceId battleId;
     std::uint32_t nextServerTick{1u};
+    transport::tcp::BattleResumePhase phase{
+        transport::tcp::BattleResumePhase::Combat};
+    std::chrono::steady_clock::time_point deadline;
   };
+
+  struct DetachedBattleSession final {
+    game_flow::AuthenticatedRoomSession session;
+    shared::RoomId roomId;
+    shared::BattleInstanceId battleId;
+    std::chrono::steady_clock::time_point expiresAt;
+    bool resuming{false};
+  };
+
+  struct PendingResume final {
+    std::uint64_t connectionEpoch;
+    std::uint64_t requestId;
+  };
+
+  struct BattleStateCache final {
+    shared::RoomId roomId{0u};
+    shared::BattleInstanceId battleId{0u};
+    std::optional<battle_continuity::BattleIdentity> continuityIdentity;
+    std::vector<game_flow::BattleParticipantProjection> participants;
+    std::optional<battle::StateSnapshotProjection> movement;
+    std::optional<battle::CombatProjection> combat;
+    std::optional<battle::LootProjection> loot;
+    std::optional<battle::BattleFinalResult> finalResult;
+  };
+
+  struct RecoveredRuntimeSeed final {
+    shared::RoomId roomId;
+    shared::BattleInstanceId battleId;
+    battle_continuity::BattleIdentity continuityIdentity;
+    std::vector<game_flow::AuthenticatedRoomSession> activeSessions;
+    std::vector<game_flow::BattleParticipantProjection> participants;
+    battle::StateSnapshotProjection movement;
+    std::optional<battle::CombatProjection> combat;
+    battle::LootProjection loot;
+    std::optional<battle::BattleFinalResult> finalResult;
+    std::optional<ActiveBattleTick> activeTick;
+  };
+
+  using BattleKey = std::pair<shared::RoomId, shared::BattleInstanceId>;
+
+  std::optional<RecoveredRuntimeSeed> makeRecoveredRuntimeSeed(
+      const game_flow::RecoveredBattleReconstruction &recovered) const {
+    const auto load = recovered.battle.projection();
+    const auto state = recovered.battle.exportDeterministicState();
+    const auto movement = recovered.battle.movementProjection();
+    const auto result = recovered.battle.resultProjection().result;
+    if (recovered.recording.records().empty()) {
+      return std::nullopt;
+    }
+    const auto &first = recovered.recording.records().front().header;
+    const battle_continuity::BattleIdentity continuityIdentity{
+        .originRecoveryEpoch = first.originRecoveryEpoch,
+        .roomId = first.roomId,
+        .battleInstanceId = first.battleInstanceId};
+    if (continuityIdentity.roomId != load.roomId ||
+        continuityIdentity.battleInstanceId != load.battleId) {
+      return std::nullopt;
+    }
+
+    std::vector<game_flow::AuthenticatedRoomSession> activeSessions;
+    activeSessions.reserve(recovered.activeParticipants.size());
+    for (const auto &participant : recovered.activeParticipants) {
+      activeSessions.push_back(game_flow::AuthenticatedRoomSession{
+          .accountId = participant.accountId,
+          .sessionId = participant.sessionId,
+          .generation = participant.generation,
+          .nickname = participant.nickname,
+      });
+    }
+
+    std::vector<game_flow::BattleParticipantProjection> participants;
+    if (!load.capturedParticipants.empty()) {
+      participants.reserve(load.capturedParticipants.size());
+      for (const auto &participant : load.capturedParticipants) {
+        participants.push_back(game_flow::BattleParticipantProjection{
+            .sessionId = participant.sessionId,
+            .generation = participant.generation,
+            .nickname = participant.nickname,
+        });
+      }
+    } else {
+      participants.reserve(recovered.activeParticipants.size());
+      for (const auto &identity : recovered.activeParticipants) {
+        participants.push_back(game_flow::BattleParticipantProjection{
+            .sessionId = identity.sessionId,
+            .generation = identity.generation,
+            .nickname = identity.nickname,
+        });
+      }
+    }
+
+    std::optional<ActiveBattleTick> activeTick;
+    if (state.state == battle::BattleLoadState::GameplayCommitted &&
+        state.resultState != battle::BattleResultState::Committed) {
+      if (movement.serverTick == std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+      }
+      const bool lootPhase =
+          state.lootResolution != battle::LootResolutionState::NotStarted;
+      const auto deadlineTick =
+          lootPhase ? state.lootDeadlineTick : state.combatDeadlineTick;
+      if (!deadlineTick.has_value()) {
+        return std::nullopt;
+      }
+      const auto remainingTicks =
+          *deadlineTick > state.battleTime.logicalTick
+              ? *deadlineTick - state.battleTime.logicalTick
+              : 0U;
+      constexpr std::uint64_t millisecondsPerTick = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::nanoseconds{battle::BattleTime::tickNanos})
+              .count());
+      if (remainingTicks >
+          static_cast<std::uint64_t>(
+              std::numeric_limits<std::chrono::milliseconds::rep>::max()) /
+              millisecondsPerTick) {
+        return std::nullopt;
+      }
+      activeTick = ActiveBattleTick{
+          .battleId = load.battleId,
+          .nextServerTick = movement.serverTick + 1U,
+          .phase = lootPhase ? transport::tcp::BattleResumePhase::Loot
+                             : transport::tcp::BattleResumePhase::Combat,
+          .deadline = std::chrono::steady_clock::now() +
+                      std::chrono::milliseconds{
+                          static_cast<std::chrono::milliseconds::rep>(
+                              remainingTicks * millisecondsPerTick)},
+      };
+    }
+
+    return RecoveredRuntimeSeed{
+        .roomId = load.roomId,
+        .battleId = load.battleId,
+        .continuityIdentity = continuityIdentity,
+        .activeSessions = std::move(activeSessions),
+        .participants = std::move(participants),
+        .movement =
+            battle::StateSnapshotProjection{
+                .battleId = movement.battleId,
+                .snapshotSequence = 0U,
+                .serverTick = movement.serverTick,
+                .players = movement.players,
+            },
+        .combat = recovered.battle.combatProjection(),
+        .loot = recovered.battle.lootProjection(),
+        .finalResult = result,
+        .activeTick = std::move(activeTick),
+    };
+  }
+
+  void applyRecoveredRuntimeSeed(
+      RecoveredRuntimeSeed seed,
+      std::chrono::steady_clock::time_point reconnectExpiresAt) {
+    auto &members = roomMembers_[seed.roomId];
+    for (const auto &session : seed.activeSessions) {
+      members.insert(session.sessionId);
+      sessionRoom_.insert_or_assign(session.sessionId, seed.roomId);
+      detachedBattleSessions_.insert_or_assign(
+          session.sessionId,
+          DetachedBattleSession{.session = session,
+                                .roomId = seed.roomId,
+                                .battleId = seed.battleId,
+                                .expiresAt = reconnectExpiresAt,
+                                .resuming = false});
+    }
+    if (seed.activeTick.has_value()) {
+      activeBattles_.insert_or_assign(seed.roomId, *seed.activeTick);
+    }
+    battleStateCache_.insert_or_assign(
+        BattleKey{seed.roomId, seed.battleId},
+        BattleStateCache{.roomId = seed.roomId,
+                         .battleId = seed.battleId,
+                         .continuityIdentity = seed.continuityIdentity,
+                         .participants = std::move(seed.participants),
+                         .movement = std::move(seed.movement),
+                         .combat = std::move(seed.combat),
+                         .loot = std::move(seed.loot),
+                         .finalResult = std::move(seed.finalResult)});
+  }
 
   bool stop() {
     if (!started_) {
@@ -1043,6 +1411,12 @@ private:
     if (workers_ != nullptr) {
       clean = workers_->waitUntilIdle(kShutdownTimeout) && clean;
     }
+    if (continuityStorage_ != nullptr) {
+      continuityStorage_->waitUntilIdle();
+    }
+    if (workers_ != nullptr) {
+      clean = workers_->waitUntilIdle(kShutdownTimeout) && clean;
+    }
     if (observedStorage_ != nullptr) {
       clean = observedStorage_->waitUntilIdle(kShutdownTimeout) && clean;
     }
@@ -1070,6 +1444,12 @@ private:
     roomMembers_.clear();
     sessionRoom_.clear();
     activeBattles_.clear();
+    detachedBattleSessions_.clear();
+    pendingResumes_.clear();
+    battleStateCache_.clear();
+    pendingBattleRetirements_.clear();
+    resumeAwaitingProjection_.clear();
+    resumeSnapshotAcks_.clear();
 
     if (workers_ != nullptr) {
       const auto metrics = workers_->metrics();
@@ -1092,6 +1472,10 @@ private:
     observedStorage_.reset();
     gameMetrics_.reset();
     storageWorker_.reset();
+    if (continuityStorage_ != nullptr) {
+      continuityStorage_->stop();
+    }
+    continuityStorage_.reset();
     deadlines_.reset();
     if (workers_ != nullptr) {
       workers_->stop();
@@ -1139,6 +1523,10 @@ private:
     observedStorage_.reset();
     gameMetrics_.reset();
     storageWorker_.reset();
+    if (continuityStorage_ != nullptr) {
+      continuityStorage_->stop();
+    }
+    continuityStorage_.reset();
     deadlines_.reset();
     if (workers_ != nullptr) {
       workers_->stop();
@@ -1283,6 +1671,15 @@ private:
             transport::tcp::SessionProtocolCodec::decodePreAuthPayload,
             [this, epoch = state.epoch](
                 transport::tcp::NormalizedAuthRequest request) {
+              const auto route = epochToDescriptor_.find(epoch);
+              if (route == epochToDescriptor_.end()) {
+                return;
+              }
+              auto &connection = connections_.at(route->second);
+              connection.resumeRequestId =
+                  request.resumeRequested
+                      ? std::optional<std::uint64_t>{request.requestId}
+                      : std::nullopt;
               for (auto &frame : authFlow_->begin(epoch, request)) {
                 applySessionFrame(std::move(frame));
               }
@@ -1341,9 +1738,37 @@ private:
     const auto sessionMessage =
         transport::tcp::SessionProtocolCodec::decodeFrame(frame);
     if (sessionMessage.message.has_value()) {
+      if (const auto *applied =
+              std::get_if<transport::tcp::BattleResumeSnapshotApplied>(
+                  &*sessionMessage.message)) {
+        if (!state.pendingResumeSnapshotId.has_value() ||
+            *state.pendingResumeSnapshotId != applied->snapshotId) {
+          return false;
+        }
+        const auto sessionId = state.session->sessionId;
+        const auto expected = resumeSnapshotAcks_.find(sessionId);
+        if (expected == resumeSnapshotAcks_.end() ||
+            expected->second != applied->snapshotId) {
+          return false;
+        }
+        state.pendingResumeSnapshotId.reset();
+        resumeSnapshotAcks_.erase(expected);
+        const auto detached = detachedBattleSessions_.find(sessionId);
+        if (detached != detachedBattleSessions_.end()) {
+          const BattleKey key{detached->second.roomId,
+                              detached->second.battleId};
+          detachedBattleSessions_.erase(detached);
+          cleanupBattleCacheIfUnused(key);
+        }
+        return true;
+      }
       if (const auto *request =
               std::get_if<transport::tcp::RequestRudpBindCapability>(
                   &*sessionMessage.message)) {
+        if (resumeAwaitingProjection_.contains(state.session->sessionId) ||
+            resumeSnapshotAcks_.contains(state.session->sessionId)) {
+          return false;
+        }
         auto outbound = authFlow_->requestRudpBindCapability(
             state.epoch, *request, std::chrono::steady_clock::now());
         if (!outbound.has_value()) {
@@ -1413,7 +1838,9 @@ private:
   void processClaimCompletions() {
     for (auto &completion : claimCompletions_.takeAll()) {
       const auto identity = completion.identity();
-      auto frames = authFlow_->complete(completion, unixTimeMilliseconds());
+      const auto now = std::chrono::steady_clock::now();
+      auto frames =
+          authFlow_->complete(completion, unixTimeMilliseconds(), now);
       std::optional<game_flow::AuthenticatedRoomSession> authenticated;
       std::uint64_t authenticatedEpoch{};
       if (identity.has_value()) {
@@ -1439,18 +1866,69 @@ private:
           }
         }
       }
+      bool resumed = false;
       if (authenticated.has_value()) {
         const auto descriptor = epochToDescriptor_.find(authenticatedEpoch);
         if (descriptor != epochToDescriptor_.end()) {
-          connections_.at(descriptor->second).session = authenticated;
-          sessionToEpoch_.insert_or_assign(authenticated->sessionId,
-                                           authenticatedEpoch);
+          auto &state = connections_.at(descriptor->second);
+          resumed = state.resumeRequestId.has_value();
+          if (resumed) {
+            const auto detached =
+                detachedBattleSessions_.find(authenticated->sessionId);
+            if (detached == detachedBattleSessions_.end() ||
+                detached->second.session.generation !=
+                    authenticated->generation ||
+                detached->second.session.accountId !=
+                    authenticated->accountId) {
+              resumed = false;
+              authenticated.reset();
+            } else {
+              detached->second.resuming = true;
+              pendingResumes_.insert_or_assign(
+                  authenticated->sessionId,
+                  PendingResume{.connectionEpoch = authenticatedEpoch,
+                                .requestId = *state.resumeRequestId});
+              resumeAwaitingProjection_.insert(authenticated->sessionId);
+            }
+          }
+          if (authenticated.has_value()) {
+            state.session = authenticated;
+            state.resumeRequestId.reset();
+            sessionToEpoch_.insert_or_assign(authenticated->sessionId,
+                                             authenticatedEpoch);
+          }
         }
       }
       for (auto &frame : frames) {
         applySessionFrame(std::move(frame));
       }
-      if (authenticated.has_value() && !gateway_->enterLobby(*authenticated)) {
+      if (!authenticated.has_value()) {
+        const auto descriptor = epochToDescriptor_.find(authenticatedEpoch);
+        if (descriptor != epochToDescriptor_.end()) {
+          closeConnection(descriptor->second);
+        }
+        continue;
+      }
+      if (resumed) {
+        const BattleKey key{
+            detachedBattleSessions_.at(authenticated->sessionId).roomId,
+            detachedBattleSessions_.at(authenticated->sessionId).battleId};
+        const auto cached = battleStateCache_.find(key);
+        if (cached != battleStateCache_.end() &&
+            cached->second.finalResult.has_value()) {
+          queueResumeSnapshot(authenticated->sessionId, nullptr);
+        } else if (gateway_->resumeBattleInput(authenticated->sessionId,
+                                               authenticated->generation) !=
+                   game_flow::RoomSubmitResult::Accepted) {
+          const auto descriptor = epochToDescriptor_.find(authenticatedEpoch);
+          if (descriptor != epochToDescriptor_.end()) {
+            closeConnection(descriptor->second);
+          }
+        }
+        continue;
+      }
+      expireReplacedDetachedSession(*authenticated);
+      if (!gateway_->enterLobby(*authenticated)) {
         const auto descriptor = epochToDescriptor_.find(authenticatedEpoch);
         if (descriptor != epochToDescriptor_.end()) {
           closeConnection(descriptor->second);
@@ -1477,17 +1955,230 @@ private:
 
   void processRoomOutbounds() {
     for (auto &intent : roomOutbounds_.takeAll()) {
+      if (recovering_ &&
+          std::holds_alternative<game_flow::BattleRecoveryNotice>(
+              intent.message)) {
+        recoveryFailed_ = true;
+      }
       updateRoutingState(intent);
       auto encoded = LobbyRoomFlow::encode(intent);
-      if (!encoded.has_value()) {
-        auto battle = BattleLoadFlow::encode(intent);
-        if (!battle.has_value()) {
-          fatalStop_.store(true, std::memory_order_release);
-          continue;
-        }
+        if (!encoded.has_value()) {
+          auto battle = BattleLoadFlow::encode(intent);
+          if (!battle.has_value()) {
+            fatalStop_.store(true, std::memory_order_release);
+            continue;
+          }
         sendToAudience(battle->audience, battle->frame);
       } else {
         sendToAudience(encoded->audience, encoded->frame);
+      }
+    }
+  }
+
+  std::optional<shared::RoomId> roomForBattleParticipants(
+      shared::BattleInstanceId battleId,
+      std::span<const game_flow::BattleParticipantProjection> participants) {
+    for (const auto &participant : participants) {
+      const auto room = sessionRoom_.find(participant.sessionId);
+      if (room == sessionRoom_.end()) {
+        continue;
+      }
+      const auto active = activeBattles_.find(room->second);
+      if ((active != activeBattles_.end() &&
+           active->second.battleId == battleId) ||
+          battleStateCache_.contains(BattleKey{room->second, battleId})) {
+        return room->second;
+      }
+    }
+    return std::nullopt;
+  }
+
+  void processMovementSnapshots() {
+    for (auto &snapshot : movementSnapshots_.takeAll()) {
+      if (gameMetrics_ != nullptr) {
+        gameMetrics_->recordSnapshot(std::chrono::steady_clock::now());
+      }
+      for (const auto &player : snapshot.players) {
+        const auto room = sessionRoom_.find(player.sessionId);
+        if (room == sessionRoom_.end()) {
+          continue;
+        }
+        const BattleKey key{room->second, snapshot.battleId};
+        const auto active = activeBattles_.find(room->second);
+        if ((active != activeBattles_.end() &&
+             active->second.battleId == snapshot.battleId) ||
+            battleStateCache_.contains(key)) {
+          auto &cached = battleStateCache_[key];
+          cached.roomId = room->second;
+          cached.battleId = snapshot.battleId;
+          cached.movement = snapshot;
+          break;
+        }
+      }
+      if (movementFlow_ == nullptr) {
+        fatalStop_.store(true, std::memory_order_release);
+        return;
+      }
+      auto datagrams = movementFlow_->encodeSnapshot(snapshot);
+      if (!datagrams.has_value()) {
+        fatalStop_.store(true, std::memory_order_release);
+        return;
+      }
+      for (auto &datagram : *datagrams) {
+        if (!movementDatagrams_.push(std::move(datagram))) {
+          fatalStop_.store(true, std::memory_order_release);
+          return;
+        }
+      }
+    }
+  }
+
+  void processCombatOutbounds() {
+    if (combatFlow_ == nullptr) {
+      if (!combatOutbounds_.takeAll().empty()) {
+        fatalStop_.store(true, std::memory_order_release);
+      }
+      return;
+    }
+    for (auto &intent : combatOutbounds_.takeAll()) {
+      bool resume = false;
+      std::visit(
+          [this, &resume](const auto &message) {
+            using Message = std::remove_cvref_t<decltype(message)>;
+            if constexpr (std::is_same_v<
+                              Message, game_flow::CombatBattleResumeOutbound>) {
+              resume = true;
+              const BattleKey key{message.projection.roomId,
+                                  message.projection.battleId};
+              auto &cached = battleStateCache_[key];
+              cached.roomId = message.projection.roomId;
+              cached.battleId = message.projection.battleId;
+              cached.movement = battle::StateSnapshotProjection{
+                  .battleId = message.projection.battleId,
+                  .snapshotSequence = 0u,
+                  .serverTick = message.projection.serverTick,
+                  .players = {}};
+              cached.movement->players.reserve(
+                  message.projection.participants.size());
+              for (const auto &participant : message.projection.participants) {
+                cached.movement->players.push_back(
+                    battle::PlayerPositionProjection{
+                        .sessionId = participant.sessionId,
+                        .posXMillimeter = participant.posXMillimeter,
+                        .posYMillimeter = participant.posYMillimeter});
+              }
+              cached.combat = message.projection.combat;
+              cached.loot = message.projection.loot;
+              queueResumeSnapshot(message.projection.sessionId,
+                                  &message.projection);
+            } else if constexpr (std::is_same_v<
+                                     Message,
+                                     game_flow::CombatMonsterSpawnedOutbound>) {
+              const auto room = roomForBattleParticipants(message.battleId,
+                                                          message.participants);
+              if (!room.has_value()) {
+                return;
+              }
+              auto &cached =
+                  battleStateCache_[BattleKey{*room, message.battleId}];
+              cached.roomId = *room;
+              cached.battleId = message.battleId;
+              cached.participants = message.participants;
+              cached.combat = battle::CombatProjection{
+                  .battleId = message.battleId,
+                  .monsterId = battle::CombatRuleset::monsterId,
+                  .hitPoints =
+                      battle::CombatRuleset::monsterHitPointsForParticipants(
+                          static_cast<std::uint32_t>(
+                              message.participants.size())),
+                  .monsterState = battle::MonsterState::Alive,
+                  .outcome = battle::CombatOutcome::None,
+                  .terminal = std::nullopt,
+                  .serverTick = 0u};
+            } else if constexpr (std::is_same_v<
+                                     Message,
+                                     game_flow::CombatAttackAppliedOutbound>) {
+              const auto room = roomForBattleParticipants(
+                  message.applied.battleId, message.participants);
+              if (!room.has_value()) {
+                return;
+              }
+              auto &cached =
+                  battleStateCache_[BattleKey{*room, message.applied.battleId}];
+              cached.participants = message.participants;
+              if (cached.combat.has_value()) {
+                cached.combat->hitPoints = message.applied.remainingHitPoints;
+                cached.combat->outcome = message.applied.outcome;
+                cached.combat->serverTick = message.applied.serverTick;
+              }
+            } else if constexpr (std::is_same_v<
+                                     Message,
+                                     game_flow::CombatMonsterStateOutbound>) {
+              const auto room = roomForBattleParticipants(
+                  message.projection.battleId, message.participants);
+              if (room.has_value()) {
+                auto &cached = battleStateCache_[BattleKey{
+                    *room, message.projection.battleId}];
+                cached.roomId = *room;
+                cached.battleId = message.projection.battleId;
+                cached.participants = message.participants;
+                cached.combat = message.projection;
+              }
+            } else if constexpr (std::is_same_v<
+                                     Message,
+                                     game_flow::CombatTerminalEventOutbound>) {
+              const auto room = roomForBattleParticipants(
+                  message.terminal.battleId, message.participants);
+              if (room.has_value()) {
+                auto &cached = battleStateCache_[BattleKey{
+                    *room, message.terminal.battleId}];
+                cached.participants = message.participants;
+                if (cached.combat.has_value()) {
+                  cached.combat->terminal = message.terminal;
+                  cached.combat->outcome = message.terminal.outcome;
+                  cached.combat->serverTick = message.terminal.serverTick;
+                }
+              }
+            } else if constexpr (std::is_same_v<
+                                     Message,
+                                     game_flow::LootDropsSpawnedOutbound>) {
+              const auto room = roomForBattleParticipants(
+                  message.projection.battleId, message.participants);
+              if (!room.has_value()) {
+                return;
+              }
+              auto &cached = battleStateCache_[BattleKey{
+                  *room, message.projection.battleId}];
+              cached.roomId = *room;
+              cached.battleId = message.projection.battleId;
+              cached.participants = message.participants;
+              cached.loot = message.projection;
+              const auto active = activeBattles_.find(*room);
+              if (active != activeBattles_.end() &&
+                  active->second.battleId == message.projection.battleId) {
+                active->second.phase = transport::tcp::BattleResumePhase::Loot;
+                active->second.deadline =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds{
+                        battle::RelicRuleset::resolutionWindowMillis};
+              }
+            } else if constexpr (std::is_same_v<Message,
+                                                game_flow::LootStateOutbound>) {
+              const auto room = roomForBattleParticipants(
+                  message.projection.battleId, message.participants);
+              if (room.has_value()) {
+                auto &cached = battleStateCache_[BattleKey{
+                    *room, message.projection.battleId}];
+                cached.roomId = *room;
+                cached.battleId = message.projection.battleId;
+                cached.participants = message.participants;
+                cached.loot = message.projection;
+              }
+            }
+          },
+          intent.message);
+      if (!resume) {
+        combatFlow_->handleCombatOutbound(std::move(intent));
       }
     }
   }
@@ -1496,6 +2187,13 @@ private:
     if (const auto *entry =
             std::get_if<game_flow::LobbyEntrySnapshot>(&intent.message)) {
       removeSessionFromRoom(entry->session.sessionId);
+    }
+    if (std::holds_alternative<game_flow::LobbyRoomListUpdate>(
+            intent.message)) {
+      if (const auto *session =
+              std::get_if<game_flow::SessionAudience>(&intent.audience)) {
+        removeSessionFromRoom(session->sessionId);
+      }
     }
     if (const auto *detail =
             std::get_if<lobby_room::RoomDetailProjection>(&intent.message)) {
@@ -1514,12 +2212,81 @@ private:
       if (members.empty()) {
         roomMembers_.erase(detail->roomId);
       }
+      cleanupBattleCachesForRoom(detail->roomId);
     }
     if (const auto *started =
             std::get_if<game_flow::ArenaGameplayStart>(&intent.message)) {
+      const auto now = std::chrono::steady_clock::now();
+      std::optional<battle_continuity::BattleIdentity> continuityIdentity;
+      if (continuityStorage_ != nullptr) {
+        const auto roomValue = started->roomId.value();
+        const auto originRecoveryEpoch =
+            static_cast<std::uint32_t>(roomValue >> 32U);
+        if (originRecoveryEpoch == 0U ||
+            static_cast<std::uint32_t>(roomValue) == 0U ||
+            started->battleId.value() == 0U) {
+          fatalStop_.store(true, std::memory_order_release);
+          return;
+        }
+        continuityIdentity = battle_continuity::BattleIdentity{
+            .originRecoveryEpoch = originRecoveryEpoch,
+            .roomId = started->roomId,
+            .battleInstanceId = started->battleId};
+      }
       activeBattles_.insert_or_assign(
-          started->roomId, ActiveBattleTick{.battleId = started->battleId,
-                                            .nextServerTick = 1u});
+          started->roomId,
+          ActiveBattleTick{
+              .battleId = started->battleId,
+              .nextServerTick = 1u,
+              .phase = transport::tcp::BattleResumePhase::Combat,
+              .deadline =
+                  now + std::chrono::milliseconds{
+                            battle::CombatRuleset::combatDeadlineMillis}});
+      for (auto cache = battleStateCache_.begin();
+           cache != battleStateCache_.end();) {
+        if (cache->first.first == started->roomId &&
+            cache->first.second != started->battleId) {
+          const BattleKey staleKey = cache->first;
+          ++cache;
+          const bool detached = std::ranges::any_of(
+              detachedBattleSessions_, [&staleKey](const auto &entry) {
+                return entry.second.roomId == staleKey.first &&
+                       entry.second.battleId == staleKey.second;
+              });
+          if (!detached) {
+            static_cast<void>(retireAndEraseBattleCache(staleKey, true));
+          }
+        } else {
+          ++cache;
+        }
+      }
+      battleStateCache_.insert_or_assign(
+          BattleKey{started->roomId, started->battleId},
+          BattleStateCache{
+              .roomId = started->roomId,
+              .battleId = started->battleId,
+              .continuityIdentity = continuityIdentity,
+              .participants = started->participants,
+              .movement = std::nullopt,
+              .combat =
+                  battle::CombatProjection{
+                      .battleId = started->battleId,
+                      .monsterId = battle::CombatRuleset::monsterId,
+                      .hitPoints = battle::CombatRuleset::
+                          monsterHitPointsForParticipants(
+                              static_cast<std::uint32_t>(
+                                  started->participants.size())),
+                      .monsterState = battle::MonsterState::Alive,
+                      .outcome = battle::CombatOutcome::None,
+                      .terminal = std::nullopt,
+                      .serverTick = 0u},
+              .loot =
+                  battle::LootProjection{
+                      .battleId = started->battleId,
+                      .resolution = battle::LootResolutionState::NotStarted,
+                      .drops = {},
+                      .holdings = {}},
+              .finalResult = std::nullopt});
     }
     if (const auto *cancelled =
             std::get_if<game_flow::ArenaLoadCancelled>(&intent.message)) {
@@ -1528,14 +2295,29 @@ private:
           battle->second.battleId == cancelled->battleId) {
         activeBattles_.erase(battle);
       }
+      const BattleKey key{cancelled->roomId, cancelled->battleId};
+      battleStateCache_.erase(key);
+      pendingBattleRetirements_.erase(key);
     }
     if (const auto *result =
             std::get_if<battle::BattleFinalResult>(&intent.message)) {
+      auto &cached =
+          battleStateCache_[BattleKey{result->roomId, result->battleId}];
+      cached.roomId = result->roomId;
+      cached.battleId = result->battleId;
+      if (continuityStorage_ != nullptr &&
+          !cached.continuityIdentity.has_value()) {
+        cached.continuityIdentity = continuityIdentityFor(
+            BattleKey{result->roomId, result->battleId}, cached);
+      }
+      cached.finalResult = *result;
       const auto active = activeBattles_.find(result->roomId);
       if (active != activeBattles_.end() &&
           active->second.battleId == result->battleId) {
         activeBattles_.erase(active);
       }
+      queueWaitingResultSnapshots(result->roomId, result->battleId);
+      cleanupBattleCacheIfUnused(BattleKey{result->roomId, result->battleId});
     }
     if (const auto *recovery =
             std::get_if<game_flow::BattleRecoveryNotice>(&intent.message)) {
@@ -1544,6 +2326,394 @@ private:
           active->second.battleId == recovery->battleId) {
         activeBattles_.erase(active);
       }
+      cleanupBattleCacheIfUnused(
+          BattleKey{recovery->roomId, recovery->battleId});
+    }
+  }
+
+  std::optional<battle_continuity::BattleIdentity>
+  continuityIdentityFor(const BattleKey &key,
+                        const BattleStateCache &cached) const noexcept {
+    if (cached.continuityIdentity.has_value()) {
+      return cached.continuityIdentity;
+    }
+    if (continuityStorage_ == nullptr) {
+      return std::nullopt;
+    }
+    const auto roomValue = key.first.value();
+    const auto originRecoveryEpoch =
+        static_cast<std::uint32_t>(roomValue >> 32U);
+    if (originRecoveryEpoch == 0U ||
+        static_cast<std::uint32_t>(roomValue) == 0U ||
+        key.second.value() == 0U) {
+      return std::nullopt;
+    }
+    return battle_continuity::BattleIdentity{
+        .originRecoveryEpoch = originRecoveryEpoch,
+        .roomId = key.first,
+        .battleInstanceId = key.second};
+  }
+
+  bool retireAndEraseBattleCache(const BattleKey &key,
+                                 bool ignoreRoomMembers) {
+    const auto cached = battleStateCache_.find(key);
+    if (cached == battleStateCache_.end()) {
+      pendingBattleRetirements_.erase(key);
+      return true;
+    }
+    if (continuityStorage_ == nullptr ||
+        !cached->second.finalResult.has_value()) {
+      pendingBattleRetirements_.erase(key);
+      battleStateCache_.erase(cached);
+      return true;
+    }
+
+    const auto identity = continuityIdentityFor(key, cached->second);
+    if (!identity.has_value() ||
+        continuityStorage_->retireBattle(
+            *identity, continuityStorage_->writerRecoveryEpoch()) !=
+            battle_continuity_storage::StorageError::None) {
+      auto &pending = pendingBattleRetirements_[key];
+      pending = pending || ignoreRoomMembers;
+      return false;
+    }
+    pendingBattleRetirements_.erase(key);
+    battleStateCache_.erase(cached);
+    return true;
+  }
+
+  void cleanupBattleCacheIfUnused(const BattleKey &key) {
+    const auto active = activeBattles_.find(key.first);
+    if (active != activeBattles_.end() &&
+        active->second.battleId == key.second) {
+      return;
+    }
+    const bool detached =
+        std::ranges::any_of(detachedBattleSessions_, [&key](const auto &entry) {
+          return entry.second.roomId == key.first &&
+                 entry.second.battleId == key.second;
+        });
+    const auto cached = battleStateCache_.find(key);
+    const bool roomMember =
+        cached != battleStateCache_.end() &&
+        std::ranges::any_of(
+            cached->second.participants, [this, &key](const auto &participant) {
+              const auto route = sessionRoom_.find(participant.sessionId);
+              return route != sessionRoom_.end() && route->second == key.first;
+            });
+    const auto pending = pendingBattleRetirements_.find(key);
+    const bool ignoreRoomMembers =
+        pending != pendingBattleRetirements_.end() && pending->second;
+    if (!detached && (!roomMember || ignoreRoomMembers)) {
+      static_cast<void>(retireAndEraseBattleCache(key, ignoreRoomMembers));
+    }
+  }
+
+  void cleanupBattleCachesForRoom(shared::RoomId roomId) {
+    std::vector<BattleKey> keys;
+    for (const auto &[key, cache] : battleStateCache_) {
+      static_cast<void>(cache);
+      if (key.first == roomId) {
+        keys.push_back(key);
+      }
+    }
+    for (const auto &key : keys) {
+      cleanupBattleCacheIfUnused(key);
+    }
+  }
+
+  void expireReplacedDetachedSession(
+      const game_flow::AuthenticatedRoomSession &replacement) {
+    std::vector<shared::SessionId> replaced;
+    for (const auto &[sessionId, detached] : detachedBattleSessions_) {
+      if (sessionId != replacement.sessionId &&
+          detached.session.accountId == replacement.accountId) {
+        replaced.push_back(sessionId);
+      }
+    }
+    for (const auto sessionId : replaced) {
+      const auto detached = detachedBattleSessions_.find(sessionId);
+      if (detached == detachedBattleSessions_.end() ||
+          !gateway_->disconnect(sessionId,
+                                detached->second.session.generation)) {
+        continue;
+      }
+      const BattleKey key{detached->second.roomId, detached->second.battleId};
+      static_cast<void>(authFlow_->expireDetached(
+          sessionId, detached->second.session.generation));
+      removeSessionFromRoom(sessionId);
+      detachedBattleSessions_.erase(detached);
+      pendingResumes_.erase(sessionId);
+      resumeAwaitingProjection_.erase(sessionId);
+      resumeSnapshotAcks_.erase(sessionId);
+      cleanupBattleCacheIfUnused(key);
+    }
+  }
+
+  std::uint32_t
+  remainingBattleMillis(shared::RoomId roomId,
+                        shared::BattleInstanceId battleId,
+                        std::chrono::steady_clock::time_point now) {
+    const auto active = activeBattles_.find(roomId);
+    if (active == activeBattles_.end() || active->second.battleId != battleId ||
+        active->second.deadline <= now) {
+      return 0u;
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            active->second.deadline - now)
+            .count();
+    return static_cast<std::uint32_t>(std::min<std::int64_t>(
+        remaining, std::numeric_limits<std::uint32_t>::max()));
+  }
+
+  std::optional<std::uint64_t>
+  resumeScore(shared::SessionId sessionId, const battle::LootProjection &loot,
+              const std::optional<transport::tcp::FinalResult> &result) {
+    if (result.has_value()) {
+      const auto entry = std::ranges::find_if(
+          result->entries, [sessionId](const auto &candidate) {
+            return candidate.sessionId == sessionId.value();
+          });
+      return entry == result->entries.end()
+                 ? std::optional<std::uint64_t>{}
+                 : std::optional<std::uint64_t>{entry->finalAssetValue};
+    }
+    const auto catalog = battle::RelicCatalog::v1Snapshot();
+    std::uint64_t score{};
+    for (const auto &holding : loot.holdings) {
+      if (holding.sessionId != sessionId) {
+        continue;
+      }
+      const auto unitValue = catalog.unitValueOf(holding.itemId);
+      if (!unitValue.has_value() ||
+          (*unitValue != 0u &&
+           holding.quantity >
+               std::numeric_limits<std::uint64_t>::max() / *unitValue)) {
+        return std::nullopt;
+      }
+      const auto value = holding.quantity * *unitValue;
+      if (score > std::numeric_limits<std::uint64_t>::max() - value) {
+        return std::nullopt;
+      }
+      score += value;
+    }
+    return score;
+  }
+
+  std::optional<transport::tcp::BattleResumeSnapshot>
+  buildResumeSnapshot(const DetachedBattleSession &detached,
+                      std::uint64_t requestId, std::uint64_t snapshotId,
+                      const battle::BattleResumeProjection *projection) {
+    const BattleKey key{detached.roomId, detached.battleId};
+    const auto cached = battleStateCache_.find(key);
+    if (projection != nullptr &&
+        (projection->roomId != detached.roomId ||
+         projection->battleId != detached.battleId ||
+         projection->sessionId != detached.session.sessionId ||
+         projection->generation != detached.session.generation)) {
+      return std::nullopt;
+    }
+
+    std::optional<transport::tcp::FinalResult> finalResult;
+    if (cached != battleStateCache_.end() &&
+        cached->second.finalResult.has_value()) {
+      finalResult =
+          LobbyRoomFlow::encodeFinalResult(*cached->second.finalResult);
+      if (!finalResult.has_value()) {
+        return std::nullopt;
+      }
+    }
+
+    std::vector<transport::tcp::BattleResumePlayer> players;
+    std::uint32_t serverTick{};
+    if (projection != nullptr) {
+      players.reserve(projection->participants.size());
+      for (const auto &participant : projection->participants) {
+        players.push_back(transport::tcp::BattleResumePlayer{
+            .sessionId = participant.sessionId.value(),
+            .positionXMillimeters = participant.posXMillimeter,
+            .positionYMillimeters = participant.posYMillimeter,
+            .healthKnown = false,
+            .hitPoints = 0u,
+            .maximumHitPoints = 0u,
+            .alive = participant.exitStatus ==
+                         battle::ParticipantExitStatus::GameplayEligible ||
+                     participant.exitStatus ==
+                         battle::ParticipantExitStatus::TerminalPresent});
+      }
+      serverTick = projection->serverTick;
+    } else {
+      if (cached == battleStateCache_.end()) {
+        return std::nullopt;
+      }
+      players.reserve(cached->second.participants.size());
+      for (const auto &participant : cached->second.participants) {
+        std::int32_t x{};
+        std::int32_t y{};
+        if (cached->second.movement.has_value()) {
+          const auto position = std::ranges::find_if(
+              cached->second.movement->players,
+              [sessionId = participant.sessionId](const auto &candidate) {
+                return candidate.sessionId == sessionId;
+              });
+          if (position != cached->second.movement->players.end()) {
+            x = position->posXMillimeter;
+            y = position->posYMillimeter;
+          }
+          serverTick = cached->second.movement->serverTick;
+        }
+        bool alive = true;
+        if (finalResult.has_value()) {
+          const auto resultEntry = std::ranges::find_if(
+              finalResult->entries,
+              [sessionId = participant.sessionId](const auto &candidate) {
+                return candidate.sessionId == sessionId.value();
+              });
+          if (resultEntry == finalResult->entries.end()) {
+            return std::nullopt;
+          }
+          alive = resultEntry->exitStatus ==
+                  transport::tcp::FinalResultExitStatus::TerminalPresent;
+        }
+        players.push_back(transport::tcp::BattleResumePlayer{
+            .sessionId = participant.sessionId.value(),
+            .positionXMillimeters = x,
+            .positionYMillimeters = y,
+            .healthKnown = false,
+            .hitPoints = 0u,
+            .maximumHitPoints = 0u,
+            .alive = alive});
+      }
+    }
+    if (players.size() < battle::CombatRuleset::minimumParticipants ||
+        players.size() > battle::CombatRuleset::maximumParticipants) {
+      return std::nullopt;
+    }
+
+    const battle::CombatProjection *combat =
+        projection != nullptr && projection->combat.has_value()
+            ? &*projection->combat
+        : cached != battleStateCache_.end() && cached->second.combat.has_value()
+            ? &*cached->second.combat
+            : nullptr;
+    const battle::LootProjection *loot =
+        projection != nullptr ? &projection->loot
+        : cached != battleStateCache_.end() && cached->second.loot.has_value()
+            ? &*cached->second.loot
+            : nullptr;
+    if (combat == nullptr || loot == nullptr) {
+      return std::nullopt;
+    }
+
+    std::optional<transport::tcp::BattleResumeMonster> monster{
+        transport::tcp::BattleResumeMonster{
+            .monsterId = combat->monsterId,
+            .positionXMillimeters =
+                battle::CombatRuleset::spawnPosition.xMillimeter,
+            .positionYMillimeters =
+                battle::CombatRuleset::spawnPosition.yMillimeter,
+            .hitPoints = combat->hitPoints,
+            .maximumHitPoints =
+                battle::CombatRuleset::monsterHitPointsForParticipants(
+                    static_cast<std::uint32_t>(players.size())),
+            .state = static_cast<std::uint8_t>(combat->monsterState)}};
+    std::vector<transport::tcp::BattleResumeDrop> drops;
+    drops.reserve(loot->drops.size());
+    for (const auto &drop : loot->drops) {
+      drops.push_back(transport::tcp::BattleResumeDrop{
+          .dropId = drop.dropId.value,
+          .itemId = drop.itemId.value,
+          .quantity = drop.quantity,
+          .positionXMillimeters = drop.position.xMillimeter,
+          .positionYMillimeters = drop.position.yMillimeter,
+          .state = static_cast<std::uint8_t>(drop.state),
+          .ownerSessionId = drop.owner.has_value() ? drop.owner->value() : 0u});
+    }
+    const auto score =
+        resumeScore(detached.session.sessionId, *loot, finalResult);
+    if (!score.has_value()) {
+      return std::nullopt;
+    }
+
+    auto phase = transport::tcp::BattleResumePhase::Combat;
+    if (finalResult.has_value()) {
+      phase = transport::tcp::BattleResumePhase::Result;
+    } else if (loot->resolution != battle::LootResolutionState::NotStarted ||
+               combat->outcome != battle::CombatOutcome::None) {
+      phase = transport::tcp::BattleResumePhase::Loot;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    return transport::tcp::BattleResumeSnapshot{
+        .requestId = requestId,
+        .snapshotId = snapshotId,
+        .roomId = detached.roomId.value(),
+        .battleInstanceId = detached.battleId.value(),
+        .playerSessionId = detached.session.sessionId.value(),
+        .sessionGeneration = detached.session.generation.value(),
+        .phase = phase,
+        .remainingMillis = phase == transport::tcp::BattleResumePhase::Result
+                               ? 0u
+                               : remainingBattleMillis(detached.roomId,
+                                                       detached.battleId, now),
+        .serverTick = serverTick,
+        .players = std::move(players),
+        .monster = std::move(monster),
+        .drops = std::move(drops),
+        .score = *score,
+        .result = std::move(finalResult)};
+  }
+
+  void queueResumeSnapshot(shared::SessionId sessionId,
+                           const battle::BattleResumeProjection *projection) {
+    const auto pending = pendingResumes_.find(sessionId);
+    const auto detached = detachedBattleSessions_.find(sessionId);
+    if (pending == pendingResumes_.end() ||
+        detached == detachedBattleSessions_.end()) {
+      return;
+    }
+    const auto descriptor =
+        epochToDescriptor_.find(pending->second.connectionEpoch);
+    if (descriptor == epochToDescriptor_.end()) {
+      return;
+    }
+    auto &state = connections_.at(descriptor->second);
+    if (!state.session.has_value() || state.session->sessionId != sessionId ||
+        state.session->generation != detached->second.session.generation) {
+      closeConnection(descriptor->second);
+      return;
+    }
+    const auto snapshotId = nextResumeSnapshotId_++;
+    auto snapshot = buildResumeSnapshot(
+        detached->second, pending->second.requestId, snapshotId, projection);
+    auto frame =
+        snapshot.has_value()
+            ? transport::tcp::SessionProtocolCodec::encodeFrame(
+                  transport::tcp::SessionControlMessage{std::move(*snapshot)})
+            : std::nullopt;
+    if (!frame.has_value()) {
+      closeConnection(descriptor->second);
+      return;
+    }
+    state.pendingResumeSnapshotId = snapshotId;
+    resumeSnapshotAcks_.insert_or_assign(sessionId, snapshotId);
+    queueTcp(pending->second.connectionEpoch, *frame);
+    pendingResumes_.erase(pending);
+    resumeAwaitingProjection_.erase(sessionId);
+  }
+
+  void queueWaitingResultSnapshots(shared::RoomId roomId,
+                                   shared::BattleInstanceId battleId) {
+    std::vector<shared::SessionId> waiting;
+    for (const auto &[sessionId, detached] : detachedBattleSessions_) {
+      if (detached.resuming && detached.roomId == roomId &&
+          detached.battleId == battleId &&
+          pendingResumes_.contains(sessionId)) {
+        waiting.push_back(sessionId);
+      }
+    }
+    for (const auto sessionId : waiting) {
+      queueResumeSnapshot(sessionId, nullptr);
     }
   }
 
@@ -1555,7 +2725,8 @@ private:
           using Target = std::remove_cvref_t<decltype(target)>;
           if constexpr (std::is_same_v<Target, game_flow::SessionAudience>) {
             const auto route = sessionToEpoch_.find(target.sessionId);
-            if (route != sessionToEpoch_.end()) {
+            if (route != sessionToEpoch_.end() &&
+                !resumeAwaitingProjection_.contains(target.sessionId)) {
               const auto descriptor = epochToDescriptor_.find(route->second);
               if (descriptor != epochToDescriptor_.end()) {
                 const auto &connection = connections_.at(descriptor->second);
@@ -1568,7 +2739,8 @@ private:
           } else if constexpr (std::is_same_v<Target,
                                               game_flow::LobbyAudience>) {
             for (const auto &[sessionId, epoch] : sessionToEpoch_) {
-              if (!sessionRoom_.contains(sessionId)) {
+              if (!sessionRoom_.contains(sessionId) &&
+                  !resumeAwaitingProjection_.contains(sessionId)) {
                 epochs.insert(epoch);
               }
             }
@@ -1577,7 +2749,8 @@ private:
             if (room != roomMembers_.end()) {
               for (const auto sessionId : room->second) {
                 const auto route = sessionToEpoch_.find(sessionId);
-                if (route != sessionToEpoch_.end()) {
+                if (route != sessionToEpoch_.end() &&
+                    !resumeAwaitingProjection_.contains(sessionId)) {
                   epochs.insert(route->second);
                 }
               }
@@ -1673,6 +2846,11 @@ private:
       return;
     }
     const auto &header = *decodedHeader.header;
+    if (resumeAwaitingProjection_.contains(
+            shared::SessionId{header.sessionId}) ||
+        resumeSnapshotAcks_.contains(shared::SessionId{header.sessionId})) {
+      return;
+    }
     const auto now = std::chrono::steady_clock::now();
     if (header.messageId == 22u) {
       const auto control = transport::rudp::RudpControlCodec::decode(datagram);
@@ -1717,7 +2895,15 @@ private:
       return;
     }
     if (header.messageId == 25u && movementFlow_ != nullptr) {
-      static_cast<void>(movementFlow_->submitMove(datagram, endpoint, now));
+      const auto submitted = movementFlow_->submitMove(datagram, endpoint, now);
+      if (combatFlow_ != nullptr &&
+          (submitted == RudpMovementSubmitResult::Accepted ||
+           submitted == RudpMovementSubmitResult::StaleTransport ||
+           submitted == RudpMovementSubmitResult::RoomRejected)) {
+        static_cast<void>(combatFlow_->discardAcknowledged(
+            header.sessionId, header.sessionGeneration, header.transportEpoch,
+            header.ack, header.ackBits));
+      }
     } else if (header.messageId == 27u && combatFlow_ != nullptr) {
       static_cast<void>(combatFlow_->submitAttack(datagram, endpoint, now));
     } else if (header.messageId == 32u && combatFlow_ != nullptr) {
@@ -1741,6 +2927,40 @@ private:
       nextRudpExpiry_ = now + kRudpExpiryInterval;
       for (const auto &expired : correlations_->expireTimedOutRudpPeers(now)) {
         applyRudpSessionClosure(expired);
+      }
+    }
+    std::vector<shared::SessionId> reconnectExpired;
+    for (const auto &[sessionId, detached] : detachedBattleSessions_) {
+      if (!detached.resuming && now >= detached.expiresAt) {
+        reconnectExpired.push_back(sessionId);
+      }
+    }
+    for (const auto sessionId : reconnectExpired) {
+      const auto detached = detachedBattleSessions_.find(sessionId);
+      if (detached == detachedBattleSessions_.end() ||
+          !gateway_->disconnect(sessionId,
+                                detached->second.session.generation)) {
+        continue;
+      }
+      const BattleKey key{detached->second.roomId, detached->second.battleId};
+      static_cast<void>(authFlow_->expireDetached(
+          sessionId, detached->second.session.generation));
+      removeSessionFromRoom(sessionId);
+      pendingResumes_.erase(sessionId);
+      resumeAwaitingProjection_.erase(sessionId);
+      resumeSnapshotAcks_.erase(sessionId);
+      detachedBattleSessions_.erase(detached);
+      cleanupBattleCacheIfUnused(key);
+    }
+    if (!pendingBattleRetirements_.empty()) {
+      std::vector<BattleKey> pending;
+      pending.reserve(pendingBattleRetirements_.size());
+      for (const auto &[key, ignoreRoomMembers] : pendingBattleRetirements_) {
+        static_cast<void>(ignoreRoomMembers);
+        pending.push_back(key);
+      }
+      for (const auto &key : pending) {
+        cleanupBattleCacheIfUnused(key);
       }
     }
     for (auto &[descriptor, state] : connections_) {
@@ -1770,6 +2990,74 @@ private:
     }
     if (connection->second.session.has_value()) {
       const auto &session = *connection->second.session;
+      const auto detached = detachedBattleSessions_.find(session.sessionId);
+      std::optional<shared::RoomId> battleRoom;
+      std::optional<shared::BattleInstanceId> battleId;
+      auto expiresAt = std::chrono::steady_clock::now() + kBattleReconnectGrace;
+      if (detached != detachedBattleSessions_.end()) {
+        battleRoom = detached->second.roomId;
+        battleId = detached->second.battleId;
+        expiresAt = detached->second.expiresAt;
+      } else {
+        const auto room = sessionRoom_.find(session.sessionId);
+        if (room != sessionRoom_.end()) {
+          const auto active = activeBattles_.find(room->second);
+          if (active != activeBattles_.end()) {
+            battleRoom = room->second;
+            battleId = active->second.battleId;
+          } else {
+            std::optional<BattleKey> latestFinal;
+            for (const auto &[key, cached] : battleStateCache_) {
+              if (key.first != room->second ||
+                  !cached.finalResult.has_value() ||
+                  !std::ranges::any_of(
+                      cached.participants,
+                      [sessionId = session.sessionId](const auto &participant) {
+                        return participant.sessionId == sessionId;
+                      })) {
+                continue;
+              }
+              if (!latestFinal.has_value() ||
+                  key.second > latestFinal->second) {
+                latestFinal = key;
+              }
+            }
+            if (latestFinal.has_value()) {
+              battleRoom = room->second;
+              battleId = latestFinal->second;
+            }
+          }
+        }
+      }
+      const auto active = battleRoom.has_value()
+                              ? activeBattles_.find(*battleRoom)
+                              : activeBattles_.end();
+      const bool needsSuspend = active != activeBattles_.end() &&
+                                battleId.has_value() &&
+                                active->second.battleId == *battleId;
+      const bool suspendAccepted =
+          !needsSuspend ||
+          gateway_->suspendBattleInput(session.sessionId, session.generation) ==
+              game_flow::RoomSubmitResult::Accepted;
+      if (battleRoom.has_value() && battleId.has_value() && suspendAccepted &&
+          authFlow_->detach(connection->second.epoch, expiresAt)) {
+        detachedBattleSessions_.insert_or_assign(
+            session.sessionId, DetachedBattleSession{.session = session,
+                                                     .roomId = *battleRoom,
+                                                     .battleId = *battleId,
+                                                     .expiresAt = expiresAt,
+                                                     .resuming = false});
+        const auto current = sessionToEpoch_.find(session.sessionId);
+        if (current != sessionToEpoch_.end() &&
+            current->second == connection->second.epoch) {
+          sessionToEpoch_.erase(current);
+        }
+        pendingResumes_.erase(session.sessionId);
+        resumeAwaitingProjection_.erase(session.sessionId);
+        resumeSnapshotAcks_.erase(session.sessionId);
+        epochToDescriptor_.erase(connection->second.epoch);
+        return;
+      }
       static_cast<void>(
           gateway_->disconnect(session.sessionId, session.generation));
       const auto current = sessionToEpoch_.find(session.sessionId);
@@ -1777,6 +3065,14 @@ private:
           current->second == connection->second.epoch) {
         removeSessionFromRoom(session.sessionId);
         sessionToEpoch_.erase(current);
+      }
+      if (detached != detachedBattleSessions_.end()) {
+        const BattleKey key{detached->second.roomId, detached->second.battleId};
+        detachedBattleSessions_.erase(detached);
+        pendingResumes_.erase(session.sessionId);
+        resumeAwaitingProjection_.erase(session.sessionId);
+        resumeSnapshotAcks_.erase(session.sessionId);
+        cleanupBattleCacheIfUnused(key);
       }
     }
     static_cast<void>(authFlow_->disconnect(connection->second.epoch));
@@ -1802,6 +3098,7 @@ private:
     if (room == sessionRoom_.end()) {
       return;
     }
+    const auto roomId = room->second;
     const auto members = roomMembers_.find(room->second);
     if (members != roomMembers_.end()) {
       members->second.erase(sessionId);
@@ -1810,16 +3107,24 @@ private:
       }
     }
     sessionRoom_.erase(room);
+    cleanupBattleCachesForRoom(roomId);
   }
 
   ServerConfig config_;
   settlement_storage::JournalRecoveryResult recovery_;
+  std::unique_ptr<battle_continuity_storage::ContinuityStorage>
+      continuityStorage_;
+  battle_continuity_storage::ScanResult continuityScan_;
   runtime::ProcessLifecycle lifecycle_;
   BoundedQueue<meta::ClaimCompletion> claimCompletions_;
   BoundedQueue<game_flow::LobbyRoomOutboundIntent> roomOutbounds_;
+  BoundedQueue<battle::StateSnapshotProjection> movementSnapshots_;
+  BoundedQueue<game_flow::CombatOutboundIntent> combatOutbounds_;
   BoundedQueue<EncodedRudpDatagram> movementDatagrams_;
   std::atomic<bool> fatalStop_{false};
   bool started_{};
+  bool recovering_{};
+  bool recoveryFailed_{};
   std::uint16_t tcpPort_{};
   std::uint16_t udpPort_{};
   std::uint64_t nextConnectionEpoch_{1u};
@@ -1853,6 +3158,13 @@ private:
   std::map<shared::RoomId, std::set<shared::SessionId>> roomMembers_;
   std::map<shared::SessionId, shared::RoomId> sessionRoom_;
   std::map<shared::RoomId, ActiveBattleTick> activeBattles_;
+  std::map<shared::SessionId, DetachedBattleSession> detachedBattleSessions_;
+  std::map<shared::SessionId, PendingResume> pendingResumes_;
+  std::map<BattleKey, BattleStateCache> battleStateCache_;
+  std::map<BattleKey, bool> pendingBattleRetirements_;
+  std::set<shared::SessionId> resumeAwaitingProjection_;
+  std::map<shared::SessionId, std::uint64_t> resumeSnapshotAcks_;
+  std::uint64_t nextResumeSnapshotId_{1u};
   std::chrono::steady_clock::time_point nextMovementTick_{};
   std::chrono::steady_clock::time_point nextRudpExpiry_{};
 };
@@ -1887,7 +3199,32 @@ int runConfiguredGameServer(const std::filesystem::path &configPath) {
     std::cerr << "startup failed: journal recovery\n";
     return 3;
   }
-  ConfiguredGameServer server{*config, std::move(*recovery)};
+  std::unique_ptr<battle_continuity_storage::ContinuityStorage>
+      continuityStorage;
+  battle_continuity_storage::ScanResult continuityScan;
+  if (config->battleContinuityRoot.has_value()) {
+    auto opened = battle_continuity_storage::ContinuityStorage::open(
+        *config->battleContinuityRoot, *config->battleContinuityKeyFile);
+    if (!opened.ok()) {
+      std::cerr << "startup failed: battle continuity storage\n";
+      return 3;
+    }
+    continuityStorage = std::move(opened.storage);
+    continuityScan = continuityStorage->scan();
+    if (!continuityScan.ok()) {
+      std::cerr << "startup failed: battle continuity scan\n";
+      return 3;
+    }
+    std::cout << "RECOVERING epoch=" << continuityStorage->writerRecoveryEpoch()
+              << " battles=" << continuityScan.healthy.size()
+              << " quarantined=" << continuityScan.quarantined.size()
+              << " repaired_tails=" << continuityScan.repairedTails.size()
+              << '\n'
+              << std::flush;
+  }
+  ConfiguredGameServer server{*config, std::move(*recovery),
+                              std::move(continuityStorage),
+                              std::move(continuityScan)};
   if (!server.start()) {
     std::cerr << "startup failed: runtime\n";
     return 4;

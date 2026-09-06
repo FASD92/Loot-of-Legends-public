@@ -110,6 +110,10 @@ BattleAdmissionSnapshot admission(std::uint64_t battleId, std::size_t count) {
       .roomId = RoomId{7},
       .battleId = BattleInstanceId{battleId},
       .candidates = std::move(candidates),
+      .rulesetVersion = lol::battle::battleRulesetVersion,
+      .seed =
+          lol::battle::deriveBattleSeed(RoomId{7}, BattleInstanceId{battleId},
+                                        lol::battle::battleRulesetVersion),
   };
 }
 
@@ -137,9 +141,29 @@ BattleInstance openCommittedBattle(std::uint64_t battleId, std::size_t count) {
   return battle;
 }
 
+void moveTo(BattleInstance &battle, std::uint64_t battleId,
+            std::uint64_t sessionId, std::int32_t targetX, std::int32_t targetY,
+            std::uint32_t &sequence);
+
 void killMonster(BattleInstance &battle, std::uint64_t battleId,
                  std::uint64_t sessionId) {
-  constexpr std::uint32_t kHitPoints = CombatRuleset::monsterHitPoints;
+  std::uint32_t movementSequence = 0;
+  const auto projection = battle.projection();
+  for (const auto &player : battle.movementProjection().players) {
+    const auto captured =
+        std::find_if(projection.capturedParticipants.begin(),
+                     projection.capturedParticipants.end(),
+                     [&player](const auto &participant) {
+                       return participant.sessionId == player.sessionId;
+                     });
+    if (captured == projection.capturedParticipants.end() ||
+        captured->exitStatus != ParticipantExitStatus::GameplayEligible) {
+      continue;
+    }
+    moveTo(battle, battleId, player.sessionId.value(), 0, 0, movementSequence);
+  }
+  constexpr std::uint32_t kHitPoints =
+      CombatRuleset::monsterHitPointsForParticipants(2);
   constexpr std::uint32_t kDamage = CombatRuleset::attackDamage;
   const auto start =
       std::chrono::steady_clock::time_point{std::chrono::hours{1}};
@@ -686,7 +710,7 @@ bool claimAllAndDeadlineCommitExactlyOnce() {
   if (claim(claimAll, 1, 1, 1, 2).code != ClaimLootResultCode::Ok) {
     return false;
   }
-  std::uint32_t sequence = 0;
+  std::uint32_t sequence = 100;
   moveTo(claimAll, 1, 2, -3250, 8750, sequence);
   if (claim(claimAll, 1, 2, 2, 1).code != ClaimLootResultCode::Ok) {
     return false;
@@ -753,7 +777,7 @@ bool mutatedResultCopyDoesNotAffectBattleProjection() {
   if (claim(battle, 1, 1, 1, 2).code != ClaimLootResultCode::Ok) {
     return false;
   }
-  std::uint32_t sequence = 0;
+  std::uint32_t sequence = 100;
   moveTo(battle, 1, 2, -3250, 8750, sequence);
   if (claim(battle, 1, 2, 2, 1).code != ClaimLootResultCode::Ok) {
     return false;

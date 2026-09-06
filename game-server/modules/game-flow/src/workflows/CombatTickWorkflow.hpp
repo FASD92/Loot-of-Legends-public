@@ -2,13 +2,13 @@
 
 #include <lol/battle/BattleLoadApi.hpp>
 
-#include <chrono>
 #include <optional>
 
 namespace lol::game_flow::workflows {
 
 struct AttackWorkflowResult final {
   battle::AttackTerminalResult result;
+  std::optional<battle::AttackAppliedRecord> applied;
   std::optional<battle::CombatProjection> combat;
   // True exactly on the single NotStarted -> Open loot resolution transition
   // caused by this Attack. The Cell schedules exactly one 15 000 ms loot
@@ -28,16 +28,14 @@ struct LootDeadlineWorkflowResult final {
 [[nodiscard]] AttackWorkflowResult
 applyAttack(std::optional<battle::BattleInstance> &battle,
             const battle::AttackCommand &command,
-            std::chrono::steady_clock::time_point receivedAt);
+            battle::BattleTime receivedAt);
 
 [[nodiscard]] CombatDeadlineWorkflowResult
 expireCombat(std::optional<battle::BattleInstance> &battle,
-             const battle::CombatDeadlineCommand &command,
-             std::chrono::steady_clock::time_point completedAt);
+             const battle::CombatDeadlineCommand &command);
 
 [[nodiscard]] LootDeadlineWorkflowResult
 expireLoot(std::optional<battle::BattleInstance> &battle,
-           const battle::LootDeadlineCommand &command,
-           std::chrono::steady_clock::time_point completedAt);
+           const battle::LootDeadlineCommand &command);
 
 } // namespace lol::game_flow::workflows

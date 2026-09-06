@@ -52,6 +52,8 @@ bool isGameplayProgress(execution::RoomCommandKind kind) noexcept {
   case execution::RoomCommandKind::LootDeadline:
   case execution::RoomCommandKind::DurableAppendCompleted:
   case execution::RoomCommandKind::DurableAppendFailed:
+  case execution::RoomCommandKind::ContinuityTickCommitted:
+  case execution::RoomCommandKind::ContinuityTickFailed:
     return true;
   case execution::RoomCommandKind::Join:
   case execution::RoomCommandKind::Leave:
@@ -59,6 +61,8 @@ bool isGameplayProgress(execution::RoomCommandKind kind) noexcept {
   case execution::RoomCommandKind::Kick:
   case execution::RoomCommandKind::HostStartEligibility:
   case execution::RoomCommandKind::ConfirmedDisconnect:
+  case execution::RoomCommandKind::SuspendBattleInput:
+  case execution::RoomCommandKind::ResumeBattleInput:
     return false;
   }
   return false;
@@ -118,13 +122,16 @@ public:
                RoomCommandGateway::CombatOutboundSink combatOutboundSink,
                runtime::DeadlineScheduler *injectedDeadlines,
                settlement::SettlementCapacityGate *capacityGate,
-               settlement::SettlementStoragePort *storage)
+               settlement::SettlementStoragePort *storage,
+               battle_continuity::DurableTickWritePort *continuityStorage,
+               shared::RoomId firstRoomId)
       : workers_(workers), readiness_(readiness),
         capacityGate_(
             capacityGate != nullptr
                 ? std::optional{*capacityGate}
                 : std::optional<settlement::SettlementCapacityGate>{}),
-        storage_(storage), outboundSink_(std::move(outboundSink)),
+        storage_(storage), continuityStorage_(continuityStorage),
+        outboundSink_(std::move(outboundSink)),
         movementSnapshotSink_(std::move(movementSnapshotSink)),
         combatOutboundSink_(std::move(combatOutboundSink)),
         ownedDeadlines_(
@@ -135,8 +142,15 @@ public:
                           .queueCapacity = kDeadlineQueueCapacity,
                       })),
         deadlines_(injectedDeadlines != nullptr ? *injectedDeadlines
-                                                : *ownedDeadlines_) {
-    if (!outboundSink_) {
+                                                : *ownedDeadlines_),
+        writerRecoveryEpoch_(
+            continuityStorage != nullptr
+                ? static_cast<std::uint32_t>(firstRoomId.value() >> 32U)
+                : 0U),
+        nextRoomId_(firstRoomId.value()) {
+    if (!outboundSink_ || firstRoomId.value() == 0u ||
+        (writerRecoveryEpoch_ != 0U &&
+         static_cast<std::uint32_t>(firstRoomId.value()) == 0U)) {
       throw std::invalid_argument{
           "RoomCommandGateway requires an outbound sink"};
     }
@@ -291,6 +305,7 @@ public:
             .command =
                 execution::RoomControlCommand{battle::MovementTickCommand{
                     .battleId = battleId, .serverTick = serverTick}},
+            .occurredAt = std::chrono::steady_clock::now(),
         });
     if (admission == execution::RoomCommandAdmission::Accepted) {
       return RoomSubmitResult::Accepted;
@@ -325,10 +340,131 @@ public:
            }) == execution::RoomCommandAdmission::Accepted;
   }
 
+  RoomSubmitResult submitBattleInput(shared::SessionId sessionId,
+                                     shared::SessionGeneration generation,
+                                     bool resume) {
+    if (sessionId.value() == 0 || generation.value() == 0) {
+      return RoomSubmitResult::InvalidSession;
+    }
+    const auto roomId = routes_.lookup(sessionId, generation);
+    if (!roomId.has_value()) {
+      return RoomSubmitResult::InvalidSession;
+    }
+    const auto entry = rooms_.lookup(*roomId);
+    if (!entry.has_value()) {
+      return RoomSubmitResult::InvalidSession;
+    }
+    const auto command =
+        resume
+            ? execution::RoomControlCommand{battle::ResumeBattleInputCommand{
+                  .sessionId = sessionId, .generation = generation}}
+            : execution::RoomControlCommand{battle::SuspendBattleInputCommand{
+                  .sessionId = sessionId, .generation = generation}};
+    const auto admission =
+        entry->cell->enqueueControl(execution::RoomControlEnvelope{
+            .command = command,
+            .occurredAt = std::chrono::steady_clock::now(),
+        });
+    if (admission == execution::RoomCommandAdmission::Accepted) {
+      return RoomSubmitResult::Accepted;
+    }
+    if (admission == execution::RoomCommandAdmission::RoomRetired) {
+      return RoomSubmitResult::InvalidSession;
+    }
+    return admission == execution::RoomCommandAdmission::ControlReserveExhausted
+               ? RoomSubmitResult::RoomOverloaded
+               : RoomSubmitResult::SchedulingUnavailable;
+  }
+
   RoomExecutionObservation observation() const {
     std::lock_guard lock{observationMutex_};
     return observation_;
   }
+
+  std::optional<std::vector<std::uint8_t>>
+  battleJournal(shared::RoomId roomId) const {
+    const auto entry = rooms_.lookup(roomId);
+    return entry.has_value() ? entry->cell->battleJournal() : std::nullopt;
+  }
+
+  bool installRecoveredBattle(RecoveredBattleInstall recovered) {
+    if (!capacityGate_.has_value() || storage_ == nullptr ||
+        continuityStorage_ == nullptr || writerRecoveryEpoch_ == 0U ||
+        !recovered.nextBattleOrdinal.has_value() ||
+        *recovered.nextBattleOrdinal == 0U) {
+      return false;
+    }
+    const auto detail = recovered.room.detail();
+    if (!detail.has_value() || detail->members.empty()) {
+      return false;
+    }
+    const bool terminal = recovered.settlementBatch.has_value();
+    if (recovered.settlementAlreadyDurable && !terminal) {
+      return false;
+    }
+
+    std::optional<settlement::SettlementCapacityReservation> reservation;
+    if (!recovered.settlementAlreadyDurable) {
+      auto reserved = capacityGate_->tryReserve();
+      if (!reserved.reservation.has_value() || !reserved.reservation->valid()) {
+        return false;
+      }
+      reservation = std::move(reserved.reservation);
+    }
+
+    std::vector<execution::SessionRoomRoute> insertedRoutes;
+    insertedRoutes.reserve(detail->members.size());
+    for (const auto &member : detail->members) {
+      execution::SessionRoomRoute route{
+          .sessionId = member.sessionId,
+          .generation = member.sessionGeneration,
+          .roomId = detail->roomId,
+      };
+      if (routes_.bind(route) != execution::RouteBindResult::Inserted) {
+        for (const auto &inserted : insertedRoutes) {
+          static_cast<void>(routes_.clear(
+              inserted.sessionId, inserted.generation, inserted.roomId));
+        }
+        return false;
+      }
+      insertedRoutes.push_back(route);
+    }
+
+    std::weak_ptr<GatewayState> weak = weak_from_this();
+    auto entry = rooms_.createRecovered(
+        workers_, deadlines_,
+        execution::RecoveredRoomExecutionState{
+            .room = std::move(recovered.room),
+            .battle = std::move(recovered.battle),
+            .recording = std::move(recovered.recording),
+            .nextBattleOrdinal = recovered.nextBattleOrdinal,
+            .settlementBatch = std::move(recovered.settlementBatch),
+            .settlementReservation = std::move(reservation),
+            .settlementAlreadyDurable = recovered.settlementAlreadyDurable,
+        },
+        kRoomWorkBudget,
+        [weak, roomId = detail->roomId](
+            execution::RoomCommandOutcome outcome) mutable {
+          if (auto state = weak.lock()) {
+            state->handleOutcome(roomId, std::move(outcome));
+          }
+        },
+        readiness_, &*capacityGate_, storage_, writerRecoveryEpoch_,
+        continuityStorage_);
+    if (entry.has_value() && (!terminal || entry->cell->activateRecovered())) {
+      return true;
+    }
+    if (entry.has_value()) {
+      static_cast<void>(rooms_.remove(detail->roomId));
+    }
+    for (const auto &inserted : insertedRoutes) {
+      static_cast<void>(routes_.clear(inserted.sessionId, inserted.generation,
+                                      inserted.roomId));
+    }
+    return false;
+  }
+
+  bool activateRecoveredBattles() { return rooms_.activateRecovered(); }
 
 private:
   void emit(LobbyRoomOutboundIntent intent) {
@@ -426,6 +562,17 @@ private:
     }
     if (outcome.combat.has_value() && outcome.battle.has_value()) {
       const auto participants = participantsOf(*outcome.battle);
+      if (outcome.attackApplied.has_value()) {
+        emitCombat(CombatOutboundIntent{
+            .actorSessionId = std::nullopt,
+            .actorGeneration = std::nullopt,
+            .message =
+                CombatAttackAppliedOutbound{
+                    .applied = *outcome.attackApplied,
+                    .participants = participants,
+                },
+        });
+      }
       emitCombat(CombatOutboundIntent{
           .actorSessionId = std::nullopt,
           .actorGeneration = std::nullopt,
@@ -530,11 +677,16 @@ private:
     }
 
     const shared::RoomId roomId{nextRoomId_.fetch_add(1)};
-    if (roomId.value() == 0 || routes_.bind(execution::SessionRoomRoute{
-                                   .sessionId = session.sessionId,
-                                   .generation = session.generation,
-                                   .roomId = roomId,
-                               }) != execution::RouteBindResult::Inserted) {
+    if (roomId.value() == 0 ||
+        (writerRecoveryEpoch_ != 0U &&
+         (static_cast<std::uint32_t>(roomId.value() >> 32U) !=
+              writerRecoveryEpoch_ ||
+          static_cast<std::uint32_t>(roomId.value()) == 0U)) ||
+        routes_.bind(execution::SessionRoomRoute{
+            .sessionId = session.sessionId,
+            .generation = session.generation,
+            .roomId = roomId,
+        }) != execution::RouteBindResult::Inserted) {
       respond(session, request.requestId,
               lobby_room::RoomResultCode::AlreadyInRoom);
       return RoomSubmitResult::Accepted;
@@ -568,7 +720,7 @@ private:
           }
         },
         readiness_, capacityGate_.has_value() ? &*capacityGate_ : nullptr,
-        storage_);
+        storage_, writerRecoveryEpoch_, continuityStorage_);
     if (!entry.has_value()) {
       static_cast<void>(
           routes_.clear(session.sessionId, session.generation, roomId));
@@ -726,6 +878,7 @@ private:
                     .roomId = request.roomId,
                     .battleId = request.battleId,
                 }},
+            .receivedAt = std::chrono::steady_clock::now(),
         });
   }
 
@@ -820,6 +973,14 @@ private:
     recordObservation(outcome);
     if (outcome.recoveryNotice.has_value()) {
       if (outcome.recoveryNotice->reason ==
+          BattleRecoveryReason::ContinuityRecordingFailed) {
+        emit(LobbyRoomOutboundIntent{
+            .audience = RoomAudience{roomId},
+            .message = *outcome.recoveryNotice,
+        });
+        return;
+      }
+      if (outcome.recoveryNotice->reason ==
           BattleRecoveryReason::ResultGenerationFailed) {
         if (outcome.kind == execution::RoomCommandKind::Attack) {
           emitAttackOutcome(roomId, outcome);
@@ -839,6 +1000,21 @@ private:
       });
     }
     if (outcome.kind == execution::RoomCommandKind::Move) {
+      return;
+    }
+    if (outcome.kind == execution::RoomCommandKind::SuspendBattleInput) {
+      return;
+    }
+    if (outcome.kind == execution::RoomCommandKind::ResumeBattleInput) {
+      if (outcome.resumeProjection.has_value()) {
+        emitCombat(CombatOutboundIntent{
+            .actorSessionId = outcome.actorSessionId,
+            .actorGeneration = outcome.actorGeneration,
+            .message =
+                CombatBattleResumeOutbound{.projection =
+                                               *outcome.resumeProjection},
+        });
+      }
       return;
     }
     if (outcome.kind == execution::RoomCommandKind::Attack) {
@@ -992,6 +1168,15 @@ private:
         outcome.kind == execution::RoomCommandKind::Kick ||
         outcome.kind == execution::RoomCommandKind::ConfirmedDisconnect) {
       emitRoomList();
+      if (outcome.kind == execution::RoomCommandKind::Leave &&
+          !outcome.detail.has_value() && outcome.actorSessionId.has_value() &&
+          outcome.actorGeneration.has_value()) {
+        emit(LobbyRoomOutboundIntent{
+            .audience = SessionAudience{*outcome.actorSessionId,
+                                        *outcome.actorGeneration},
+            .message = LobbyRoomListUpdate{.rooms = rooms_.summaries()},
+        });
+      }
     }
     if (outcome.battle.has_value() &&
         outcome.kind == execution::RoomCommandKind::HostStartEligibility &&
@@ -1100,8 +1285,10 @@ private:
       ++observation_.gameplayProgressTotal;
     }
     if (outcome.recoveryNotice.has_value() &&
-        outcome.recoveryNotice->reason ==
-            BattleRecoveryReason::ResultGenerationFailed) {
+        (outcome.recoveryNotice->reason ==
+             BattleRecoveryReason::ResultGenerationFailed ||
+         outcome.recoveryNotice->reason ==
+             BattleRecoveryReason::ContinuityRecordingFailed)) {
       ++observation_.serverInvariantTotal;
     }
   }
@@ -1134,11 +1321,13 @@ private:
   const GameplayTransportReadinessPort *readiness_;
   std::optional<settlement::SettlementCapacityGate> capacityGate_;
   settlement::SettlementStoragePort *storage_;
+  battle_continuity::DurableTickWritePort *continuityStorage_;
   RoomCommandGateway::OutboundSink outboundSink_;
   RoomCommandGateway::MovementSnapshotSink movementSnapshotSink_;
   RoomCommandGateway::CombatOutboundSink combatOutboundSink_;
   std::unique_ptr<runtime::ThreadDeadlineScheduler> ownedDeadlines_;
   runtime::DeadlineScheduler &deadlines_;
+  const std::uint32_t writerRecoveryEpoch_;
   execution::RoomExecutionDirectory rooms_;
   execution::SessionRouteIndex routes_;
   std::mutex pendingJoinMutex_;
@@ -1160,27 +1349,41 @@ public:
        CombatOutboundSink combatOutboundSink,
        runtime::DeadlineScheduler *injectedDeadlines,
        settlement::SettlementCapacityGate *capacityGate,
-       settlement::SettlementStoragePort *storage)
+       settlement::SettlementStoragePort *storage,
+       battle_continuity::DurableTickWritePort *continuityStorage,
+       shared::RoomId firstRoomId = shared::RoomId{1})
       : state(std::make_shared<GatewayState>(
             workers, readiness, std::move(outboundSink),
             std::move(movementSnapshotSink), std::move(combatOutboundSink),
-            injectedDeadlines, capacityGate, storage)) {}
+            injectedDeadlines, capacityGate, storage, continuityStorage,
+            firstRoomId)) {}
 
   std::shared_ptr<GatewayState> state;
 };
+
+std::optional<shared::RoomId>
+RoomCommandGateway::firstRoomIdForSettlementHistory(
+    std::uint64_t lastJournalSequence) noexcept {
+  constexpr auto maximumEpoch =
+      static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
+  if (lastJournalSequence >= maximumEpoch) {
+    return std::nullopt;
+  }
+  return shared::RoomId{((lastJournalSequence + 1u) << 32u) | 1u};
+}
 
 RoomCommandGateway::RoomCommandGateway(runtime::WorkerPool &workers,
                                        OutboundSink outboundSink)
     : impl_(std::make_unique<Impl>(workers, nullptr, std::move(outboundSink),
                                    MovementSnapshotSink{}, CombatOutboundSink{},
-                                   nullptr, nullptr, nullptr)) {}
+                                   nullptr, nullptr, nullptr, nullptr)) {}
 
 RoomCommandGateway::RoomCommandGateway(
     runtime::WorkerPool &workers,
     const GameplayTransportReadinessPort &readiness, OutboundSink outboundSink)
     : impl_(std::make_unique<Impl>(workers, &readiness, std::move(outboundSink),
                                    MovementSnapshotSink{}, CombatOutboundSink{},
-                                   nullptr, nullptr, nullptr)) {}
+                                   nullptr, nullptr, nullptr, nullptr)) {}
 
 RoomCommandGateway::RoomCommandGateway(
     runtime::WorkerPool &workers,
@@ -1189,7 +1392,7 @@ RoomCommandGateway::RoomCommandGateway(
     : impl_(std::make_unique<Impl>(workers, &readiness, std::move(outboundSink),
                                    std::move(movementSnapshotSink),
                                    CombatOutboundSink{}, nullptr, nullptr,
-                                   nullptr)) {}
+                                   nullptr, nullptr)) {}
 
 RoomCommandGateway::RoomCommandGateway(
     runtime::WorkerPool &workers,
@@ -1199,7 +1402,7 @@ RoomCommandGateway::RoomCommandGateway(
     : impl_(std::make_unique<Impl>(workers, &readiness, std::move(outboundSink),
                                    std::move(movementSnapshotSink),
                                    std::move(combatOutboundSink), nullptr,
-                                   nullptr, nullptr)) {}
+                                   nullptr, nullptr, nullptr)) {}
 
 RoomCommandGateway::RoomCommandGateway(
     runtime::WorkerPool &workers,
@@ -1210,7 +1413,7 @@ RoomCommandGateway::RoomCommandGateway(
     : impl_(std::make_unique<Impl>(workers, &readiness, std::move(outboundSink),
                                    std::move(movementSnapshotSink),
                                    std::move(combatOutboundSink), &deadlines,
-                                   nullptr, nullptr)) {}
+                                   nullptr, nullptr, nullptr)) {}
 
 RoomCommandGateway::RoomCommandGateway(
     runtime::WorkerPool &workers,
@@ -1222,7 +1425,7 @@ RoomCommandGateway::RoomCommandGateway(
     : impl_(std::make_unique<Impl>(workers, &readiness, std::move(outboundSink),
                                    std::move(movementSnapshotSink),
                                    std::move(combatOutboundSink), &deadlines,
-                                   &capacityGate, nullptr)) {}
+                                   &capacityGate, nullptr, nullptr)) {}
 
 RoomCommandGateway::RoomCommandGateway(
     runtime::WorkerPool &workers,
@@ -1231,11 +1434,27 @@ RoomCommandGateway::RoomCommandGateway(
     CombatOutboundSink combatOutboundSink,
     runtime::DeadlineScheduler &deadlines,
     settlement::SettlementCapacityGate &capacityGate,
-    settlement::SettlementStoragePort &storage)
+    settlement::SettlementStoragePort &storage, shared::RoomId firstRoomId)
+    : impl_(std::make_unique<Impl>(
+          workers, &readiness, std::move(outboundSink),
+          std::move(movementSnapshotSink), std::move(combatOutboundSink),
+          &deadlines, &capacityGate, &storage, nullptr, firstRoomId)) {}
+
+RoomCommandGateway::RoomCommandGateway(
+    runtime::WorkerPool &workers,
+    const GameplayTransportReadinessPort &readiness, OutboundSink outboundSink,
+    MovementSnapshotSink movementSnapshotSink,
+    CombatOutboundSink combatOutboundSink,
+    runtime::DeadlineScheduler &deadlines,
+    settlement::SettlementCapacityGate &capacityGate,
+    settlement::SettlementStoragePort &storage,
+    battle_continuity::DurableTickWritePort &continuityStorage,
+    shared::RoomId firstRoomId)
     : impl_(std::make_unique<Impl>(workers, &readiness, std::move(outboundSink),
                                    std::move(movementSnapshotSink),
                                    std::move(combatOutboundSink), &deadlines,
-                                   &capacityGate, &storage)) {}
+                                   &capacityGate, &storage, &continuityStorage,
+                                   firstRoomId)) {}
 
 RoomCommandGateway::~RoomCommandGateway() = default;
 
@@ -1277,8 +1496,34 @@ bool RoomCommandGateway::disconnect(shared::SessionId sessionId,
   return impl_->state->disconnect(sessionId, generation);
 }
 
+RoomSubmitResult
+RoomCommandGateway::suspendBattleInput(shared::SessionId sessionId,
+                                       shared::SessionGeneration generation) {
+  return impl_->state->submitBattleInput(sessionId, generation, false);
+}
+
+RoomSubmitResult
+RoomCommandGateway::resumeBattleInput(shared::SessionId sessionId,
+                                      shared::SessionGeneration generation) {
+  return impl_->state->submitBattleInput(sessionId, generation, true);
+}
+
 RoomExecutionObservation RoomCommandGateway::observation() const {
   return impl_->state->observation();
+}
+
+std::optional<std::vector<std::uint8_t>>
+RoomCommandGateway::battleJournal(shared::RoomId roomId) const {
+  return impl_->state->battleJournal(roomId);
+}
+
+bool RoomCommandGateway::installRecoveredBattle(
+    RecoveredBattleInstall recovered) {
+  return impl_->state->installRecoveredBattle(std::move(recovered));
+}
+
+bool RoomCommandGateway::activateRecoveredBattles() {
+  return impl_->state->activateRecoveredBattles();
 }
 
 } // namespace lol::game_flow

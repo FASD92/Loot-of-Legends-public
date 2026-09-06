@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,10 +16,13 @@ namespace LootOfLegends.Presentation
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
     public sealed class DevelopmentPlayerFlowDriver
     {
-        private const string EvidenceRoomTitle = "Portfolio Evidence";
+        private const string EvidenceRoomTitle = "Slice 8 Evidence";
         private const double AttackIntervalSeconds = 0.751;
         private const double MovementRetryIntervalSeconds = 0.1;
         private const double FinalLootProjectionGraceSeconds = 2.0;
+        private const double CollectionPollIntervalSeconds = 0.25;
+        private const double NormalCollectionDeadlineSeconds = 10.0;
+        private const double CrashCollectionDeadlineSeconds = 30.0;
         private const double MaximumRunSeconds = 150.0;
         private readonly string role;
         private readonly bool isHost;
@@ -31,6 +35,8 @@ namespace LootOfLegends.Presentation
         private readonly ICollectionApi collectionApi;
         private readonly CollectionReadModel collection;
         private readonly CancellationToken cancellationToken;
+        private readonly bool crashContinuityEvidence;
+        private readonly Func<ulong> sessionGeneration;
         private readonly double startedAt;
         private Task operation;
         private string operationStage = string.Empty;
@@ -63,6 +69,22 @@ namespace LootOfLegends.Presentation
         private double nextCollectionPollAt;
         private double collectionDeadline;
         private bool finished;
+        private bool operationReconnectAffected;
+        private bool preCrashObserved;
+        private ulong preRestartSessionId;
+        private ulong preRestartRoomId;
+        private ulong preRestartBattleId;
+        private ulong preRestartSessionGeneration;
+        private bool reconnectStarted;
+        private bool snapshotAppliedObserved;
+        private bool snapshotAcknowledgedObserved;
+        private bool postReconnectObserved;
+        private bool postRecoveryMovementSubmitted;
+        private bool postRecoveryMutationObserved;
+        private int postRecoveryInitialX;
+        private int postRecoveryInitialY;
+        private double nextPostRecoveryMovementAt;
+        private int crashEvidencePhase;
 
         public DevelopmentPlayerFlowDriver(
             string role,
@@ -75,6 +97,35 @@ namespace LootOfLegends.Presentation
             ICollectionApi collectionApi,
             CollectionReadModel collection,
             CancellationToken cancellationToken)
+            : this(
+                role,
+                lobbyRoom,
+                roomCommands,
+                hostStart,
+                battleLoad,
+                battleResult,
+                arena,
+                collectionApi,
+                collection,
+                cancellationToken,
+                false,
+                () => 0)
+        {
+        }
+
+        public DevelopmentPlayerFlowDriver(
+            string role,
+            LobbyRoomReadModel lobbyRoom,
+            ILobbyRoomCommands roomCommands,
+            IRoomHostStartAction hostStart,
+            BattleLoadReadModel battleLoad,
+            BattleResultReadModel battleResult,
+            Func<ArenaInputBinding> arena,
+            ICollectionApi collectionApi,
+            CollectionReadModel collection,
+            CancellationToken cancellationToken,
+            bool crashContinuityEvidence,
+            Func<ulong> sessionGeneration)
         {
             if (role != "host" && role != "join")
             {
@@ -98,10 +149,108 @@ namespace LootOfLegends.Presentation
             this.collection = collection ??
                 throw new ArgumentNullException(nameof(collection));
             this.cancellationToken = cancellationToken;
+            this.crashContinuityEvidence = crashContinuityEvidence;
+            this.sessionGeneration = sessionGeneration ??
+                throw new ArgumentNullException(nameof(sessionGeneration));
             startedAt = Time.realtimeSinceStartupAsDouble;
             QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = 240;
             Evidence("authenticated");
+        }
+
+        public void OnReconnectStarted()
+        {
+            if (operation != null && !operation.IsCompleted &&
+                IsArenaOperationStage(operationStage))
+            {
+                operationReconnectAffected = true;
+            }
+            if (!crashContinuityEvidence || finished)
+            {
+                return;
+            }
+            if (reconnectStarted)
+            {
+                Fail("duplicate_reconnect");
+                return;
+            }
+            if (!preCrashObserved)
+            {
+                Fail("reconnect_before_pre_crash");
+                return;
+            }
+            reconnectStarted = true;
+            snapshotAppliedObserved = false;
+            snapshotAcknowledgedObserved = false;
+            preRestartSessionId = lobbyRoom.SessionId;
+            preRestartRoomId = battleLoad.RoomId;
+            preRestartBattleId = battleLoad.BattleInstanceId;
+            preRestartSessionGeneration = CurrentSessionGeneration();
+            if (preRestartSessionId == 0 || preRestartRoomId == 0 ||
+                preRestartBattleId == 0 || preRestartSessionGeneration == 0)
+            {
+                Fail("reconnect_identity");
+                return;
+            }
+            CrashEvidence(
+                "reconnect_started",
+                preRestartSessionId,
+                preRestartRoomId,
+                preRestartBattleId,
+                preRestartSessionGeneration);
+        }
+
+        public void OnReconnectFailed()
+        {
+            if (crashContinuityEvidence && reconnectStarted)
+            {
+                Fail("reconnect_failed");
+            }
+        }
+
+        public void OnSnapshotApplied()
+        {
+            if (!crashContinuityEvidence || finished)
+            {
+                return;
+            }
+            if (!reconnectStarted)
+            {
+                Fail("snapshot_before_reconnect");
+                return;
+            }
+            if (snapshotAppliedObserved)
+            {
+                Fail("duplicate_snapshot_applied");
+                return;
+            }
+            snapshotAppliedObserved = true;
+            CrashEvidence("snapshot_applied");
+        }
+
+        public void OnSnapshotAcknowledged()
+        {
+            if (!crashContinuityEvidence || finished)
+            {
+                return;
+            }
+            if (!reconnectStarted)
+            {
+                Fail("snapshot_acknowledged_before_reconnect");
+                return;
+            }
+            if (!snapshotAppliedObserved)
+            {
+                Fail("snapshot_acknowledged_before_apply");
+                return;
+            }
+            if (snapshotAcknowledgedObserved)
+            {
+                Fail("duplicate_snapshot_acknowledged");
+                return;
+            }
+            snapshotAcknowledgedObserved = true;
+            CrashEvidence("snapshot_acknowledged");
         }
 
         public void Tick()
@@ -123,13 +272,30 @@ namespace LootOfLegends.Presentation
             }
 
             TickCollection(now);
+            if (finished)
+            {
+                return;
+            }
             ArenaInputBinding binding = arena();
-            if (battleLoad.IsGameplayActive && binding != null &&
+            if (crashContinuityEvidence && reconnectStarted &&
+                !postReconnectObserved &&
+                !TryObservePostReconnect(binding))
+            {
+                return;
+            }
+            if (battleLoad.IsGameplayActive && !battleLoad.IsReconnectLocked &&
+                binding != null &&
                 binding.IsTransportReady)
             {
                 if (activeBattleId != battleLoad.BattleInstanceId)
                 {
                     BeginBattle(binding);
+                }
+                if (crashContinuityEvidence && postReconnectObserved &&
+                    !postRecoveryMutationObserved)
+                {
+                    TickPostRecoveryMutation(binding, now);
+                    return;
                 }
                 TickActiveBattle(binding, now);
                 return;
@@ -137,6 +303,10 @@ namespace LootOfLegends.Presentation
             if (activeBattleId != 0 && battleResult.HasFinalResult)
             {
                 TickFinalResult(now);
+                return;
+            }
+            if (crashContinuityEvidence && completedCycles >= 1)
+            {
                 return;
             }
             TickLobbyAndRoom();
@@ -255,11 +425,27 @@ namespace LootOfLegends.Presentation
             finalResultSeenAt = 0;
             nextMovementSubmitAt = 0;
             nextAttackAt = 0;
+            if (!crashContinuityEvidence)
+            {
+                preCrashObserved = false;
+                reconnectStarted = false;
+                postReconnectObserved = false;
+                postRecoveryMovementSubmitted = false;
+                postRecoveryInitialX = 0;
+                postRecoveryInitialY = 0;
+                nextPostRecoveryMovementAt = 0;
+                crashEvidencePhase = 0;
+            }
             Evidence("arena_gameplay", completedCycles + 1, activeBattleId);
         }
 
         private void TickActiveBattle(ArenaInputBinding binding, double now)
         {
+            if (crashContinuityEvidence && preCrashObserved &&
+                !reconnectStarted)
+            {
+                return;
+            }
             if (battleResult.HasFinalResult && !lootObserved)
             {
                 Fail("final_before_loot");
@@ -275,6 +461,12 @@ namespace LootOfLegends.Presentation
                 TickMovementProof(binding, now);
                 return;
             }
+            TryEmitPreCrashState(binding);
+            if (finished || (crashContinuityEvidence && preCrashObserved &&
+                             !reconnectStarted))
+            {
+                return;
+            }
             if (operation == null && binding.Combat.HasMonster &&
                 now >= nextAttackAt)
             {
@@ -285,6 +477,147 @@ namespace LootOfLegends.Presentation
                         binding.Combat.MonsterId, cancellationToken),
                     "attack");
             }
+        }
+
+        private bool TryObservePostReconnect(ArenaInputBinding binding)
+        {
+            if (binding == null || !battleLoad.IsGameplayActive ||
+                battleLoad.IsReconnectLocked ||
+                !binding.IsTransportReady ||
+                !snapshotAcknowledgedObserved)
+            {
+                return false;
+            }
+            ulong currentSessionId = lobbyRoom.SessionId;
+            ulong currentRoomId = battleLoad.RoomId;
+            ulong currentBattleId = battleLoad.BattleInstanceId;
+            if (currentSessionId == 0 || currentRoomId == 0 ||
+                currentBattleId == 0 ||
+                currentSessionId != preRestartSessionId ||
+                currentRoomId != preRestartRoomId ||
+                currentBattleId != preRestartBattleId)
+            {
+                Fail("reconnect_identity");
+                return false;
+            }
+            ulong currentGeneration = CurrentSessionGeneration();
+            if (finished)
+            {
+                return false;
+            }
+            if (currentGeneration <= preRestartSessionGeneration)
+            {
+                Fail("reconnect_generation");
+                return false;
+            }
+            if (!binding.MovementReadModel.Positions.TryGetValue(
+                    currentSessionId,
+                    out PlayerPosition position))
+            {
+                return false;
+            }
+            ArenaPresentationSnapshot presentation = binding.Presentation.Snapshot();
+            GetPresentationPhase(
+                presentation,
+                out int phase,
+                out uint remainingSeconds);
+            if (phase != 1 || remainingSeconds == 0)
+            {
+                return false;
+            }
+            postRecoveryInitialX = position.PositionXMillimeters;
+            postRecoveryInitialY = position.PositionYMillimeters;
+            postReconnectObserved = true;
+            postRecoveryMovementSubmitted = false;
+            postRecoveryMutationObserved = false;
+            nextPostRecoveryMovementAt = 0;
+            CrashEvidence(
+                "post_reconnect_state",
+                currentSessionId,
+                currentRoomId,
+                currentBattleId,
+                currentGeneration,
+                presentation: presentation);
+            return true;
+        }
+
+        private void TickPostRecoveryMutation(
+            ArenaInputBinding binding,
+            double now)
+        {
+            if (!postReconnectObserved || postRecoveryMutationObserved ||
+                operation != null)
+            {
+                return;
+            }
+            if (!binding.MovementReadModel.Positions.TryGetValue(
+                    lobbyRoom.SessionId,
+                    out PlayerPosition position))
+            {
+                return;
+            }
+            if (postRecoveryMovementSubmitted &&
+                (position.PositionXMillimeters != postRecoveryInitialX ||
+                 position.PositionYMillimeters != postRecoveryInitialY))
+            {
+                postRecoveryMutationObserved = true;
+                CrashEvidence("post_recovery_mutation");
+                nextAttackAt = now;
+                Begin(
+                    binding.Input.MoveAsync(0, 0, cancellationToken),
+                    "post_recovery_movement_stop");
+                return;
+            }
+            if (!postRecoveryMovementSubmitted)
+            {
+                postRecoveryInitialX = position.PositionXMillimeters;
+                postRecoveryInitialY = position.PositionYMillimeters;
+            }
+            if (postRecoveryMovementSubmitted &&
+                now < nextPostRecoveryMovementAt)
+            {
+                return;
+            }
+            postRecoveryMovementSubmitted = true;
+            nextPostRecoveryMovementAt = now + MovementRetryIntervalSeconds;
+            Begin(
+                binding.Input.MoveAsync(
+                    isHost ? short.MaxValue : (short)0,
+                    isHost ? (short)0 : short.MaxValue,
+                    cancellationToken),
+                "post_recovery_movement");
+        }
+
+        private void TryEmitPreCrashState(ArenaInputBinding binding)
+        {
+            if (!crashContinuityEvidence || preCrashObserved || binding == null ||
+                !binding.MovementReadModel.Positions.TryGetValue(
+                    lobbyRoom.SessionId,
+                    out PlayerPosition position) ||
+                (position.PositionXMillimeters == initialX &&
+                 position.PositionYMillimeters == initialY))
+            {
+                return;
+            }
+            if (!binding.Combat.HasMonster ||
+                binding.Combat.HitPoints == 0 ||
+                binding.Combat.MaximumHitPoints == 0 ||
+                binding.Combat.HitPoints >= binding.Combat.MaximumHitPoints ||
+                !string.IsNullOrEmpty(binding.Combat.OutcomeName))
+            {
+                return;
+            }
+            ArenaPresentationSnapshot presentation = binding.Presentation.Snapshot();
+            GetPresentationPhase(
+                presentation,
+                out int phase,
+                out uint remainingSeconds);
+            if (phase != 1 || remainingSeconds == 0)
+            {
+                return;
+            }
+            preCrashObserved = true;
+            CrashEvidence("pre_crash_state", presentation: presentation);
         }
 
         private void TickMovementProof(ArenaInputBinding binding, double now)
@@ -376,6 +709,11 @@ namespace LootOfLegends.Presentation
             if (squaredDistance > 250000)
             {
                 movementStoppedForLoot = false;
+                if (now < nextMovementSubmitAt)
+                {
+                    return;
+                }
+                nextMovementSubmitAt = now + MovementRetryIntervalSeconds;
                 Begin(
                     binding.Input.MoveAsync(
                         Direction(deltaX), Direction(deltaY), cancellationToken),
@@ -438,11 +776,15 @@ namespace LootOfLegends.Presentation
             {
                 finalObserved = true;
                 Evidence("final_result", completedCycles + 1, activeBattleId);
+                CrashEvidence("final_result", phaseOverride: 3);
                 if (completedCycles == 0 && collectionPhase == 0)
                 {
                     collectionPhase = 1;
                     nextCollectionPollAt = now;
-                    collectionDeadline = now + 10.0;
+                    collectionDeadline = now +
+                        (crashContinuityEvidence
+                            ? CrashCollectionDeadlineSeconds
+                            : NormalCollectionDeadlineSeconds);
                 }
             }
             if (!battleResult.IsReadyForRematch || lobbyRoom.Room == null ||
@@ -454,6 +796,14 @@ namespace LootOfLegends.Presentation
             Evidence("room_reopened", completedCycles, activeBattleId);
             activeBattleId = 0;
             roomObserved = false;
+            if (crashContinuityEvidence)
+            {
+                if (collectionPhase == 3)
+                {
+                    Complete();
+                }
+                return;
+            }
             if (completedCycles >= 2)
             {
                 if (collectionPhase == 3)
@@ -479,7 +829,7 @@ namespace LootOfLegends.Presentation
             }
             if (now >= nextCollectionPollAt)
             {
-                nextCollectionPollAt = now + 0.25;
+                nextCollectionPollAt = now + CollectionPollIntervalSeconds;
                 collectionPoll = PollCollectionAsync();
             }
         }
@@ -495,6 +845,7 @@ namespace LootOfLegends.Presentation
             {
                 collectionPhase = 2;
                 Evidence("collection_pending");
+                CrashEvidence("collection_pending");
             }
             else if (collectionPhase == 2 &&
                      snapshot.PendingSettlementCount == 0 &&
@@ -502,7 +853,8 @@ namespace LootOfLegends.Presentation
             {
                 collectionPhase = 3;
                 Evidence("collection_applied");
-                if (completedCycles >= 2)
+                CrashEvidence("collection_applied");
+                if (completedCycles >= (crashContinuityEvidence ? 1 : 2))
                 {
                     Complete();
                 }
@@ -511,12 +863,23 @@ namespace LootOfLegends.Presentation
 
         private bool ObserveOperation()
         {
-            if (operation == null || !operation.IsCompleted)
+            if (operation == null)
             {
-                return operation == null;
+                return true;
+            }
+            if (!operation.IsCompleted)
+            {
+                return false;
             }
             if (operation.IsFaulted || operation.IsCanceled)
             {
+                if (IsExpectedReconnectArenaOperationFailure())
+                {
+                    operation = null;
+                    operationStage = string.Empty;
+                    operationReconnectAffected = false;
+                    return true;
+                }
                 string failure = operation.IsCanceled
                     ? "Canceled"
                     : operation.Exception?.GetBaseException().GetType().Name ??
@@ -526,7 +889,31 @@ namespace LootOfLegends.Presentation
             }
             operation = null;
             operationStage = string.Empty;
+            operationReconnectAffected = false;
             return true;
+        }
+
+        private bool IsExpectedReconnectArenaOperationFailure()
+        {
+            if (!operationReconnectAffected || !IsArenaOperationStage(operationStage))
+            {
+                return false;
+            }
+            if (operation.IsCanceled)
+            {
+                return true;
+            }
+            Exception error = operation.Exception?.GetBaseException();
+            return error is ObjectDisposedException || error is OperationCanceledException;
+        }
+
+        private static bool IsArenaOperationStage(string stage)
+        {
+            return stage == "movement_stop" || stage == "movement_submit" ||
+                stage == "attack" || stage == "loot_movement" ||
+                stage == "loot_stop" || stage == "loot_claim" ||
+                stage == "post_recovery_movement" ||
+                stage == "post_recovery_movement_stop";
         }
 
         private bool ObserveCollectionPoll()
@@ -537,6 +924,15 @@ namespace LootOfLegends.Presentation
             }
             if (collectionPoll.IsFaulted || collectionPoll.IsCanceled)
             {
+                if (crashContinuityEvidence &&
+                    Time.realtimeSinceStartupAsDouble <= collectionDeadline)
+                {
+                    collectionPoll = null;
+                    nextCollectionPollAt =
+                        Time.realtimeSinceStartupAsDouble +
+                        CollectionPollIntervalSeconds;
+                    return true;
+                }
                 Fail("collection_request");
                 return false;
             }
@@ -546,6 +942,7 @@ namespace LootOfLegends.Presentation
 
         private void Begin(Task task, string stage)
         {
+            operationReconnectAffected = false;
             operation = task ?? throw new ArgumentNullException(nameof(task));
             operationStage = stage;
         }
@@ -573,6 +970,7 @@ namespace LootOfLegends.Presentation
             {
                 return;
             }
+            CrashEvidence("complete");
             finished = true;
             Evidence("complete");
             Application.Quit(0);
@@ -584,10 +982,189 @@ namespace LootOfLegends.Presentation
             {
                 return;
             }
+            CrashFailure(stage);
             finished = true;
+            string loggedStage = crashContinuityEvidence
+                ? SafeFailureStage(stage)
+                : stage;
             Debug.LogError(
-                "[PortfolioEvidence] role=" + role + " event=failure stage=" + stage);
+                "[Slice8Evidence] role=" + role +
+                " event=failure stage=" + loggedStage);
             Application.Quit(2);
+        }
+
+        private ulong CurrentSessionGeneration()
+        {
+            try
+            {
+                return sessionGeneration();
+            }
+            catch (Exception)
+            {
+                return 0;
+            }
+        }
+
+        private void CrashFailure(string stage)
+        {
+            if (!crashContinuityEvidence)
+            {
+                return;
+            }
+            CrashEvidence("failure", detail: "stage=" + SafeFailureStage(stage));
+        }
+
+        private static string SafeFailureStage(string stage)
+        {
+            return stage == "reconnect_identity" ||
+                stage == "reconnect_generation" ||
+                stage == "reconnect_failed" ||
+                stage == "reconnect_before_pre_crash" ||
+                stage == "duplicate_reconnect" ||
+                stage == "snapshot_before_reconnect" ||
+                stage == "duplicate_snapshot_applied" ||
+                stage == "snapshot_acknowledged_before_reconnect" ||
+                stage == "snapshot_acknowledged_before_apply" ||
+                stage == "duplicate_snapshot_acknowledged" ||
+                stage == "final_before_loot" ||
+                stage == "loot_projection_missing" ||
+                stage == "loot_owned_by_other" ||
+                stage == "loot_claim_not_confirmed" ||
+                stage == "collection_transition" ||
+                stage == "collection_request" ||
+                stage == "timeout"
+                ? stage
+                : "runtime";
+        }
+
+        private void CrashEvidence(
+            string eventName,
+            ulong sessionId = 0,
+            ulong roomId = 0,
+            ulong battleId = 0,
+            ulong generation = 0,
+            string detail = null,
+            ArenaPresentationSnapshot presentation = null,
+            int? phaseOverride = null)
+        {
+            if (!crashContinuityEvidence)
+            {
+                return;
+            }
+            ArenaInputBinding binding = arena();
+            ulong currentSessionId = sessionId != 0
+                ? sessionId
+                : lobbyRoom.SessionId;
+            ulong currentRoomId = roomId != 0 ? roomId : battleLoad.RoomId;
+            ulong currentBattleId = battleId != 0
+                ? battleId
+                : battleLoad.BattleInstanceId != 0
+                    ? battleLoad.BattleInstanceId
+                    : activeBattleId;
+            ulong currentGeneration = generation != 0
+                ? generation
+                : CurrentSessionGeneration();
+            uint tick = 0;
+            int positionX = 0;
+            int positionY = 0;
+            uint monsterHitPoints = 0;
+            uint monsterMaximumHitPoints = 0;
+            int dropCount = 0;
+            if (binding != null)
+            {
+                tick = Math.Max(
+                    binding.MovementReadModel.ServerTick,
+                    binding.Combat.ServerTick);
+                if (currentSessionId != 0 &&
+                    binding.MovementReadModel.Positions.TryGetValue(
+                        currentSessionId,
+                        out PlayerPosition position))
+                {
+                    positionX = position.PositionXMillimeters;
+                    positionY = position.PositionYMillimeters;
+                }
+                monsterHitPoints = binding.Combat.HitPoints;
+                monsterMaximumHitPoints = binding.Combat.MaximumHitPoints;
+                dropCount = binding.Loot.Drops.Count;
+                presentation = presentation ?? binding.Presentation.Snapshot();
+            }
+            GetPresentationPhase(
+                presentation,
+                out int phase,
+                out uint remainingSeconds);
+            if (phaseOverride.HasValue)
+            {
+                phase = phaseOverride.Value;
+                remainingSeconds = 0;
+                crashEvidencePhase = phase;
+            }
+            else if (crashEvidencePhase == 3)
+            {
+                phase = 3;
+                remainingSeconds = 0;
+            }
+            Debug.Log(
+                "[CrashContinuityEvidence] event=" + eventName +
+                " role=" + role +
+                " session=" + Number(currentSessionId) +
+                " room=" + Number(currentRoomId) +
+                " battle=" + Number(currentBattleId) +
+                " generation=" + Number(currentGeneration) +
+                " tick=" + Number(tick) +
+                " x=" + Number(positionX) +
+                " y=" + Number(positionY) +
+                " monster_hp=" + Number(monsterHitPoints) +
+                " monster_max=" + Number(monsterMaximumHitPoints) +
+                " drops=" + Number(dropCount) +
+                " phase=" + Number(phase) +
+                " remaining_s=" + Number(remainingSeconds) +
+                (string.IsNullOrEmpty(detail) ? string.Empty : " " + detail));
+        }
+
+        private static void GetPresentationPhase(
+            ArenaPresentationSnapshot presentation,
+            out int phase,
+            out uint remainingSeconds)
+        {
+            phase = 0;
+            remainingSeconds = 0;
+            if (presentation == null)
+            {
+                return;
+            }
+            if (presentation.Monster != null &&
+                !string.IsNullOrEmpty(presentation.Monster.Outcome))
+            {
+                phase = 3;
+                return;
+            }
+            if (presentation.RemainingLootSeconds > 0 ||
+                presentation.CanClaimLoot)
+            {
+                phase = 2;
+                remainingSeconds = presentation.RemainingLootSeconds;
+                return;
+            }
+            if (presentation.RemainingCombatSeconds > 0)
+            {
+                phase = 1;
+                remainingSeconds = presentation.RemainingCombatSeconds;
+            }
+        }
+
+        private static string Number(ulong value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string Number(uint value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string Number(int value)
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
         }
 
         private void Evidence(
@@ -596,7 +1173,7 @@ namespace LootOfLegends.Presentation
             ulong battleId = 0,
             string detail = null)
         {
-            string line = "[PortfolioEvidence] role=" + role + " event=" + eventName;
+            string line = "[Slice8Evidence] role=" + role + " event=" + eventName;
             if (cycle != 0)
             {
                 line += " cycle=" + cycle;

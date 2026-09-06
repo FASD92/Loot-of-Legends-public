@@ -33,7 +33,7 @@ AttackCommand command(std::uint64_t id, std::uint64_t target = 1,
 }
 
 AttackTerminalResult accepted(const AttackCommand &attack,
-                              std::uint32_t remainingHitPoints = 1580) {
+                              std::uint32_t remainingHitPoints = 1550) {
   return AttackTerminalResult{
       .commandId = attack.commandId,
       .battleId = attack.battleId,

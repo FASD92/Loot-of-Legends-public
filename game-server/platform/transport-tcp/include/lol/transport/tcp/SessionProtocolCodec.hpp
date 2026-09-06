@@ -1,5 +1,6 @@
 #pragma once
 
+#include <lol/transport/tcp/FinalResultProtocol.hpp>
 #include <lol/transport/tcp/TcpConnection.hpp>
 
 #include <array>
@@ -37,6 +38,7 @@ enum class AuthenticationRejectedReason : std::uint16_t {
   WrongAudience = 4,
   DependencyUnavailable = 5,
   PreAuthCommand = 6,
+  ResumeUnavailable = 7,
 };
 
 struct AuthenticationRejected final {
@@ -64,10 +66,80 @@ struct RudpBindCapability final {
   bool operator==(const RudpBindCapability &) const = default;
 };
 
+struct ResumeBattleSession final {
+  std::uint64_t requestId;
+  std::uint64_t previousSessionId;
+  std::uint64_t previousSessionGeneration;
+  std::string credential;
+  bool operator==(const ResumeBattleSession &) const = default;
+};
+
+enum class BattleResumePhase : std::uint8_t {
+  Combat = 1,
+  Loot = 2,
+  Result = 3,
+};
+
+struct BattleResumePlayer final {
+  std::uint64_t sessionId;
+  std::int32_t positionXMillimeters;
+  std::int32_t positionYMillimeters;
+  bool healthKnown;
+  std::uint32_t hitPoints;
+  std::uint32_t maximumHitPoints;
+  bool alive;
+  bool operator==(const BattleResumePlayer &) const = default;
+};
+
+struct BattleResumeMonster final {
+  std::uint64_t monsterId;
+  std::int32_t positionXMillimeters;
+  std::int32_t positionYMillimeters;
+  std::uint32_t hitPoints;
+  std::uint32_t maximumHitPoints;
+  std::uint8_t state;
+  bool operator==(const BattleResumeMonster &) const = default;
+};
+
+struct BattleResumeDrop final {
+  std::uint64_t dropId;
+  std::uint64_t itemId;
+  std::uint64_t quantity;
+  std::int32_t positionXMillimeters;
+  std::int32_t positionYMillimeters;
+  std::uint8_t state;
+  std::uint64_t ownerSessionId;
+  bool operator==(const BattleResumeDrop &) const = default;
+};
+
+struct BattleResumeSnapshot final {
+  std::uint64_t requestId;
+  std::uint64_t snapshotId;
+  std::uint64_t roomId;
+  std::uint64_t battleInstanceId;
+  std::uint64_t playerSessionId;
+  std::uint64_t sessionGeneration;
+  BattleResumePhase phase;
+  std::uint32_t remainingMillis;
+  std::uint32_t serverTick;
+  std::vector<BattleResumePlayer> players;
+  std::optional<BattleResumeMonster> monster;
+  std::vector<BattleResumeDrop> drops;
+  std::uint64_t score;
+  std::optional<FinalResult> result;
+  bool operator==(const BattleResumeSnapshot &) const = default;
+};
+
+struct BattleResumeSnapshotApplied final {
+  std::uint64_t snapshotId;
+  bool operator==(const BattleResumeSnapshotApplied &) const = default;
+};
+
 using SessionControlMessage =
     std::variant<AuthenticateGameSession, Welcome, AuthenticationRejected,
-                 SessionReplaced, RequestRudpBindCapability,
-                 RudpBindCapability>;
+                 SessionReplaced, RequestRudpBindCapability, RudpBindCapability,
+                 ResumeBattleSession, BattleResumeSnapshot,
+                 BattleResumeSnapshotApplied>;
 
 enum class CodecError {
   None,

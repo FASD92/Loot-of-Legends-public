@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "contractId": "LOL-V2-PROTOCOL-MESSAGE-REGISTRY",
   "status": "Accepted",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "messages": [
     {
       "semanticName": "AuthenticateGameSession",
@@ -521,6 +521,62 @@
       "requiresEventId": false,
       "schemaVersion": 1,
       "releaseSince": "v1.0.0-alpha.8"
+    },
+    {
+      "semanticName": "AttackApplied",
+      "messageId": 38,
+      "direction": "SERVER_TO_CLIENT",
+      "canonicalChannel": "RUDP_RELIABLE",
+      "deliveryClass": "RELIABLE_GAMEPLAY_EVENT",
+      "ownerModule": "battle",
+      "lifecycleScope": "BATTLE",
+      "requiresRequestId": false,
+      "requiresCommandId": false,
+      "requiresEventId": true,
+      "schemaVersion": 1,
+      "releaseSince": "v1.0.0-rc.13"
+    },
+    {
+      "semanticName": "BattleResumeSnapshot",
+      "messageId": 39,
+      "direction": "SERVER_TO_CLIENT",
+      "canonicalChannel": "TCP",
+      "deliveryClass": "TCP_CONTROL",
+      "ownerModule": "game-flow",
+      "lifecycleScope": "BATTLE",
+      "requiresRequestId": true,
+      "requiresCommandId": false,
+      "requiresEventId": false,
+      "schemaVersion": 1,
+      "releaseSince": "v1.0.0-rc.14"
+    },
+    {
+      "semanticName": "ResumeBattleSession",
+      "messageId": 40,
+      "direction": "CLIENT_TO_SERVER",
+      "canonicalChannel": "TCP",
+      "deliveryClass": "TCP_CONTROL",
+      "ownerModule": "session",
+      "lifecycleScope": "SESSION",
+      "requiresRequestId": true,
+      "requiresCommandId": false,
+      "requiresEventId": false,
+      "schemaVersion": 1,
+      "releaseSince": "v1.0.0-rc.14"
+    },
+    {
+      "semanticName": "BattleResumeSnapshotApplied",
+      "messageId": 41,
+      "direction": "CLIENT_TO_SERVER",
+      "canonicalChannel": "TCP",
+      "deliveryClass": "TCP_CONTROL",
+      "ownerModule": "game-flow",
+      "lifecycleScope": "BATTLE",
+      "requiresRequestId": true,
+      "requiresCommandId": false,
+      "requiresEventId": false,
+      "schemaVersion": 1,
+      "releaseSince": "v1.0.0-rc.14"
     }
   ]
 }

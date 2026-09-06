@@ -16,6 +16,7 @@ constexpr std::uint16_t kMonsterStateSnapshotMessageId = 31;
 constexpr std::uint16_t kClaimLootTerminalResultMessageId = 33;
 constexpr std::uint16_t kDropSpawnedMessageId = 34;
 constexpr std::uint16_t kDropStateSnapshotMessageId = 35;
+constexpr std::uint16_t kAttackAppliedMessageId = 38;
 
 transport::rudp::RudpAttackTerminalResult
 toRudpResult(const battle::AttackTerminalResult &result) {
@@ -32,6 +33,23 @@ toRudpResult(const battle::AttackTerminalResult &result) {
               static_cast<std::uint8_t>(result.outcome))};
 }
 
+transport::rudp::RudpAttackApplied
+toRudpApplied(const battle::AttackAppliedRecord &applied) {
+  return {
+      .eventId = {.high = applied.eventId.high, .low = applied.eventId.low},
+      .battleInstanceId = applied.battleId.value(),
+      .eventStreamKind = transport::rudp::RudpEventStreamKind::CombatAction,
+      .eventSequence = applied.eventSequence,
+      .attackerSessionId = applied.attackerSessionId.value(),
+      .monsterId = applied.monsterId,
+      .actualDamage = applied.actualDamage,
+      .remainingHitPoints = applied.remainingHitPoints,
+      .serverTick = applied.serverTick,
+      .combatOutcome = static_cast<transport::rudp::RudpCombatOutcome>(
+          static_cast<std::uint8_t>(applied.outcome)),
+  };
+}
+
 transport::rudp::RudpMonsterSpawned
 toRudpSpawned(const game_flow::CombatMonsterSpawnedOutbound &spawned) {
   return {
@@ -43,7 +61,9 @@ toRudpSpawned(const game_flow::CombatMonsterSpawnedOutbound &spawned) {
       .monsterId = battle::CombatRuleset::monsterId,
       .posXMillimeter = battle::CombatRuleset::spawnPosition.xMillimeter,
       .posYMillimeter = battle::CombatRuleset::spawnPosition.yMillimeter,
-      .maximumHitPoints = battle::CombatRuleset::monsterHitPoints,
+      .maximumHitPoints =
+          battle::CombatRuleset::monsterHitPointsForParticipants(
+              static_cast<std::uint32_t>(spawned.participants.size())),
       .rulesetVersion = battle::CombatRuleset::version};
 }
 
@@ -377,6 +397,16 @@ void RudpCombatFlow::handleCombatOutbound(
           }
         } else if constexpr (std::is_same_v<
                                  Message,
+                                 game_flow::CombatAttackAppliedOutbound>) {
+          const auto applied = toRudpApplied(message.applied);
+          for (const auto &participant : message.participants) {
+            enqueueReliable(
+                participant.sessionId.value(), participant.generation.value(),
+                kAttackAppliedMessageId,
+                RudpBattleMessage{transport::rudp::RudpCombatMessage{applied}});
+          }
+        } else if constexpr (std::is_same_v<
+                                 Message,
                                  game_flow::CombatMonsterSpawnedOutbound>) {
           const auto spawned = toRudpSpawned(message);
           for (const auto &participant : message.participants) {
@@ -425,6 +455,12 @@ void RudpCombatFlow::handleCombatOutbound(
           // Room teardown already happened; only the per-battle snapshot
           // sequence identity is retired. No datagram is produced.
           retireSnapshotSequence(message.battleId.value());
+        } else if constexpr (std::is_same_v<
+                                 Message,
+                                 game_flow::CombatBattleResumeOutbound>) {
+          // TCP owns the atomic reconnect snapshot. It is never converted to
+          // incremental RUDP state.
+          return;
         } else if constexpr (std::is_same_v<
                                  Message,
                                  game_flow::CombatMonsterStateOutbound>) {
@@ -561,9 +597,6 @@ RudpCombatFlow::encodeMonsterSnapshot(
     const battle::CombatProjection &projection,
     std::span<const game_flow::BattleParticipantProjection> participants) {
   const auto sequence = nextSnapshotSequence(projection.battleId.value());
-  if (projection.terminal.has_value()) {
-    retireSnapshotSequence(projection.battleId.value());
-  }
   std::vector<EncodedRudpDatagram> datagrams;
   datagrams.reserve(participants.size());
   for (const auto &participant : participants) {

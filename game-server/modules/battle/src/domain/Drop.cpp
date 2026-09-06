@@ -28,11 +28,12 @@ std::uint64_t fnvAppendBytes(std::uint64_t state, std::uint64_t value,
 }
 
 std::uint64_t seedFor(shared::RoomId roomId, shared::BattleInstanceId battleId,
-                      std::uint16_t rulesetVersion) noexcept {
+                      std::uint32_t rulesetVersion,
+                      std::uint32_t rulesetBytes) noexcept {
   std::uint64_t state = kFnvOffsetBasis;
   state = fnvAppendBytes(state, roomId.value(), 8);
   state = fnvAppendBytes(state, battleId.value(), 8);
-  state = fnvAppendBytes(state, rulesetVersion, 2);
+  state = fnvAppendBytes(state, rulesetVersion, rulesetBytes);
   return state;
 }
 
@@ -69,12 +70,22 @@ DropPosition nextPosition(SplitMix64 &prng) noexcept {
 
 } // namespace
 
+BattleSeed deriveBattleSeed(shared::RoomId roomId,
+                            shared::BattleInstanceId battleId,
+                            BattleRulesetVersion rulesetVersion) noexcept {
+  // Preserve the v1 production RNG input exactly; continuity makes this seed
+  // explicit, it does not redefine the existing drop table.
+  const auto seed = seedFor(roomId, battleId, rulesetVersion, 2);
+  return seed == 0 ? kSplitMixGamma : seed;
+}
+
 std::optional<std::vector<RelicDrop>>
 generateDrops(shared::RoomId roomId, shared::BattleInstanceId battleId,
-              std::uint16_t rulesetVersion, std::uint32_t capturedCount,
-              const RelicCatalog &catalog) {
+              BattleSeed seed, std::uint16_t rulesetVersion,
+              std::uint32_t capturedCount, const RelicCatalog &catalog) {
   if (capturedCount < RelicRuleset::minCapturedParticipants ||
-      capturedCount > RelicRuleset::maxCapturedParticipants) {
+      capturedCount > RelicRuleset::maxCapturedParticipants || seed == 0 ||
+      rulesetVersion != RelicRuleset::version) {
     return std::nullopt;
   }
   // 생성할 item이 snapshot에 있는지 확인한다. snapshot은 immutable이므로
@@ -86,7 +97,12 @@ generateDrops(shared::RoomId roomId, shared::BattleInstanceId battleId,
 
   std::vector<RelicDrop> drops;
   drops.reserve(capturedCount);
-  SplitMix64 prng{seedFor(roomId, battleId, rulesetVersion)};
+  // roomId/battleId remain part of the public Battle identity; the explicit
+  // BattleSeed is the sole production RNG input. Keep the parameters in the
+  // signature to make accidental omission at the call boundary visible.
+  static_cast<void>(roomId);
+  static_cast<void>(battleId);
+  SplitMix64 prng{seed};
   for (std::uint32_t index = 0; index < capturedCount; ++index) {
     const auto itemId =
         index == 0 ? RelicRuleset::rareItemId : RelicRuleset::commonItemId;
@@ -94,6 +110,15 @@ generateDrops(shared::RoomId roomId, shared::BattleInstanceId battleId,
         RelicDrop{DropId{index + 1}, itemId, 1, nextPosition(prng)});
   }
   return drops;
+}
+
+std::optional<std::vector<RelicDrop>>
+generateDrops(shared::RoomId roomId, shared::BattleInstanceId battleId,
+              std::uint16_t rulesetVersion, std::uint32_t capturedCount,
+              const RelicCatalog &catalog) {
+  const auto legacySeed = seedFor(roomId, battleId, rulesetVersion, 2);
+  return generateDrops(roomId, battleId, legacySeed, rulesetVersion,
+                       capturedCount, catalog);
 }
 
 } // namespace lol::battle

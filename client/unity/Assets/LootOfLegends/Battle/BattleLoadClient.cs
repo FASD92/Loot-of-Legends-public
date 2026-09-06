@@ -201,6 +201,7 @@ namespace LootOfLegends.Battle
 
         public bool IsWaiting { get; private set; }
         public bool IsGameplayActive { get; private set; }
+        public bool IsReconnectLocked { get; private set; }
         public ulong RoomId { get; private set; }
         public ulong BattleInstanceId { get; private set; }
         public IReadOnlyList<BattleParticipant> Participants => participants;
@@ -218,6 +219,7 @@ namespace LootOfLegends.Battle
                     participants = Array.Empty<BattleParticipant>();
                     IsWaiting = true;
                     IsGameplayActive = false;
+                    IsReconnectLocked = false;
                     LastCancelReason = null;
                     LastRecoveryReason = null;
                     Changed?.Invoke();
@@ -226,6 +228,7 @@ namespace LootOfLegends.Battle
                     participants = start.Participants;
                     IsWaiting = false;
                     IsGameplayActive = true;
+                    IsReconnectLocked = false;
                     LastCancelReason = null;
                     Changed?.Invoke();
                     return true;
@@ -234,6 +237,7 @@ namespace LootOfLegends.Battle
                     participants = Array.Empty<BattleParticipant>();
                     IsWaiting = false;
                     IsGameplayActive = false;
+                    IsReconnectLocked = false;
                     LastCancelReason = cancelled.Reason;
                     Changed?.Invoke();
                     return true;
@@ -278,6 +282,54 @@ namespace LootOfLegends.Battle
             return true;
         }
 
+        public bool ApplyResumeSnapshot(BattleResumeSnapshot snapshot)
+        {
+            if (snapshot == null ||
+                (RoomId != 0 && RoomId != snapshot.RoomId) ||
+                (BattleInstanceId != 0 && BattleInstanceId != snapshot.BattleInstanceId))
+            {
+                return false;
+            }
+            var existingParticipants = new Dictionary<ulong, BattleParticipant>();
+            foreach (BattleParticipant participant in participants)
+            {
+                existingParticipants[participant.SessionId] = participant;
+            }
+            var nextParticipants = new List<BattleParticipant>(snapshot.Players.Count);
+            foreach (BattleResumePlayerState player in snapshot.Players)
+            {
+                existingParticipants.TryGetValue(
+                    player.SessionId,
+                    out BattleParticipant existing);
+                nextParticipants.Add(new BattleParticipant(
+                    player.SessionId,
+                    player.SessionId == snapshot.PlayerSessionId
+                        ? snapshot.SessionGeneration
+                        : existing == null ? 1 : existing.SessionGeneration,
+                    existing == null ? string.Empty : existing.Nickname));
+            }
+            RoomId = snapshot.RoomId;
+            BattleInstanceId = snapshot.BattleInstanceId;
+            participants = nextParticipants.AsReadOnly();
+            IsWaiting = false;
+            IsGameplayActive = snapshot.Phase != BattleResumePhase.Result;
+            LastCancelReason = null;
+            LastRecoveryReason = null;
+            Changed?.Invoke();
+            return true;
+        }
+
+        public bool SetReconnectLocked(bool locked)
+        {
+            if (IsReconnectLocked == locked)
+            {
+                return false;
+            }
+            IsReconnectLocked = locked;
+            Changed?.Invoke();
+            return true;
+        }
+
         public bool ResetForLobby()
         {
             if (RoomId == 0 && BattleInstanceId == 0)
@@ -287,6 +339,7 @@ namespace LootOfLegends.Battle
             participants = Array.Empty<BattleParticipant>();
             IsWaiting = false;
             IsGameplayActive = false;
+            IsReconnectLocked = false;
             RoomId = 0;
             BattleInstanceId = 0;
             LastCancelReason = null;

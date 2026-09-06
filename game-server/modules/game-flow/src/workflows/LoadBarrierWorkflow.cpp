@@ -22,7 +22,6 @@ finishResolvedBarrier(lobby_room::Room &room,
     if (room.reopenAfterLoadCancelled() != lobby_room::RoomResultCode::Ok) {
       std::terminate();
     }
-    battleInstance.reset();
   }
   return projection;
 }
@@ -41,7 +40,8 @@ LoadBarrierWorkflowResult
 completeLoad(lobby_room::Room &room,
              std::optional<battle::BattleInstance> &battleInstance,
              const battle::ArenaLoadCompleteCommand &command,
-             const GameplayTransportReadinessPort *readiness) {
+             const GameplayTransportReadinessPort *readiness,
+             battle::BattleTime at) {
   if (!battleInstance.has_value()) {
     return {battle::BattleLoadResultCode::StaleBattle, std::nullopt, false};
   }
@@ -49,7 +49,7 @@ completeLoad(lobby_room::Room &room,
   const bool transportReady =
       readiness != nullptr &&
       readiness->isReady(command.sessionId, command.generation);
-  const auto code = battleInstance->completeLoad(command, transportReady);
+  const auto code = battleInstance->completeLoad(command, transportReady, at);
   if (code != battle::BattleLoadResultCode::Ok) {
     return {code, battleInstance->projection(), false};
   }
@@ -57,13 +57,11 @@ completeLoad(lobby_room::Room &room,
   return {code, projection, becameGameplayCommitted(before, projection)};
 }
 
-LoadDisconnectWorkflowResult
-exitParticipant(lobby_room::Room &room,
-                std::optional<battle::BattleInstance> &battleInstance,
-                shared::SessionId sessionId,
-                shared::SessionGeneration generation,
-                battle::ParticipantExitStatus exitStatus,
-                std::chrono::steady_clock::time_point completedAt) {
+LoadDisconnectWorkflowResult exitParticipant(
+    lobby_room::Room &room,
+    std::optional<battle::BattleInstance> &battleInstance,
+    shared::SessionId sessionId, shared::SessionGeneration generation,
+    battle::ParticipantExitStatus exitStatus, battle::BattleTime completedAt) {
   auto battleCode = battle::BattleLoadResultCode::StaleBattle;
   auto before = battle::BattleLoadState::Created;
   if (battleInstance.has_value()) {
@@ -99,7 +97,7 @@ LoadDisconnectWorkflowResult
 disconnect(lobby_room::Room &room,
            std::optional<battle::BattleInstance> &battleInstance,
            shared::SessionId sessionId, shared::SessionGeneration generation,
-           std::chrono::steady_clock::time_point completedAt) {
+           battle::BattleTime completedAt) {
   return exitParticipant(room, battleInstance, sessionId, generation,
                          battle::ParticipantExitStatus::Disconnected,
                          completedAt);

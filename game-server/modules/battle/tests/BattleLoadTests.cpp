@@ -1,5 +1,8 @@
 #include <lol/battle/BattleLoadApi.hpp>
+#include <lol/battle/CombatApi.hpp>
+#include <lol/battle/LootApi.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -9,14 +12,20 @@
 namespace {
 
 using lol::battle::ArenaLoadCompleteCommand;
+using lol::battle::AttackCommand;
+using lol::battle::AttackResultCode;
 using lol::battle::BattleAdmissionSnapshot;
 using lol::battle::BattleInstance;
 using lol::battle::BattleLoadResultCode;
 using lol::battle::BattleLoadState;
 using lol::battle::BattleStartCandidate;
 using lol::battle::CandidateDisconnectedCommand;
+using lol::battle::ClaimLootCommand;
+using lol::battle::CommandId;
+using lol::battle::DirectionIntent;
 using lol::battle::LoadBarrierDeadlineCommand;
 using lol::battle::LoadCandidateState;
+using lol::battle::MovementResultCode;
 using lol::battle::ParticipantExitStatus;
 using lol::shared::AccountId;
 using lol::shared::BattleInstanceId;
@@ -82,6 +91,96 @@ CandidateDisconnectedCommand disconnect(std::uint64_t sessionId,
       .roomId = RoomId{7},
       .battleId = BattleInstanceId{1},
   };
+}
+
+bool inputSuspendStopsAllPlayerCommandsAndResumeRestoresOnlyCurrentGeneration() {
+  auto battle = openBattle(2);
+  if (battle.completeLoad(complete(1), true) != BattleLoadResultCode::Ok ||
+      battle.completeLoad(complete(2), true) != BattleLoadResultCode::Ok) {
+    return false;
+  }
+
+  const auto receivedAt = std::chrono::steady_clock::now();
+  const auto move = lol::battle::MoveCommand{
+      .sessionId = SessionId{1},
+      .generation = SessionGeneration{1},
+      .battleId = BattleInstanceId{1},
+      .actionSequence = 1,
+      .direction =
+          DirectionIntent{.desiredX = 1, .desiredY = 0, .inputFlags = 0},
+  };
+  if (battle.acceptMove(move, receivedAt) != MovementResultCode::Ok ||
+      battle.integrateMovement(lol::battle::MovementTickCommand{
+          .battleId = BattleInstanceId{1}, .serverTick = 1}) !=
+          MovementResultCode::Ok) {
+    return false;
+  }
+  const auto beforeSuspend = battle.movementProjection();
+  const auto beforeLoad = battle.projection();
+  const auto beforeLoot = battle.lootProjection();
+  const auto beforeResult = battle.resultProjection();
+  if (battle.suspendInput(SessionId{1}, SessionGeneration{1}) !=
+      lol::battle::BattleInputResultCode::Ok) {
+    return false;
+  }
+
+  auto suspendedMove = move;
+  suspendedMove.actionSequence = 2;
+  const auto attack = AttackCommand{
+      .commandId = CommandId{.high = 1, .low = 1},
+      .sessionId = SessionId{1},
+      .generation = SessionGeneration{1},
+      .battleId = BattleInstanceId{1},
+      .targetHint = lol::battle::CombatRuleset::monsterId,
+  };
+  const auto claim = ClaimLootCommand{
+      .commandId = CommandId{.high = 1, .low = 2},
+      .sessionId = SessionId{1},
+      .generation = SessionGeneration{1},
+      .battleId = BattleInstanceId{1},
+      .dropId = lol::battle::DropId{1},
+  };
+  if (battle.acceptMove(suspendedMove, receivedAt) !=
+          MovementResultCode::NotEligible ||
+      battle.attack(attack, receivedAt).code != AttackResultCode::NotEligible ||
+      battle.claimLoot(claim, receivedAt).code !=
+          lol::battle::ClaimLootResultCode::NotEligible ||
+      battle.integrateMovement(lol::battle::MovementTickCommand{
+          .battleId = BattleInstanceId{1}, .serverTick = 2}) !=
+          MovementResultCode::Ok) {
+    return false;
+  }
+  const auto whileSuspended = battle.movementProjection();
+  const auto suspended =
+      battle.resumeProjection(SessionId{1}, SessionGeneration{1});
+  if (whileSuspended.players != beforeSuspend.players ||
+      battle.projection().state != beforeLoad.state ||
+      battle.projection().capturedParticipants !=
+          beforeLoad.capturedParticipants ||
+      battle.lootProjection() != beforeLoot ||
+      battle.resultProjection() != beforeResult || !suspended.has_value() ||
+      suspended->inputEnabled ||
+      battle.suspendInput(SessionId{1}, SessionGeneration{2}) !=
+          lol::battle::BattleInputResultCode::StaleSession ||
+      battle.resumeInput(SessionId{1}, SessionGeneration{2}) !=
+          lol::battle::BattleInputResultCode::StaleSession) {
+    return false;
+  }
+
+  if (battle.resumeInput(SessionId{1}, SessionGeneration{1}) !=
+      lol::battle::BattleInputResultCode::Ok) {
+    return false;
+  }
+  const auto resumed =
+      battle.resumeProjection(SessionId{1}, SessionGeneration{1});
+  return resumed.has_value() && resumed->roomId == RoomId{7} &&
+         resumed->battleId == BattleInstanceId{1} &&
+         resumed->sessionId == SessionId{1} &&
+         resumed->generation == SessionGeneration{1} && resumed->inputEnabled &&
+         resumed->battleState == BattleLoadState::GameplayCommitted &&
+         resumed->combat.has_value() &&
+         resumed->loot.battleId == BattleInstanceId{1} &&
+         resumed->result.state == lol::battle::BattleResultState::NotReady;
 }
 
 LoadCandidateState candidateState(const BattleInstance &battle,
@@ -184,7 +283,8 @@ int main() {
       !completionIsCorrelatedAndIdempotent() ||
       !twoReadyCandidatesCommitCapturedSet() ||
       !disconnectBelowMinimumCancels() ||
-      !deadlineTimesOutPendingCandidatesAndResolves()) {
+      !deadlineTimesOutPendingCandidatesAndResolves() ||
+      !inputSuspendStopsAllPlayerCommandsAndResumeRestoresOnlyCurrentGeneration()) {
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

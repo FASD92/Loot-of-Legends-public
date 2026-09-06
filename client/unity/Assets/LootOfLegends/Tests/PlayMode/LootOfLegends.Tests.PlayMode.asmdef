@@ -8,7 +8,8 @@
     "LootOfLegends.LobbyRoom",
     "LootOfLegends.Collection",
     "LootOfLegends.Session",
-    "LootOfLegends.Presentation"
+    "LootOfLegends.Presentation",
+    "UnityEngine.UI"
   ],
   "optionalUnityReferences": [
     "TestAssemblies"

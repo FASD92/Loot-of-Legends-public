@@ -11,13 +11,14 @@ using lol::battle::Monster;
 using lol::battle::MonsterDamageResult;
 using lol::battle::MonsterState;
 
-bool rulesetMatchesFrozenV1Contract() {
-  return CombatRuleset::version == 1 && CombatRuleset::monsterCount == 1 &&
+bool rulesetMatchesParticipantScaledV4Contract() {
+  return CombatRuleset::version == 4 && CombatRuleset::monsterCount == 1 &&
          CombatRuleset::monsterId == 1 &&
          CombatRuleset::spawnPosition == CombatPosition{0, 0} &&
-         CombatRuleset::monsterHitPoints == 1600 &&
-         CombatRuleset::attackDamage == 20 &&
-         CombatRuleset::attackRangeMillimeters == 3000 &&
+         CombatRuleset::monsterHitPointsForParticipants(2) == 1600 &&
+         CombatRuleset::monsterHitPointsForParticipants(10) == 8000 &&
+         CombatRuleset::attackDamage == 100 &&
+         CombatRuleset::attackRangeMillimeters == 12000 &&
          CombatRuleset::perPlayerCooldownMillis == 750 &&
          CombatRuleset::combatDeadlineMillis == 30000 &&
          CombatRuleset::attackRatePerSecond == 8 &&
@@ -26,27 +27,27 @@ bool rulesetMatchesFrozenV1Contract() {
 
 bool rangeUsesServerMillimetersAndIncludesBoundary() {
   return CombatRuleset::inAttackRange(CombatPosition{0, 0},
-                                      CombatPosition{3000, 0}) &&
-         CombatRuleset::inAttackRange(CombatPosition{-3000, 0},
+                                      CombatPosition{12000, 0}) &&
+         CombatRuleset::inAttackRange(CombatPosition{-12000, 0},
                                       CombatPosition{0, 0}) &&
          !CombatRuleset::inAttackRange(CombatPosition{0, 0},
-                                       CombatPosition{3001, 0}) &&
+                                       CombatPosition{12001, 0}) &&
          !CombatRuleset::inAttackRange(CombatPosition{-10000, -10000},
                                        CombatPosition{10000, 10000});
 }
 
-bool monsterSpawnsFromRulesAndAppliesOnlyFixedDamage() {
-  auto monster = Monster::spawn();
+bool monsterSpawnsFromCommittedParticipantCountAndAppliesFixedDamage() {
+  auto monster =
+      Monster::spawn(CombatRuleset::monsterHitPointsForParticipants(2));
   if (monster.id() != CombatRuleset::monsterId ||
       monster.position() != CombatRuleset::spawnPosition ||
-      monster.hitPoints() != CombatRuleset::monsterHitPoints ||
-      monster.state() != MonsterState::Alive ||
+      monster.hitPoints() != 1600 || monster.state() != MonsterState::Alive ||
       monster.applyAttack() != MonsterDamageResult::Applied ||
-      monster.hitPoints() != 1580 || monster.state() != MonsterState::Alive) {
+      monster.hitPoints() != 1500 || monster.state() != MonsterState::Alive) {
     return false;
   }
 
-  for (std::uint32_t attack = 0; attack < 78; ++attack) {
+  for (std::uint32_t attack = 0; attack < 14; ++attack) {
     if (monster.applyAttack() != MonsterDamageResult::Applied) {
       return false;
     }
@@ -64,12 +65,21 @@ bool monsterSpawnsFromRulesAndAppliesOnlyFixedDamage() {
          monster.state() == beforeState;
 }
 
+bool tenParticipantMonsterUsesTheSameFixedDamage() {
+  auto monster =
+      Monster::spawn(CombatRuleset::monsterHitPointsForParticipants(10));
+  return monster.hitPoints() == 8000 &&
+         monster.applyAttack() == MonsterDamageResult::Applied &&
+         monster.hitPoints() == 7900;
+}
+
 } // namespace
 
 int main() {
-  if (!rulesetMatchesFrozenV1Contract() ||
+  if (!rulesetMatchesParticipantScaledV4Contract() ||
       !rangeUsesServerMillimetersAndIncludesBoundary() ||
-      !monsterSpawnsFromRulesAndAppliesOnlyFixedDamage()) {
+      !monsterSpawnsFromCommittedParticipantCountAndAppliesFixedDamage() ||
+      !tenParticipantMonsterUsesTheSameFixedDamage()) {
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

@@ -45,6 +45,9 @@ _MESSAGE_NAMES = {
     21: "RudpBindCapability",
     36: "FinalResult",
     37: "BattleRecoveryNotice",
+    39: "BattleResumeSnapshot",
+    40: "ResumeBattleSession",
+    41: "BattleResumeSnapshotApplied",
 }
 _MESSAGE_IDS = {name: message_id for message_id, name in _MESSAGE_NAMES.items()}
 _AUTH_REASONS = {
@@ -54,6 +57,7 @@ _AUTH_REASONS = {
     "WRONG_AUDIENCE": 4,
     "DEPENDENCY_UNAVAILABLE": 5,
     "PRE_AUTH_COMMAND": 6,
+    "RESUME_UNAVAILABLE": 7,
 }
 _SESSION_REASONS = {"SAME_ACCOUNT_LOGIN": 1}
 _ROOM_RESULTS = {
@@ -97,6 +101,8 @@ _RECOVERY_REASONS = {
     "RESULT_GENERATION_FAILED": 1,
     "SETTLEMENT_RECOVERY_PENDING": 2,
 }
+_RESUME_PHASES = {"COMBAT": 1, "LOOT": 2, "RESULT": 3}
+_LOOT_STATES = {"UNCLAIMED": 0, "CLAIMED": 1, "EXPIRED": 2}
 
 
 def encode_tcp_message(name: str, fields: dict[str, Any]) -> bytes:
@@ -225,6 +231,156 @@ def encode_tcp_message(name: str, fields: dict[str, Any]) -> bytes:
         if not isinstance(capability, bytes) or len(capability) != 32 or not any(capability):
             raise ProtocolError("capability must be 32 nonzero bytes")
         append(capability)
+    elif name == "ResumeBattleSession":
+        credential = _credential(fields.get("credential"))
+        append(_u64(fields, "requestId"))
+        append(_u64(fields, "previousSessionId"))
+        append(_u64(fields, "previousSessionGeneration"))
+        append(struct.pack(">H", len(credential)))
+        append(credential)
+    elif name == "BattleResumeSnapshotApplied":
+        append(_u64(fields, "snapshotId"))
+    elif name == "BattleResumeSnapshot":
+        phase = _enum(fields.get("phase"), _RESUME_PHASES, "phase")
+        remaining_millis = _nonnegative(fields.get("remainingMillis"), "remainingMillis", 32)
+        result = fields.get("result")
+        if (phase == _RESUME_PHASES["RESULT"]) != (result is not None) or (
+            phase == _RESUME_PHASES["RESULT"] and remaining_millis != 0
+        ):
+            raise ProtocolError("phase/result/remainingMillis do not match")
+
+        player_session_id = _positive(fields.get("playerSessionId"), "playerSessionId", 64)
+        players = fields.get("players")
+        if not isinstance(players, list) or not 2 <= len(players) <= 10:
+            raise ProtocolError("players must contain 2..10 entries")
+        player_ids: set[int] = set()
+        encoded_players = bytearray()
+        for player in players:
+            if not isinstance(player, dict):
+                raise ProtocolError("player must be an object")
+            session_id = _positive(player.get("sessionId"), "sessionId", 64)
+            if session_id in player_ids:
+                raise ProtocolError("player sessionId is duplicated")
+            player_ids.add(session_id)
+            x = _signed(player.get("positionXMillimeters"), "positionXMillimeters", 32)
+            y = _signed(player.get("positionYMillimeters"), "positionYMillimeters", 32)
+            health_known = _flag(player.get("healthKnown"), "healthKnown")
+            hit_points = _nonnegative(player.get("hitPoints"), "hitPoints", 32)
+            maximum_hit_points = _nonnegative(
+                player.get("maximumHitPoints"), "maximumHitPoints", 32
+            )
+            if (not health_known and (hit_points != 0 or maximum_hit_points != 0)) or (
+                health_known and (maximum_hit_points == 0 or hit_points > maximum_hit_points)
+            ):
+                raise ProtocolError("player health values are invalid")
+            alive = _flag(player.get("alive"), "alive")
+            encoded_players.extend(
+                struct.pack(">QiiBIIB", session_id, x, y, health_known, hit_points, maximum_hit_points, alive)
+            )
+        if player_session_id not in player_ids:
+            raise ProtocolError("players must contain playerSessionId")
+
+        monster = fields.get("monster")
+        encoded_monster = bytearray(struct.pack(">B", int(monster is not None)))
+        if monster is not None:
+            if not isinstance(monster, dict):
+                raise ProtocolError("monster must be an object")
+            hit_points = _nonnegative(monster.get("hitPoints"), "hitPoints", 32)
+            maximum_hit_points = _positive(
+                monster.get("maximumHitPoints"), "maximumHitPoints", 32
+            )
+            state = _nonnegative(monster.get("state"), "state", 8)
+            if hit_points > maximum_hit_points or state > 3:
+                raise ProtocolError("monster health or state is invalid")
+            encoded_monster.extend(
+                struct.pack(
+                    ">QiiIIB",
+                    _positive(monster.get("monsterId"), "monsterId", 64),
+                    _signed(monster.get("positionXMillimeters"), "positionXMillimeters", 32),
+                    _signed(monster.get("positionYMillimeters"), "positionYMillimeters", 32),
+                    hit_points,
+                    maximum_hit_points,
+                    state,
+                )
+            )
+
+        drops = fields.get("drops")
+        if not isinstance(drops, list) or len(drops) > 10:
+            raise ProtocolError("drops must contain at most 10 entries")
+        drop_ids: set[int] = set()
+        encoded_drops = bytearray()
+        for drop in drops:
+            if not isinstance(drop, dict):
+                raise ProtocolError("drop must be an object")
+            drop_id = _positive(drop.get("dropId"), "dropId", 64)
+            if drop_id in drop_ids:
+                raise ProtocolError("dropId is duplicated")
+            drop_ids.add(drop_id)
+            state = _enum(drop.get("state"), _LOOT_STATES, "state")
+            owner_session_id = _nonnegative(drop.get("ownerSessionId"), "ownerSessionId", 64)
+            if (state == _LOOT_STATES["CLAIMED"]) != (owner_session_id != 0):
+                raise ProtocolError("drop state and ownerSessionId do not match")
+            encoded_drops.extend(
+                struct.pack(
+                    ">QQQiiBQ",
+                    drop_id,
+                    _positive(drop.get("itemId"), "itemId", 64),
+                    _positive(drop.get("quantity"), "quantity", 64),
+                    _signed(drop.get("positionXMillimeters"), "positionXMillimeters", 32),
+                    _signed(drop.get("positionYMillimeters"), "positionYMillimeters", 32),
+                    state,
+                    owner_session_id,
+                )
+            )
+
+        encoded_result = bytearray(struct.pack(">B", int(result is not None)))
+        if result is not None:
+            if not isinstance(result, dict):
+                raise ProtocolError("result must be an object")
+            outcome = _enum(result.get("outcome"), _FINAL_OUTCOMES, "outcome")
+            entries = result.get("entries")
+            if not isinstance(entries, list) or not 2 <= len(entries) <= 10:
+                raise ProtocolError("result entries must contain 2..10 entries")
+            encoded_result.extend(struct.pack(">BH", outcome, len(entries)))
+            result_sessions: set[int] = set()
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ProtocolError("result entry must be an object")
+                session_id = _positive(entry.get("sessionId"), "sessionId", 64)
+                if session_id in result_sessions:
+                    raise ProtocolError("result sessionId is duplicated")
+                result_sessions.add(session_id)
+                rank = _nonnegative(entry.get("rank"), "rank", 32)
+                is_top = _flag(entry.get("isTop"), "isTop")
+                if (outcome == _FINAL_OUTCOMES["MONSTER_DEFEATED"] and (
+                    rank == 0 or is_top != (rank == 1)
+                )) or (outcome != _FINAL_OUTCOMES["MONSTER_DEFEATED"] and (rank != 0 or is_top)):
+                    raise ProtocolError("result rank/isTop do not match outcome")
+                encoded_result.extend(struct.pack(">Q", session_id))
+                encoded_result.extend(_text16(entry.get("nickname"), "nickname"))
+                encoded_result.extend(
+                    struct.pack(
+                        ">BQIB",
+                        _enum(entry.get("exitStatus"), _FINAL_EXIT_STATUSES, "exitStatus"),
+                        _nonnegative(entry.get("finalAssetValue"), "finalAssetValue", 64),
+                        rank,
+                        is_top,
+                    )
+                )
+
+        append(_u64(fields, "requestId"))
+        append(_u64(fields, "snapshotId"))
+        append(_u64(fields, "roomId"))
+        append(_u64(fields, "battleInstanceId"))
+        append(struct.pack(">Q", player_session_id))
+        append(_u64(fields, "sessionGeneration"))
+        append(struct.pack(">BIIH", phase, remaining_millis, _nonnegative(fields.get("serverTick"), "serverTick", 32), len(players)))
+        append(encoded_players)
+        append(encoded_monster)
+        append(struct.pack(">H", len(drops)))
+        append(encoded_drops)
+        append(_uint(fields, "score", 64, minimum=0))
+        append(encoded_result)
     elif name == "FinalResult":
         append(_u64(fields, "roomId"))
         append(_u64(fields, "battleInstanceId"))
@@ -394,6 +550,99 @@ def _decode_payload(name: str, reader: _Reader) -> dict[str, Any]:
             "ttlMillis": reader.u32(),
             "capability": reader.bytes(32),
         }
+    if name == "ResumeBattleSession":
+        return {
+            "requestId": reader.u64(),
+            "previousSessionId": reader.u64(),
+            "previousSessionGeneration": reader.u64(),
+            "credential": reader.text(reader.u16()),
+        }
+    if name == "BattleResumeSnapshotApplied":
+        return {"snapshotId": reader.u64()}
+    if name == "BattleResumeSnapshot":
+        fields: dict[str, Any] = {
+            "requestId": reader.u64(),
+            "snapshotId": reader.u64(),
+            "roomId": reader.u64(),
+            "battleInstanceId": reader.u64(),
+            "playerSessionId": reader.u64(),
+            "sessionGeneration": reader.u64(),
+            "phase": _enum_name(reader.u8(), _RESUME_PHASES, "phase"),
+            "remainingMillis": reader.u32(),
+            "serverTick": reader.u32(),
+        }
+        player_count = reader.u16()
+        if not 2 <= player_count <= 10:
+            raise ProtocolError("players must contain 2..10 entries")
+        players = []
+        for _ in range(player_count):
+            players.append(
+                {
+                    "sessionId": reader.u64(),
+                    "positionXMillimeters": reader.i32(),
+                    "positionYMillimeters": reader.i32(),
+                    "healthKnown": _bool(reader.u8(), "healthKnown"),
+                    "hitPoints": reader.u32(),
+                    "maximumHitPoints": reader.u32(),
+                    "alive": _bool(reader.u8(), "alive"),
+                }
+            )
+        fields["players"] = players
+
+        monster = None
+        if _bool(reader.u8(), "monster presence"):
+            monster = {
+                "monsterId": reader.u64(),
+                "positionXMillimeters": reader.i32(),
+                "positionYMillimeters": reader.i32(),
+                "hitPoints": reader.u32(),
+                "maximumHitPoints": reader.u32(),
+                "state": reader.u8(),
+            }
+        fields["monster"] = monster
+
+        drop_count = reader.u16()
+        if drop_count > 10:
+            raise ProtocolError("drops must contain at most 10 entries")
+        drops = []
+        for _ in range(drop_count):
+            drops.append(
+                {
+                    "dropId": reader.u64(),
+                    "itemId": reader.u64(),
+                    "quantity": reader.u64(),
+                    "positionXMillimeters": reader.i32(),
+                    "positionYMillimeters": reader.i32(),
+                    "state": _enum_name(reader.u8(), _LOOT_STATES, "state"),
+                    "ownerSessionId": reader.u64(),
+                }
+            )
+        fields["drops"] = drops
+        fields["score"] = reader.u64()
+
+        result = None
+        if _bool(reader.u8(), "result presence"):
+            outcome = _enum_name(reader.u8(), _FINAL_OUTCOMES, "outcome")
+            entry_count = reader.u16()
+            if not 2 <= entry_count <= 10:
+                raise ProtocolError("result entries must contain 2..10 entries")
+            entries = []
+            for _ in range(entry_count):
+                entries.append(
+                    {
+                        "sessionId": reader.u64(),
+                        "nickname": reader.text(reader.u16()),
+                        "exitStatus": _enum_name(
+                            reader.u8(), _FINAL_EXIT_STATUSES, "exitStatus"
+                        ),
+                        "finalAssetValue": reader.u64(),
+                        "rank": reader.u32(),
+                        "isTop": _bool(reader.u8(), "isTop"),
+                    }
+                )
+            result = {"outcome": outcome, "entries": entries}
+        fields["result"] = result
+        return fields
     if name == "FinalResult":
         room_id = reader.u64()
         battle_id = reader.u64()
@@ -564,6 +813,9 @@ class _Reader:
     def u32(self) -> int:
         return self.uint(4)
 
+    def i32(self) -> int:
+        return struct.unpack(">i", self.bytes(4))[0]
+
     def u64(self) -> int:
         return self.uint(8)
 
@@ -653,6 +905,20 @@ def _positive(value: object, field: str, bits: int, *, allow_zero: bool = False)
 
 def _nonnegative(value: object, field: str, bits: int) -> int:
     return _positive(value, field, bits, allow_zero=True)
+
+
+def _signed(value: object, field: str, bits: int) -> int:
+    minimum = -(1 << (bits - 1))
+    maximum = (1 << (bits - 1)) - 1
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ProtocolError(f"{field} must be int{bits}")
+    return value
+
+
+def _flag(value: object, field: str) -> int:
+    if not isinstance(value, bool):
+        raise ProtocolError(f"{field} must be boolean")
+    return int(value)
 
 
 def _uint(fields: dict[str, Any], field: str, bits: int, *, minimum: int) -> bytes:

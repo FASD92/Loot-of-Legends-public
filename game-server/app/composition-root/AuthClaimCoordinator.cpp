@@ -1,5 +1,7 @@
 #include "AuthClaimCoordinator.hpp"
 
+#include <utility>
+
 namespace lol::app {
 
 AuthClaimCoordinator::AuthClaimCoordinator(
@@ -11,13 +13,48 @@ AuthClaimCoordinator::AuthClaimCoordinator(
     transport::rudp::RudpBindingRegistry &rudpBindings) noexcept
     : sessions_(sessions), rudpBindings_(&rudpBindings) {}
 
-bool AuthClaimCoordinator::beginClaim(std::uint64_t connectionEpoch,
-                                      shared::RequestId requestId) {
+bool AuthClaimCoordinator::beginClaim(
+    std::uint64_t connectionEpoch, shared::RequestId requestId,
+    std::optional<session::ReplacedSession> resumeTarget) {
   if (connectionEpoch == 0 || requestId.value() == 0 ||
       sessionByConnectionEpoch_.contains(connectionEpoch)) {
     return false;
   }
-  return pendingByConnectionEpoch_.emplace(connectionEpoch, requestId).second;
+  return pendingByConnectionEpoch_
+      .emplace(connectionEpoch,
+               PendingClaim{.requestId = requestId,
+                            .resumeTarget = std::move(resumeTarget)})
+      .second;
+}
+
+bool AuthClaimCoordinator::detachConnection(
+    std::uint64_t connectionEpoch,
+    std::chrono::steady_clock::time_point expiresAt) {
+  static_cast<void>(pendingByConnectionEpoch_.erase(connectionEpoch));
+  const auto route = sessionByConnectionEpoch_.find(connectionEpoch);
+  if (route == sessionByConnectionEpoch_.end() ||
+      !sessions_.detach(route->second.sessionId, route->second.generation,
+                        expiresAt)) {
+    return false;
+  }
+  if (rudpBindings_ != nullptr) {
+    static_cast<void>(rudpBindings_->invalidate(
+        route->second.sessionId.value(), route->second.generation.value()));
+  }
+  connectionEpochBySession_.erase(route->second.sessionId);
+  sessionByConnectionEpoch_.erase(route);
+  return true;
+}
+
+bool AuthClaimCoordinator::expireDetached(
+    shared::SessionId sessionId, shared::SessionGeneration generation) {
+  bool changed = sessions_.disconnect(sessionId, generation);
+  if (rudpBindings_ != nullptr) {
+    changed =
+        rudpBindings_->invalidate(sessionId.value(), generation.value()) ||
+        changed;
+  }
+  return changed;
 }
 
 bool AuthClaimCoordinator::closeConnection(std::uint64_t connectionEpoch) {
@@ -61,7 +98,8 @@ AuthClaimCoordinator::closeRudpPeer(const RudpPeerFailure &failure) {
       return std::nullopt;
     }
     connectionEpoch = connection->second;
-    changed = closeConnection(*connectionEpoch);
+    changed = rudpBindings_->invalidate(failure.sessionId.value(),
+                                        failure.generation.value());
   } else {
     changed = sessions_.disconnect(failure.sessionId, failure.generation);
     changed = rudpBindings_->invalidate(failure.sessionId.value(),
@@ -107,7 +145,6 @@ std::vector<RudpSessionClosure> AuthClaimCoordinator::expireTimedOutRudpPeers(
       if (route != sessionByConnectionEpoch_.end() &&
           route->second.generation == generation) {
         connectionEpoch = connection->second;
-        static_cast<void>(closeConnection(*connectionEpoch));
       }
     }
     if (!connectionEpoch.has_value()) {
@@ -123,11 +160,12 @@ std::vector<RudpSessionClosure> AuthClaimCoordinator::expireTimedOutRudpPeers(
 }
 
 AppliedClaim
-AuthClaimCoordinator::apply(const meta::ClaimCompletion &completion) {
+AuthClaimCoordinator::apply(const meta::ClaimCompletion &completion,
+                            std::chrono::steady_clock::time_point now) {
   const auto pending =
       pendingByConnectionEpoch_.find(completion.connectionEpoch());
   if (pending == pendingByConnectionEpoch_.end() ||
-      pending->second.value() != completion.requestId()) {
+      pending->second.requestId.value() != completion.requestId()) {
     return AppliedClaim{
         .kind = AppliedClaimKind::Stale,
         .connectionEpoch = completion.connectionEpoch(),
@@ -138,6 +176,7 @@ AuthClaimCoordinator::apply(const meta::ClaimCompletion &completion) {
         .nickname = {},
     };
   }
+  const auto pendingClaim = std::move(pending->second);
   pendingByConnectionEpoch_.erase(pending);
   if (completion.outcome() != meta::ClaimOutcome::Claimed ||
       !completion.identity().has_value()) {
@@ -154,21 +193,47 @@ AuthClaimCoordinator::apply(const meta::ClaimCompletion &completion) {
     };
   }
   const auto &identity = *completion.identity();
-  const auto authenticated =
-      sessions_.authenticate(session::AuthenticateSessionCommand{
-          shared::RequestId{completion.requestId()},
-          session::ClaimedGameIdentity{shared::AccountId{identity.accountId},
-                                       identity.nickname}});
+  std::optional<session::AuthenticateSessionResult> authenticated;
+  if (pendingClaim.resumeTarget.has_value()) {
+    auto resumed = sessions_.resume(session::ResumeSessionCommand{
+        .requestId = shared::RequestId{completion.requestId()},
+        .identity =
+            session::ClaimedGameIdentity{shared::AccountId{identity.accountId},
+                                         identity.nickname},
+        .sessionId = pendingClaim.resumeTarget->sessionId,
+        .generation = pendingClaim.resumeTarget->generation,
+        .now = now,
+    });
+    if (resumed.code != session::ResumeSessionCode::Ok ||
+        !resumed.authenticated.has_value()) {
+      return AppliedClaim{
+          .kind = AppliedClaimKind::ResumeRejected,
+          .connectionEpoch = completion.connectionEpoch(),
+          .requestId = completion.requestId(),
+          .outcome = meta::ClaimOutcome::Claimed,
+          .authenticated = std::nullopt,
+          .replacedConnectionEpoch = std::nullopt,
+          .nickname = {},
+          .resumed = false,
+      };
+    }
+    authenticated = std::move(resumed.authenticated);
+  } else {
+    authenticated = sessions_.authenticate(session::AuthenticateSessionCommand{
+        shared::RequestId{completion.requestId()},
+        session::ClaimedGameIdentity{shared::AccountId{identity.accountId},
+                                     identity.nickname}});
+  }
 
   std::optional<std::uint64_t> replacedConnectionEpoch;
-  if (authenticated.replaced.has_value()) {
+  if (authenticated->replaced.has_value()) {
     if (rudpBindings_ != nullptr) {
       static_cast<void>(rudpBindings_->invalidate(
-          authenticated.replaced->sessionId.value(),
-          authenticated.replaced->generation.value()));
+          authenticated->replaced->sessionId.value(),
+          authenticated->replaced->generation.value()));
     }
     const auto oldConnection =
-        connectionEpochBySession_.find(authenticated.replaced->sessionId);
+        connectionEpochBySession_.find(authenticated->replaced->sessionId);
     if (oldConnection != connectionEpochBySession_.end()) {
       replacedConnectionEpoch = oldConnection->second;
       sessionByConnectionEpoch_.erase(oldConnection->second);
@@ -177,8 +242,8 @@ AuthClaimCoordinator::apply(const meta::ClaimCompletion &completion) {
   }
   sessionByConnectionEpoch_.insert_or_assign(
       completion.connectionEpoch(),
-      ActiveRoute{authenticated.sessionId, authenticated.generation});
-  connectionEpochBySession_.insert_or_assign(authenticated.sessionId,
+      ActiveRoute{authenticated->sessionId, authenticated->generation});
+  connectionEpochBySession_.insert_or_assign(authenticated->sessionId,
                                              completion.connectionEpoch());
 
   return AppliedClaim{
@@ -189,6 +254,7 @@ AuthClaimCoordinator::apply(const meta::ClaimCompletion &completion) {
       .authenticated = authenticated,
       .replacedConnectionEpoch = replacedConnectionEpoch,
       .nickname = identity.nickname,
+      .resumed = pendingClaim.resumeTarget.has_value(),
   };
 }
 

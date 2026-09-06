@@ -39,9 +39,9 @@ AccountId account(std::uint8_t suffix) {
   return AccountId{bytes};
 }
 
-BattleInstance committedBattle() {
+BattleInstance committedBattle(std::uint64_t participantCount = 2) {
   std::vector<BattleStartCandidate> candidates;
-  for (std::uint64_t session = 1; session <= 2; ++session) {
+  for (std::uint64_t session = 1; session <= participantCount; ++session) {
     candidates.push_back(BattleStartCandidate{
         .accountId = account(static_cast<std::uint8_t>(session)),
         .sessionId = SessionId{session},
@@ -58,7 +58,7 @@ BattleInstance committedBattle() {
       created.battle->openLoadBarrier() != BattleLoadResultCode::Ok) {
     std::abort();
   }
-  for (std::uint64_t session = 1; session <= 2; ++session) {
+  for (std::uint64_t session = 1; session <= participantCount; ++session) {
     if (created.battle->completeLoad(
             ArenaLoadCompleteCommand{.sessionId = SessionId{session},
                                      .generation = SessionGeneration{1},
@@ -69,6 +69,37 @@ BattleInstance committedBattle() {
     }
   }
   return std::move(*created.battle);
+}
+
+bool dispersesEverySupportedPartyAroundTheMonster() {
+  constexpr std::int64_t minimumRadiusSquared = 6'247'000;
+  constexpr std::int64_t maximumRadiusSquared = 6'253'000;
+  constexpr std::int64_t attackRangeSquared = 9'000'000;
+
+  for (std::uint64_t participantCount = 2; participantCount <= 10;
+       ++participantCount) {
+    const auto players = committedBattle(participantCount).movementProjection().players;
+    if (players.size() != participantCount) {
+      return false;
+    }
+    for (std::size_t index = 0; index < players.size(); ++index) {
+      const auto x = static_cast<std::int64_t>(players[index].posXMillimeter);
+      const auto y = static_cast<std::int64_t>(players[index].posYMillimeter);
+      const auto radiusSquared = (x * x) + (y * y);
+      if (radiusSquared < minimumRadiusSquared ||
+          radiusSquared > maximumRadiusSquared ||
+          radiusSquared > attackRangeSquared) {
+        return false;
+      }
+      for (std::size_t other = 0; other < index; ++other) {
+        if (players[index].posXMillimeter == players[other].posXMillimeter &&
+            players[index].posYMillimeter == players[other].posYMillimeter) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 MoveCommand move(std::uint64_t sessionId, std::uint32_t actionSequence,
@@ -104,11 +135,11 @@ bool normalizesStopsAndClampsAtFixedTicks() {
   if (battle.acceptMove(move(1, 1, 3, 4), kStart) != MovementResultCode::Ok ||
       battle.integrateMovement(tick(1)) != MovementResultCode::Ok ||
       position(battle, 1) != PlayerPositionProjection{.sessionId = SessionId{1},
-                                                      .posXMillimeter = 150,
+                                                      .posXMillimeter = 2650,
                                                       .posYMillimeter = 200} ||
       battle.acceptMove(move(1, 2, 0, 0), kStart) != MovementResultCode::Ok ||
       battle.integrateMovement(tick(2)) != MovementResultCode::Ok ||
-      position(battle, 1)->posXMillimeter != 150 ||
+      position(battle, 1)->posXMillimeter != 2650 ||
       position(battle, 1)->posYMillimeter != 200 ||
       battle.acceptMove(move(1, 3, 32767, 0), kStart) !=
           MovementResultCode::Ok) {
@@ -158,7 +189,7 @@ bool coalescesNewestIntentAcrossSequenceWrap() {
   }
   return position(battle, 1) ==
          PlayerPositionProjection{.sessionId = SessionId{1},
-                                  .posXMillimeter = 0,
+                                  .posXMillimeter = 2500,
                                   .posYMillimeter = 250};
 }
 
@@ -180,7 +211,7 @@ bool enforcesThirtyPerSecondWithBurstSix() {
   }
   return position(battle, 1) ==
          PlayerPositionProjection{.sessionId = SessionId{1},
-                                  .posXMillimeter = 250,
+                                  .posXMillimeter = 2750,
                                   .posYMillimeter = 250};
 }
 
@@ -201,7 +232,7 @@ bool rateLimitedMoveDoesNotAdvanceFreshness() {
   }
   return position(battle, 1) ==
          PlayerPositionProjection{.sessionId = SessionId{1},
-                                  .posXMillimeter = 0,
+                                  .posXMillimeter = 2500,
                                   .posYMillimeter = 250};
 }
 
@@ -233,7 +264,7 @@ bool rejectsStaleAndPostExitMovementInMailboxOrder() {
       stopped.acceptMove(move(1, 2, 32767, 0), kStart) !=
           MovementResultCode::NotEligible ||
       stopped.integrateMovement(tick(1)) != MovementResultCode::Ok ||
-      position(stopped, 1)->posXMillimeter != 0 ||
+      position(stopped, 1)->posXMillimeter != 2500 ||
       stopped.projection().capturedParticipants != expectedParticipants) {
     return false;
   }
@@ -243,13 +274,14 @@ bool rejectsStaleAndPostExitMovementInMailboxOrder() {
              MovementResultCode::Ok &&
          moved.integrateMovement(tick(1)) == MovementResultCode::Ok &&
          moved.disconnect(disconnect) == BattleLoadResultCode::Ok &&
-         position(moved, 1)->posXMillimeter == 250;
+         position(moved, 1)->posXMillimeter == 2750;
 }
 
 } // namespace
 
 int main() {
-  return normalizesStopsAndClampsAtFixedTicks() &&
+  return dispersesEverySupportedPartyAroundTheMonster() &&
+                 normalizesStopsAndClampsAtFixedTicks() &&
                  coalescesNewestIntentAcrossSequenceWrap() &&
                  enforcesThirtyPerSecondWithBurstSix() &&
                  rateLimitedMoveDoesNotAdvanceFreshness() &&

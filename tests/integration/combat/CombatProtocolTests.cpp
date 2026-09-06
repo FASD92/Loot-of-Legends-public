@@ -36,6 +36,7 @@ using lol::transport::rudp::ReliableLane;
 using lol::transport::rudp::ReliableQueue;
 using lol::transport::rudp::ReliableQueueAdmission;
 using lol::transport::rudp::RudpAttackIntent;
+using lol::transport::rudp::RudpAttackApplied;
 using lol::transport::rudp::RudpAttackResultCode;
 using lol::transport::rudp::RudpAttackTerminalResult;
 using lol::transport::rudp::RudpCombatCodec;
@@ -127,8 +128,9 @@ bool matchesGoldenVectors() {
       header(RudpFlag::Reliable, 6, 4, 7, 29),
       header(RudpFlag::Reliable, 7, 4, 7, 30),
       header(RudpFlag::Unreliable, 8, 4, 7, 31),
+      header(RudpFlag::Reliable, 9, 8, 0, 38),
   };
-  const std::array<RudpCombatMessage, 5> messages{
+  const std::array<RudpCombatMessage, 6> messages{
       RudpAttackIntent{
           .commandId = RudpCommandId{.high = 0x0102030405060708ULL,
                                      .low = 0x1112131415161718ULL},
@@ -141,8 +143,8 @@ bool matchesGoldenVectors() {
           .battleInstanceId = 7,
           .resultCode = RudpAttackResultCode::Ok,
           .monsterId = 1,
-          .remainingHitPoints = 1580,
-          .rulesetVersion = 1,
+          .remainingHitPoints = 1500,
+          .rulesetVersion = 4,
           .combatOutcome = RudpCombatOutcome::None,
       },
       RudpMonsterSpawned{
@@ -155,7 +157,7 @@ bool matchesGoldenVectors() {
           .posXMillimeter = 0,
           .posYMillimeter = 0,
           .maximumHitPoints = 1600,
-          .rulesetVersion = 1,
+          .rulesetVersion = 4,
       },
       RudpCombatTerminalEvent{
           .eventId = RudpEventId{.high = 0x4142434445464748ULL,
@@ -166,7 +168,7 @@ bool matchesGoldenVectors() {
           .combatOutcome = RudpCombatOutcome::MonsterDefeated,
           .monsterId = 1,
           .serverTick = 600,
-          .rulesetVersion = 1,
+          .rulesetVersion = 4,
       },
       RudpMonsterStateSnapshot{
           .battleInstanceId = 7,
@@ -176,12 +178,25 @@ bool matchesGoldenVectors() {
           .hitPoints = 0,
           .monsterState = RudpMonsterState::Dead,
       },
+      RudpAttackApplied{
+          .eventId = RudpEventId{.high = 7, .low = (3ULL << 32U) | 1ULL},
+          .battleInstanceId = 7,
+          .eventStreamKind = RudpEventStreamKind::CombatAction,
+          .eventSequence = 1,
+          .attackerSessionId = 2,
+          .monsterId = 1,
+          .actualDamage = 100,
+          .remainingHitPoints = 1500,
+          .serverTick = 15,
+          .combatOutcome = RudpCombatOutcome::None,
+      },
   };
   const std::array names{std::string_view{"AttackIntent"},
                          std::string_view{"AttackTerminalResult"},
                          std::string_view{"MonsterSpawned"},
                          std::string_view{"CombatTerminalEvent"},
-                         std::string_view{"MonsterStateSnapshot"}};
+                         std::string_view{"MonsterStateSnapshot"},
+                         std::string_view{"AttackApplied"}};
   for (std::size_t index = 0; index < messages.size(); ++index) {
     const auto expected = goldenDatagram(*contract, names[index]);
     const auto encoded =
@@ -200,6 +215,27 @@ bool matchesGoldenVectors() {
   return true;
 }
 
+bool attackAppliedRoundTripsAsReliableCombatAction() {
+  const RudpAttackApplied applied{
+      .eventId = RudpEventId{.high = 7, .low = (3ULL << 32U) | 1ULL},
+      .battleInstanceId = 7,
+      .eventStreamKind = RudpEventStreamKind::CombatAction,
+      .eventSequence = 1,
+      .attackerSessionId = 2,
+      .monsterId = 1,
+      .actualDamage = 100,
+      .remainingHitPoints = 1500,
+      .serverTick = 15,
+      .combatOutcome = RudpCombatOutcome::None,
+  };
+  const auto encoded = RudpCombatCodec::encode(
+      header(RudpFlag::Reliable, 9, 8, 0, 38),
+      RudpCombatMessage{applied});
+  return encoded.has_value() && encoded->size() <= 1200 &&
+         RudpCombatCodec::decode(*encoded).message ==
+             std::optional{RudpCombatMessage{applied}};
+}
+
 bool rejectsWrongReliabilityAndScope() {
   const RudpAttackIntent attack{
       .commandId = RudpCommandId{.high = 1, .low = 2},
@@ -215,7 +251,7 @@ bool rejectsWrongReliabilityAndScope() {
       .posXMillimeter = 0,
       .posYMillimeter = 0,
       .maximumHitPoints = 1600,
-      .rulesetVersion = 1,
+      .rulesetVersion = 4,
   };
   auto wrongStream = spawn;
   wrongStream.eventSequence = 0;
@@ -230,7 +266,7 @@ bool rejectsWrongReliabilityAndScope() {
                                       .snapshotSequence = 1,
                                       .serverTick = 1,
                                       .monsterId = 1,
-                                      .hitPoints = 1600,
+                                      .hitPoints = 1500,
                                       .monsterState = RudpMonsterState::Alive,
                                   }})
               .has_value() &&
@@ -264,7 +300,7 @@ bool rejectsMalformedPayloadAndEnums() {
                                   .snapshotSequence = 1,
                                   .serverTick = 1,
                                   .monsterId = 1,
-                                  .hitPoints = 1600,
+                                  .hitPoints = 1500,
                                   .monsterState = RudpMonsterState::Alive,
                               }});
   if (!validState.has_value()) {
@@ -299,7 +335,7 @@ bool reliableLifecycleStreamKeepsBattleScope() {
       .posXMillimeter = 0,
       .posYMillimeter = 0,
       .maximumHitPoints = 1600,
-      .rulesetVersion = 1,
+      .rulesetVersion = 4,
   };
   const RudpCombatMessage terminal = RudpCombatTerminalEvent{
       .eventId = RudpEventId{.high = 1, .low = 2},
@@ -309,7 +345,7 @@ bool reliableLifecycleStreamKeepsBattleScope() {
       .combatOutcome = RudpCombatOutcome::MonsterDefeated,
       .monsterId = 1,
       .serverTick = 600,
-      .rulesetVersion = 1,
+      .rulesetVersion = 4,
   };
   auto encodedSpawn =
       RudpCombatCodec::encode(header(RudpFlag::Reliable, 6, 4, 7, 29), spawn);
@@ -339,6 +375,37 @@ bool reliableLifecycleStreamKeepsBattleScope() {
          retransmit.transmissions.front().sequence == 7;
 }
 
+bool acceptsTenParticipantMaximumHitPoints() {
+  const RudpCombatMessage spawn = RudpMonsterSpawned{
+      .eventId = RudpEventId{.high = 1, .low = 1},
+      .battleInstanceId = 7,
+      .eventStreamKind = RudpEventStreamKind::CombatLifecycle,
+      .eventSequence = 1,
+      .monsterId = 1,
+      .posXMillimeter = 0,
+      .posYMillimeter = 0,
+      .maximumHitPoints = 8000,
+      .rulesetVersion = 4,
+  };
+  const RudpCombatMessage snapshot = RudpMonsterStateSnapshot{
+      .battleInstanceId = 7,
+      .snapshotSequence = 1,
+      .serverTick = 1,
+      .monsterId = 1,
+      .hitPoints = 7900,
+      .monsterState = RudpMonsterState::Alive,
+  };
+  const auto encodedSpawn =
+      RudpCombatCodec::encode(header(RudpFlag::Reliable, 1, 0, 0, 29), spawn);
+  const auto encodedSnapshot = RudpCombatCodec::encode(
+      header(RudpFlag::Unreliable, 2, 0, 0, 31), snapshot);
+  return encodedSpawn.has_value() && encodedSnapshot.has_value() &&
+         RudpCombatCodec::decode(*encodedSpawn).message ==
+             std::optional{spawn} &&
+         RudpCombatCodec::decode(*encodedSnapshot).message ==
+             std::optional{snapshot};
+}
+
 bool expiredDeliveryStillReplaysRetainedResult() {
   const AttackCommand command{
       .commandId = CommandId{.high = 1, .low = 9},
@@ -352,8 +419,8 @@ bool expiredDeliveryStillReplaysRetainedResult() {
       .battleId = command.battleId,
       .code = AttackResultCode::Ok,
       .monsterId = 1,
-      .remainingHitPoints = 1580,
-      .rulesetVersion = 1,
+      .remainingHitPoints = 1500,
+      .rulesetVersion = 4,
       .outcome = CombatOutcome::None,
   };
   AttackResultStore results{command.sessionId, command.generation,
@@ -370,8 +437,8 @@ bool expiredDeliveryStillReplaysRetainedResult() {
           .battleInstanceId = 7,
           .resultCode = RudpAttackResultCode::Ok,
           .monsterId = 1,
-          .remainingHitPoints = 1580,
-          .rulesetVersion = 1,
+          .remainingHitPoints = 1500,
+          .rulesetVersion = 4,
           .combatOutcome = RudpCombatOutcome::None,
       }});
   ReliableQueue delivery;
@@ -410,9 +477,12 @@ bool transportAckNeverFabricatesApplicationResult() {
 } // namespace
 
 int main() {
-  return matchesGoldenVectors() && rejectsWrongReliabilityAndScope() &&
+  return matchesGoldenVectors() &&
+                 attackAppliedRoundTripsAsReliableCombatAction() &&
+                 rejectsWrongReliabilityAndScope() &&
                  rejectsMalformedPayloadAndEnums() &&
                  reliableLifecycleStreamKeepsBattleScope() &&
+                 acceptsTenParticipantMaximumHitPoints() &&
                  expiredDeliveryStillReplaysRetainedResult() &&
                  transportAckNeverFabricatesApplicationResult()
              ? EXIT_SUCCESS

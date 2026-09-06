@@ -1,4 +1,4 @@
-set(LOOT_PRODUCT_VERSION "0.0.0-public")
+set(LOOT_PRODUCT_VERSION "0.0.0-slice0")
 
 function(loot_configure_build_identity template output)
   if(DEFINED ENV{GITHUB_SHA} AND NOT "$ENV{GITHUB_SHA}" STREQUAL "")

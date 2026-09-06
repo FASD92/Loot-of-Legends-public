@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "contractId": "LOL-V2-BATTLE-CONTINUITY-V1",
+  "status": "Accepted",
+  "contractVersion": "1.0.4",
+  "owners": {
+    "semantic": "lol_battle_continuity",
+    "storageAdapter": "lol_battle_continuity_storage",
+    "simulation": "lol_battle",
+    "orchestration": "lol_game_flow"
+  },
+  "identity": {
+    "originRecoveryEpochBits": 32,
+    "roomOrdinalBits": 32,
+    "publicBattleIdentity": [
+      "roomId",
+      "battleInstanceId"
+    ],
+    "recoveryValidationKey": [
+      "originRecoveryEpoch",
+      "roomId",
+      "battleInstanceId"
+    ],
+    "writerEpochPolicy": "PERSISTENT_INCREMENT_UNDER_EXCLUSIVE_LOCK",
+    "preserveSessionId": true,
+    "rotateTransportFencing": true,
+    "clientAuthority": "FRESH_GAME_CREDENTIAL_ONLY"
+  },
+  "logicalTime": {
+    "tickHertz": 20,
+    "tickNanos": 50000000,
+    "tickType": "uint64",
+    "elapsedType": "uint64_nanoseconds",
+    "downtimePolicy": "FREEZE",
+    "battleElapsedFormula": "logicalTick*50000000",
+    "recoveryReconnectGraceMillis": 30000,
+    "forbiddenDurableTypes": [
+      "steady_clock::time_point",
+      "system_clock::time_point",
+      "process_local_timestamp"
+    ]
+  },
+  "inputBoundary": {
+    "source": "POST_DOMAIN_ADMISSION_CANONICAL_COMMAND",
+    "commandIdBits": 128,
+    "participantCommandIdMapping": "PRESERVE_HIGH_LOW_UINT64",
+    "movementActionSequenceMapping": "HIGH_ZERO_LOW_UINT32",
+    "systemParticipantSlot": 0,
+    "systemCommandIdMapping": "HIGH_ZERO_LOW_RECORD_SEQUENCE",
+    "systemStateChangesRecorded": true,
+    "rawTransportPackets": "FORBIDDEN",
+    "transportRejectsRecorded": false,
+    "stateChangingDomainRejectsRecorded": true
+  },
+  "ruleset": {
+    "version": 1,
+    "seedType": "uint64",
+    "integerCanonicalState": true,
+    "sortedCollections": true,
+    "floatingPointCanonicalState": "FORBIDDEN",
+    "unknownVersion": "EXPLICIT_REJECT",
+    "spawnRepresentation": "INTEGER_LOOKUP_TABLE",
+    "coverage": "ALL_PRODUCTION_BATTLE_MUTATION_RULES"
+  },
+  "durability": {
+    "mode": "LOGICAL_TICK_GROUP_COMMIT",
+    "maximumPendingTicksPerBattle": 1,
+    "fdatasyncBeforeAuthoritativeSuccess": true,
+    "clientSuccessBoundary": "AFTER_TICK_COMMIT_FDATASYNC",
+    "roomExecutionCellFileIo": "FORBIDDEN",
+    "writerQueue": "BOUNDED",
+    "confirmedCriticalCommandRpo": "ZERO",
+    "unconfirmedCommandRpoMillis": 50,
+    "confirmedRpoAssumptions": [
+      "same_host",
+      "single_writer_process",
+      "durable_local_filesystem",
+      "fdatasync_contract_holds"
+    ],
+    "expectedAddedLatency": "0..50ms batching wait plus one measured fdatasync"
+  },
+  "journal": {
+    "magic": "0x4C424331",
+    "recordEnvelopeSchemaVersion": 1,
+    "byteOrder": "big-endian",
+    "commandDecisionRoomRecoveryState": "LENGTH_PREFIXED_CANONICAL_ROOM_PROJECTION",
+    "recordTypes": {
+      "BattleStart": 1,
+      "CommandDecision": 2,
+      "Checkpoint": 3,
+      "TerminalReceipt": 4,
+      "TickCommit": 5
+    },
+    "recordSequence": "strictly_increasing_uint64",
+    "recordLengthFormula": "68+payloadLength",
+    "maximumRecordBytes": 1048576,
+    "maximumJournalBytes": 67108864,
+    "crc32": "IEEE_REFLECTED_0xEDB88320",
+    "checkpointHash": "SHA-256",
+    "tickCommitLast": true,
+    "partialTailPolicy": "RECOVER_THROUGH_LAST_VALID_TICK_COMMIT",
+    "committedCorruptionPolicy": "QUARANTINE_BATTLE",
+    "committedBytes": "OFFSET_AFTER_LAST_VALID_TICK_COMMIT",
+    "firstCommittedBatch": {
+      "records": [
+        {
+          "recordType": "BattleStart",
+          "recordSequence": 1,
+          "logicalTick": 0
+        },
+        {
+          "recordType": "Checkpoint",
+          "recordSequence": 2,
+          "logicalTick": 0
+        },
+        {
+          "recordType": "TickCommit",
+          "recordSequence": 3,
+          "logicalTick": 0
+        }
+      ],
+      "initialCheckpointHashMatchesBattleStart": true
+    },
+    "terminalHash": {
+      "algorithm": "SHA-256",
+      "inputs": [
+        "canonicalBattleStateBytes",
+        "terminalFields",
+        "canonicalResultPayload",
+        "orderedSettlementParticipantSlotSettlementIdPayloadHash"
+      ],
+      "excludedInputs": [
+        "finalStateHash"
+      ],
+      "settlementEntry": "participantSlot_u16+settlementId_16+settlementPayloadHash_32",
+      "settlementOrder": "participantSlot_ascending_unique"
+    }
+  },
+  "checkpoint": {
+    "stateSchemaVersion": 1,
+    "intervalDurableTicks": 20,
+    "atBattleStart": true,
+    "atPhaseTransition": true,
+    "atTerminal": true
+  },
+  "privacy": {
+    "journalCredentials": "FORBIDDEN",
+    "journalPersonalData": "FORBIDDEN",
+    "participantSlotEnvelope": "AES-256-GCM",
+    "previousSessionGeneration": "ENCRYPTED_ORIGINAL_GENERATION_FRESH_CREDENTIAL_ONE_USE_PER_WRITER_EPOCH",
+    "keySource": "LOCAL_0600_FILE",
+    "sidecarWrite": "DATA_SYNC_ATOMIC_RENAME_DIRECTORY_SYNC"
+  },
+  "failureIsolation": {
+    "corruptBattle": "QUARANTINE_ONE_BATTLE",
+    "globalManifestOrKeyFailure": "FAIL_STARTUP",
+    "resumeFailure": "RESUME_UNAVAILABLE",
+    "sameRoomCandidateSelection": "MAX_BATTLE_INSTANCE_ID_BEFORE_SESSION_ROOM_INSTALL",
+    "supersededTerminalPredecessor": "DURABLE_RETIRE_TOMBSTONE",
+    "supersededNonterminalPredecessor": "QUARANTINE_PREDECESSOR"
+  },
+  "startup": {
+    "order": [
+      "EXCLUSIVE_LOCK",
+      "VALIDATE_ROOT_KEY_MANIFEST",
+      "INCREMENT_WRITER_EPOCH",
+      "RECOVERING",
+      "SELECT_NEWEST_BATTLE_PER_ROOM",
+      "RESTORE_AND_VERIFY",
+      "INSTALL_HEALTHY_BATTLES",
+      "BIND_LISTENERS",
+      "READY"
+    ],
+    "readinessDuringRecovery": false
+  },
+  "settlement": {
+    "identity": "EXISTING_SETTLEMENT_ID_UNCHANGED",
+    "terminalReceiptCarriesResultCommittedAt": true,
+    "unixEpochMillisecondsSource": "RECORDED_TERMINAL_WALL_DECISION",
+    "monotonicNanosecondsSource": "BATTLE_ELAPSED_NANOS",
+    "order": [
+      "CONTINUITY_TERMINAL_DURABLE",
+      "SETTLEMENT_DURABLY_QUEUED",
+      "RESULT_VISIBLE"
+    ]
+  },
+  "publicProtocol": {
+    "newMessageIds": [],
+    "resumeContract": "LOL-V2-BATTLE-RESUME-V1"
+  }
+}

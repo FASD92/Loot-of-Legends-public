@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using LootOfLegends.Protocol;
 using LootOfLegends.Battle.Combat;
 using LootOfLegends.Battle.Loot;
 using LootOfLegends.Battle.Movement;
@@ -28,7 +29,8 @@ namespace LootOfLegends.Battle
                 load,
                 sessionId,
                 sessionGeneration,
-                battleInstanceId)
+                battleInstanceId,
+                1)
         {
         }
 
@@ -39,18 +41,23 @@ namespace LootOfLegends.Battle
             BattleLoadReadModel load,
             ulong sessionId,
             ulong sessionGeneration,
-            ulong battleInstanceId)
+            ulong battleInstanceId,
+            uint nextMovementActionSequence = 1)
         {
             this.inbound = inbound ?? throw new ArgumentNullException(nameof(inbound));
+            SessionId = sessionId;
+            SessionGeneration = sessionGeneration;
             Movement = new BattleMovementClient(
                 tcpSender,
                 reliableOutbound,
                 inbound,
                 sessionId,
                 sessionGeneration,
-                battleInstanceId);
+                battleInstanceId,
+                nextMovementActionSequence);
             Combat = new BattleCombatReadModel(battleInstanceId);
             Loot = new BattleLootReadModel(battleInstanceId);
+            PlayerState = new BattlePlayerStateReadModel();
 
             var attack = new AttackInputFacade(
                 reliableOutbound,
@@ -77,15 +84,32 @@ namespace LootOfLegends.Battle
                 load,
                 Movement.ReadModel,
                 Combat,
-                Loot);
+                Loot,
+                PlayerState);
         }
 
         public BattleMovementClient Movement { get; }
         public BattleCombatReadModel Combat { get; }
         public BattleLootReadModel Loot { get; }
+        public BattlePlayerStateReadModel PlayerState { get; }
         public ArenaInputFacade Input { get; }
         public ArenaPlayerFlowReadModel Presentation { get; }
         public bool IsTransportReady => Movement.IsBound;
+        public ulong SessionId { get; }
+        public ulong SessionGeneration { get; }
+
+        public bool ApplyResumeSnapshot(BattleResumeSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+            return Movement.ReadModel.ApplyResumeSnapshot(snapshot) &&
+                PlayerState.ApplyResumeSnapshot(snapshot) &&
+                Combat.ApplyResumeSnapshot(snapshot) &&
+                Loot.ApplyResumeSnapshot(snapshot) &&
+                Presentation.ApplyResumeSnapshot(snapshot);
+        }
 
         public Task RequestTransportAsync(
             ulong requestId,

@@ -71,6 +71,25 @@ struct AttackTerminalResult final {
   bool operator==(const AttackTerminalResult &) const = default;
 };
 
+struct AttackAppliedRecord final {
+  EventId eventId;
+  shared::BattleInstanceId battleId;
+  std::uint32_t eventSequence;
+  shared::SessionId attackerSessionId;
+  std::uint64_t monsterId;
+  std::uint32_t actualDamage;
+  std::uint32_t remainingHitPoints;
+  std::uint32_t serverTick;
+  CombatOutcome outcome;
+
+  bool operator==(const AttackAppliedRecord &) const = default;
+};
+
+struct AttackExecution final {
+  AttackTerminalResult result;
+  std::optional<AttackAppliedRecord> applied;
+};
+
 struct CombatPosition final {
   std::int32_t xMillimeter;
   std::int32_t yMillimeter;
@@ -79,20 +98,34 @@ struct CombatPosition final {
 };
 
 struct CombatRuleset final {
-  static constexpr std::uint16_t version = 1;
+  static constexpr std::uint16_t version = 4;
   static constexpr std::uint32_t monsterCount = 1;
   static constexpr std::uint64_t monsterId = 1;
   static constexpr CombatPosition spawnPosition{0, 0};
-  static constexpr std::uint32_t monsterHitPoints = 1600;
-  static constexpr std::uint32_t attackDamage = 20;
-  static constexpr std::int32_t attackRangeMillimeters = 3000;
+  static constexpr std::uint32_t minimumParticipants = 2;
+  static constexpr std::uint32_t maximumParticipants = 10;
+  static constexpr std::uint32_t monsterHitPointsPerParticipant = 800;
+  static constexpr std::uint32_t attackDamage = 100;
+  static constexpr std::int32_t attackRangeMillimeters = 12000;
   static constexpr std::uint32_t perPlayerCooldownMillis = 750;
   static constexpr std::uint32_t combatDeadlineMillis = 30000;
   static constexpr std::uint32_t attackRatePerSecond = 8;
   static constexpr std::uint32_t attackBurst = 4;
+  static constexpr std::uint16_t participantSpawnTableVersion = 1;
+
+  [[nodiscard]] static constexpr std::uint32_t
+  monsterHitPointsForParticipants(std::uint32_t participantCount) noexcept {
+    return participantCount * monsterHitPointsPerParticipant;
+  }
 
   [[nodiscard]] static bool inAttackRange(CombatPosition attacker,
                                           CombatPosition target) noexcept;
+  // Integer-only, versioned participant spawn positions for counts 2..10.
+  // Invalid count/index pairs return the neutral origin and are rejected by
+  // BattleInstance before use.
+  [[nodiscard]] static CombatPosition
+  participantSpawnPosition(std::uint32_t participantCount,
+                           std::uint32_t participantIndex) noexcept;
 };
 
 enum class MonsterState : std::uint8_t {
@@ -134,7 +167,11 @@ enum class MonsterDamageResult : std::uint8_t {
 
 class Monster final {
 public:
-  [[nodiscard]] static Monster spawn() noexcept;
+  [[nodiscard]] static Monster spawn(std::uint32_t maximumHitPoints) noexcept;
+  [[nodiscard]] static Monster restore(std::uint64_t id,
+                                       CombatPosition position,
+                                       std::uint32_t hitPoints,
+                                       MonsterState state) noexcept;
 
   [[nodiscard]] std::uint64_t id() const noexcept { return id_; }
   [[nodiscard]] CombatPosition position() const noexcept { return position_; }

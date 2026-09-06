@@ -28,6 +28,7 @@ _MESSAGE_IDS = {
     "StateSnapshot": 26,
     "AttackIntent": 27,
     "AttackTerminalResult": 28,
+    "AttackApplied": 38,
     "MonsterSpawned": 29,
     "CombatTerminalEvent": 30,
     "MonsterStateSnapshot": 31,
@@ -46,6 +47,7 @@ _FLAGS = {
     "StateSnapshot": 0,
     "AttackIntent": 1,
     "AttackTerminalResult": 1,
+    "AttackApplied": 1,
     "MonsterSpawned": 1,
     "CombatTerminalEvent": 1,
     "MonsterStateSnapshot": 0,
@@ -68,7 +70,11 @@ _ATTACK_RESULTS = {
 }
 _COMBAT_OUTCOMES = {"NONE": 0, "MONSTER_DEFEATED": 1, "COMBAT_TIMEOUT": 2}
 _MONSTER_STATES = {"ALIVE": 0, "DYING": 1, "DEAD": 2, "TIMED_OUT": 3}
-_EVENT_STREAMS = {"COMBAT_LIFECYCLE": 1, "LOOT_LIFECYCLE": 2}
+_EVENT_STREAMS = {
+    "COMBAT_LIFECYCLE": 1,
+    "LOOT_LIFECYCLE": 2,
+    "COMBAT_ACTION": 3,
+}
 _LOOT_RESULTS = {
     "OK": 0,
     "NOT_ELIGIBLE": 1,
@@ -268,10 +274,11 @@ def _encode_payload(name: str, fields: dict[str, Any]) -> bytes:
         high, low = _identifier(fields.get("commandId"), "commandId")
         result_code = _enum(fields.get("resultCode"), _ATTACK_RESULTS, "resultCode")
         outcome = _enum(fields.get("combatOutcome"), _COMBAT_OUTCOMES, "combatOutcome")
-        hit_points = _hit_points(fields.get("remainingHitPoints"))
+        ruleset = _combat_ruleset(fields.get("rulesetVersion"))
+        hit_points = _hit_points(fields.get("remainingHitPoints"), ruleset)
         if outcome == 1 and hit_points != 0:
             raise ProtocolError("defeated monster must have zero hit points")
-        if fields.get("monsterId") != 1 or fields.get("rulesetVersion") != 1:
+        if fields.get("monsterId") != 1:
             raise ProtocolError("combat immutable fields are invalid")
         return struct.pack(
             ">QQQHQIHB",
@@ -281,19 +288,48 @@ def _encode_payload(name: str, fields: dict[str, Any]) -> bytes:
             result_code,
             1,
             hit_points,
+            ruleset,
+            outcome,
+        )
+    if name == "AttackApplied":
+        high, low = _identifier(fields.get("eventId"), "eventId")
+        outcome = _enum(fields.get("combatOutcome"), _COMBAT_OUTCOMES, "combatOutcome")
+        # AttackApplied predates the rulesetVersion field, so both the v3
+        # (50 damage) and v4 (100 damage) golden contracts remain decodable.
+        hit_points = _hit_points(fields.get("remainingHitPoints"), None)
+        if (
+            _enum(fields.get("eventStreamKind"), _EVENT_STREAMS, "eventStreamKind") != 3
+            or _positive(fields.get("eventSequence"), "eventSequence", 32) <= 0
+            or _positive(fields.get("attackerSessionId"), "attackerSessionId", 64) <= 0
+            or fields.get("monsterId") != 1
+            or fields.get("actualDamage") not in {50, 100}
+            or (outcome == 1 and hit_points != 0)
+        ):
+            raise ProtocolError("AttackApplied immutable fields are invalid")
+        return struct.pack(
+            ">QQQBIQQIIIB",
+            high,
+            low,
+            _positive(fields.get("battleInstanceId"), "battleInstanceId", 64),
+            3,
+            fields["eventSequence"],
+            fields["attackerSessionId"],
             1,
+            fields["actualDamage"],
+            hit_points,
+            _uint(fields.get("serverTick"), "serverTick", 32),
             outcome,
         )
     if name == "MonsterSpawned":
         high, low = _identifier(fields.get("eventId"), "eventId")
+        ruleset = _combat_ruleset(fields.get("rulesetVersion"))
         if (
             _enum(fields.get("eventStreamKind"), _EVENT_STREAMS, "eventStreamKind") != 1
             or fields.get("eventSequence") != 1
             or fields.get("monsterId") != 1
             or fields.get("posXMillimeter") != 0
             or fields.get("posYMillimeter") != 0
-            or fields.get("maximumHitPoints") != 1600
-            or fields.get("rulesetVersion") != 1
+            or not _valid_maximum_hit_points(fields.get("maximumHitPoints"), ruleset)
         ):
             raise ProtocolError("MonsterSpawned immutable fields are invalid")
         return struct.pack(
@@ -306,18 +342,18 @@ def _encode_payload(name: str, fields: dict[str, Any]) -> bytes:
             1,
             0,
             0,
-            1600,
-            1,
+            fields["maximumHitPoints"],
+            ruleset,
         )
     if name == "CombatTerminalEvent":
         high, low = _identifier(fields.get("eventId"), "eventId")
         outcome = _enum(fields.get("combatOutcome"), _COMBAT_OUTCOMES, "combatOutcome")
+        ruleset = _combat_ruleset(fields.get("rulesetVersion"))
         if (
             _enum(fields.get("eventStreamKind"), _EVENT_STREAMS, "eventStreamKind") != 1
             or fields.get("eventSequence") != 2
             or outcome not in {1, 2}
             or fields.get("monsterId") != 1
-            or fields.get("rulesetVersion") != 1
         ):
             raise ProtocolError("CombatTerminalEvent immutable fields are invalid")
         return struct.pack(
@@ -330,11 +366,11 @@ def _encode_payload(name: str, fields: dict[str, Any]) -> bytes:
             outcome,
             1,
             _uint(fields.get("serverTick"), "serverTick", 32),
-            1,
+            ruleset,
         )
     if name == "MonsterStateSnapshot":
         state = _enum(fields.get("monsterState"), _MONSTER_STATES, "monsterState")
-        hit_points = _hit_points(fields.get("hitPoints"))
+        hit_points = _hit_points(fields.get("hitPoints"), None)
         if fields.get("monsterId") != 1 or (state in {1, 2}) != (hit_points == 0):
             raise ProtocolError("monster state/hit points are inconsistent")
         if state in {0, 3} and hit_points == 0:
@@ -476,6 +512,11 @@ def _decode_payload(name: str, payload: bytes) -> dict[str, Any]:
     if name == "AttackTerminalResult":
         high, low, battle, result, monster, hit_points, ruleset, outcome = _unpack(">QQQHQIHB", payload)
         return {"commandId": {"high": high, "low": low}, "battleInstanceId": battle, "resultCode": _enum_name(result, _ATTACK_RESULTS, "resultCode"), "monsterId": monster, "remainingHitPoints": hit_points, "rulesetVersion": ruleset, "combatOutcome": _enum_name(outcome, _COMBAT_OUTCOMES, "combatOutcome")}
+    if name == "AttackApplied":
+        high, low, battle, stream, sequence, attacker, monster, damage, hit_points, tick, outcome = _unpack(
+            ">QQQBIQQIIIB", payload
+        )
+        return {"eventId": {"high": high, "low": low}, "battleInstanceId": battle, "eventStreamKind": _enum_name(stream, _EVENT_STREAMS, "eventStreamKind"), "eventSequence": sequence, "attackerSessionId": attacker, "monsterId": monster, "actualDamage": damage, "remainingHitPoints": hit_points, "serverTick": tick, "combatOutcome": _enum_name(outcome, _COMBAT_OUTCOMES, "combatOutcome")}
     if name == "MonsterSpawned":
         high, low, battle, stream, sequence, monster, x, y, maximum, ruleset = _unpack(">QQQBIQiiIH", payload)
         return {"eventId": {"high": high, "low": low}, "battleInstanceId": battle, "eventStreamKind": _enum_name(stream, _EVENT_STREAMS, "eventStreamKind"), "eventSequence": sequence, "monsterId": monster, "posXMillimeter": x, "posYMillimeter": y, "maximumHitPoints": maximum, "rulesetVersion": ruleset}
@@ -914,11 +955,33 @@ def _identifier(value: object, field: str) -> tuple[int, int]:
     return high, low
 
 
-def _hit_points(value: object) -> int:
+def _combat_ruleset(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in {1, 2, 3, 4}:
+        raise ProtocolError("combat ruleset is unsupported")
+    return value
+
+
+def _hit_points(value: object, ruleset: int | None) -> int:
     hit_points = _uint(value, "hitPoints", 32)
-    if hit_points > 1600 or hit_points % 20:
-        raise ProtocolError("hit points violate ruleset v1")
+    if ruleset == 1:
+        valid = hit_points <= 1600 and hit_points % 20 == 0
+    elif ruleset in {2, 3}:
+        valid = hit_points <= 8000 and hit_points % 50 == 0
+    elif ruleset == 4:
+        valid = hit_points <= 8000 and hit_points % 100 == 0
+    else:
+        valid = (
+            hit_points <= 1600 and hit_points % 20 == 0
+        ) or (hit_points <= 8000 and hit_points % 50 == 0)
+    if not valid:
+        raise ProtocolError("hit points violate combat ruleset")
     return hit_points
+
+
+def _valid_maximum_hit_points(value: object, ruleset: int) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value == 1600 if ruleset == 1 else 1600 <= value <= 8000 and value % 800 == 0
 
 
 def _bounded_position(value: object, field: str) -> int:

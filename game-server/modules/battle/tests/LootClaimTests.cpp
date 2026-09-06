@@ -82,6 +82,10 @@ BattleAdmissionSnapshot admission(std::uint64_t battleId, std::size_t count) {
       .roomId = RoomId{7},
       .battleId = BattleInstanceId{battleId},
       .candidates = std::move(candidates),
+      .rulesetVersion = lol::battle::battleRulesetVersion,
+      .seed =
+          lol::battle::deriveBattleSeed(RoomId{7}, BattleInstanceId{battleId},
+                                        lol::battle::battleRulesetVersion),
   };
 }
 
@@ -109,12 +113,20 @@ BattleInstance openCommittedBattle(std::uint64_t battleId, std::size_t count) {
   return battle;
 }
 
-// Player 1 (session 1, generation 1) defeats the monster from the spawn-safe
-// origin position. 80 fixed 20-damage hits empty the fixed 1600 HP pool and
-// produce the MonsterDefeated combat terminal.
+void moveTo(BattleInstance &battle, std::uint64_t battleId,
+            std::uint64_t sessionId, std::int32_t targetX, std::int32_t targetY,
+            std::uint32_t &sequence);
+
+// Loot tests normalize their participants to the origin before combat so the
+// frozen drop-range fixtures remain about ClaimLoot rather than spawn layout.
 void killMonster(BattleInstance &battle, std::uint64_t battleId,
                  std::uint64_t sessionId) {
-  constexpr std::uint32_t kHitPoints = CombatRuleset::monsterHitPoints;
+  std::uint32_t movementSequence = 0;
+  for (const auto &player : battle.movementProjection().players) {
+    moveTo(battle, battleId, player.sessionId.value(), 0, 0, movementSequence);
+  }
+  constexpr std::uint32_t kHitPoints =
+      CombatRuleset::monsterHitPointsForParticipants(2);
   constexpr std::uint32_t kDamage = CombatRuleset::attackDamage;
   const auto start =
       std::chrono::steady_clock::time_point{std::chrono::hours{1}};
@@ -558,7 +570,7 @@ bool catalogIntegrityResolvesEveryClaimedItem() {
   killMonster(battle, 1, 1);
 
   // Drop 1 (Rare) at (-3360, 8722): grid (-3250, 8750) is 12884mm^2 away.
-  std::uint32_t sequence = 0;
+  std::uint32_t sequence = 100;
   moveTo(battle, 1, 1, -3250, 8750, sequence);
   if (claim(battle, 1, 1, 1, 1).code != ClaimLootResultCode::Ok) {
     return false;
@@ -683,7 +695,7 @@ bool deadlineThenFreshClaimIsResolutionClosed() {
 bool earlyResolvedThenDeadlineIsNoMutation() {
   auto battle = openCommittedBattle(1, 2);
   killMonster(battle, 1, 1);
-  std::uint32_t sequence = 0;
+  std::uint32_t sequence = 100;
 
   // Claim every Drop: drop 2 from the origin, drop 1 after moving into range.
   if (claim(battle, 1, 1, 1, 2).code != ClaimLootResultCode::Ok) {

@@ -31,6 +31,8 @@ public:
          std::span<const std::byte> frame);
   [[nodiscard]] static std::optional<EncodedLobbyRoomIntent>
   encode(const game_flow::LobbyRoomOutboundIntent &intent);
+  [[nodiscard]] static std::optional<transport::tcp::FinalResult>
+  encodeFinalResult(const battle::BattleFinalResult &result);
 
 private:
   game_flow::RoomCommandGateway &gateway_;

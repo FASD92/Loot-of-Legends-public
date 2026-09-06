@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/FASD92/Loot-of-Legends-public/contracts/protocol/message-registry.schema.v1.json",
+  "$id": "https://github.com/FASD92/Loot-of-Legends-V2/contracts/protocol/message-registry.schema.v1.json",
   "title": "Loot of Legends V2 Game Message Registry v1",
   "description": "Schema for the versioned canonical public message registry. Exact messages are added by approved Slice Contracts.",
   "type": "object",

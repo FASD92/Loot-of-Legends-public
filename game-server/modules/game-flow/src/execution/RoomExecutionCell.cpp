@@ -1,4 +1,5 @@
 #include "execution/RoomExecutionCell.hpp"
+#include "workflows/BattleContinuityWorkflow.hpp"
 #include "workflows/BattleRecoveryWorkflow.hpp"
 #include "workflows/BattleTerminalWorkflow.hpp"
 #include "workflows/CombatTickWorkflow.hpp"
@@ -7,8 +8,11 @@
 #include "workflows/HostStartWorkflow.hpp"
 #include "workflows/LoadBarrierWorkflow.hpp"
 
+#include <lol/battle/BattleTime.hpp>
+
 #include <algorithm>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -21,17 +25,13 @@ using namespace std::chrono_literals;
 constexpr auto kLoadBarrierDeadline = 10s;
 constexpr auto kCriticalSchedulingRetryDelay = 1ms;
 
-settlement::ResultCommittedAt committedAtNow() {
+settlement::ResultCommittedAt committedAtNow(battle::BattleTime battleTime) {
   const auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch())
                         .count();
-  const auto monotonic =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count();
   return settlement::ResultCommittedAt{
       .unixEpochMilliseconds = static_cast<std::uint64_t>(wall),
-      .monotonicNanoseconds = static_cast<std::uint64_t>(monotonic),
+      .monotonicNanoseconds = battleTime.battleElapsedNanos,
   };
 }
 
@@ -41,7 +41,7 @@ std::shared_ptr<RoomExecutionCell> RoomExecutionCell::create(
     runtime::WorkerPool &workers, runtime::DeadlineScheduler &deadlines,
     lobby_room::Room room, WorkBudget budget, OutcomeSink outcomeSink) {
   return create(workers, deadlines, std::move(room), budget,
-                std::move(outcomeSink), nullptr, nullptr, nullptr);
+                std::move(outcomeSink), nullptr, nullptr, nullptr, 0U, nullptr);
 }
 
 std::shared_ptr<RoomExecutionCell> RoomExecutionCell::create(
@@ -55,7 +55,7 @@ std::shared_ptr<RoomExecutionCell> RoomExecutionCell::create(
   }
   return std::shared_ptr<RoomExecutionCell>{new RoomExecutionCell{
       workers, deadlines, std::move(room), budget, std::move(outcomeSink),
-      readiness, nullptr, nullptr}};
+      readiness, nullptr, nullptr, 0U, nullptr}};
 }
 
 std::shared_ptr<RoomExecutionCell> RoomExecutionCell::create(
@@ -64,7 +64,8 @@ std::shared_ptr<RoomExecutionCell> RoomExecutionCell::create(
     const GameplayTransportReadinessPort *readiness,
     settlement::SettlementCapacityGate *capacityGate) {
   return create(workers, deadlines, std::move(room), budget,
-                std::move(outcomeSink), readiness, capacityGate, nullptr);
+                std::move(outcomeSink), readiness, capacityGate, nullptr, 0U,
+                nullptr);
 }
 
 std::shared_ptr<RoomExecutionCell> RoomExecutionCell::create(
@@ -72,15 +73,158 @@ std::shared_ptr<RoomExecutionCell> RoomExecutionCell::create(
     lobby_room::Room room, WorkBudget budget, OutcomeSink outcomeSink,
     const GameplayTransportReadinessPort *readiness,
     settlement::SettlementCapacityGate *capacityGate,
-    settlement::SettlementStoragePort *storage) {
+    settlement::SettlementStoragePort *storage,
+    std::uint32_t writerRecoveryEpoch,
+    battle_continuity::DurableTickWritePort *continuityStorage) {
   if (budget.maxCommands == 0 || budget.maxWallTime.count() <= 0 ||
       !outcomeSink) {
     throw std::invalid_argument(
         "RoomExecutionCell requires a positive budget and outcome sink");
   }
-  return std::shared_ptr<RoomExecutionCell>{new RoomExecutionCell{
-      workers, deadlines, std::move(room), budget, std::move(outcomeSink),
-      readiness, capacityGate, storage}};
+  return std::shared_ptr<RoomExecutionCell>{
+      new RoomExecutionCell{workers, deadlines, std::move(room), budget,
+                            std::move(outcomeSink), readiness, capacityGate,
+                            storage, writerRecoveryEpoch, continuityStorage}};
+}
+
+std::optional<std::shared_ptr<RoomExecutionCell>>
+RoomExecutionCell::createRecovered(
+    runtime::WorkerPool &workers, runtime::DeadlineScheduler &deadlines,
+    RecoveredRoomExecutionState recovered, WorkBudget budget,
+    OutcomeSink outcomeSink, const GameplayTransportReadinessPort *readiness,
+    settlement::SettlementCapacityGate *capacityGate,
+    settlement::SettlementStoragePort *storage,
+    std::uint32_t writerRecoveryEpoch,
+    battle_continuity::DurableTickWritePort *continuityStorage) {
+  if (budget.maxCommands == 0U || budget.maxWallTime.count() <= 0 ||
+      !outcomeSink || capacityGate == nullptr || storage == nullptr ||
+      writerRecoveryEpoch == 0U || continuityStorage == nullptr ||
+      (recovered.settlementReservation.has_value() &&
+       !recovered.settlementReservation->valid()) ||
+      recovered.recording.takePendingBatch().has_value()) {
+    return std::nullopt;
+  }
+  const auto detail = recovered.room.detail();
+  const auto projection = recovered.battle.projection();
+  const auto state = recovered.battle.exportDeterministicState();
+  if (!detail.has_value() || detail->roomId != projection.roomId ||
+      state.roomId != projection.roomId ||
+      state.battleId != projection.battleId ||
+      !recovered.nextBattleOrdinal.has_value() ||
+      *recovered.nextBattleOrdinal == 0U ||
+      projection.battleId.value() ==
+          std::numeric_limits<std::uint64_t>::max() ||
+      *recovered.nextBattleOrdinal != projection.battleId.value() + 1U ||
+      static_cast<std::uint32_t>(projection.roomId.value() >> 32U) == 0U ||
+      recovered.recording.records().empty() ||
+      recovered.recording.records().back().header.recordType !=
+          battle_continuity::RecordType::TickCommit) {
+    return std::nullopt;
+  }
+  const auto &persistedRoomState = recovered.recording.roomRecoveryState();
+  if (!persistedRoomState.has_value() ||
+      persistedRoomState->nextBattleOrdinal != *recovered.nextBattleOrdinal) {
+    return std::nullopt;
+  }
+  const auto capturedRoomState = workflows::captureRoomRecoveryState(
+      recovered.room, recovered.battle, *recovered.nextBattleOrdinal);
+  if (!capturedRoomState.has_value() ||
+      *capturedRoomState != *persistedRoomState) {
+    return std::nullopt;
+  }
+  const bool terminal =
+      state.resultState == battle::BattleResultState::Committed;
+  const bool hasReservation = recovered.settlementReservation.has_value();
+  if (recovered.settlementAlreadyDurable ? (!terminal || hasReservation)
+                                         : !hasReservation) {
+    return std::nullopt;
+  }
+  const bool lifecycleMatches =
+      (state.state == battle::BattleLoadState::LoadBarrierOpen &&
+       detail->lifecycle == lobby_room::RoomLifecycle::Loading && !terminal) ||
+      (state.state == battle::BattleLoadState::GameplayCommitted &&
+       detail->lifecycle == lobby_room::RoomLifecycle::InProgress &&
+       !terminal) ||
+      (state.state == battle::BattleLoadState::GameplayCommitted && terminal &&
+       detail->lifecycle ==
+           lobby_room::RoomLifecycle::AwaitingSettlementDurability);
+  const bool loading = state.state == battle::BattleLoadState::LoadBarrierOpen;
+  const std::size_t participantCount =
+      loading
+          ? static_cast<std::size_t>(std::ranges::count_if(
+                state.candidates,
+                [](const auto &value) {
+                  return value.state ==
+                             battle::LoadCandidateState::PendingLoad ||
+                         value.state == battle::LoadCandidateState::Ready;
+                }))
+          : static_cast<std::size_t>(std::ranges::count_if(
+                projection.capturedParticipants, [terminal](const auto &value) {
+                  return value.exitStatus ==
+                         (terminal
+                              ? battle::ParticipantExitStatus::TerminalPresent
+                              : battle::ParticipantExitStatus::
+                                    GameplayEligible);
+                }));
+  if (!lifecycleMatches || terminal != recovered.settlementBatch.has_value() ||
+      detail->members.size() != participantCount) {
+    return std::nullopt;
+  }
+  for (const auto &member : detail->members) {
+    if (loading) {
+      const auto candidate = std::ranges::find_if(
+          projection.candidates, [&member](const auto &value) {
+            return value.sessionId == member.sessionId &&
+                   value.generation == member.sessionGeneration &&
+                   (value.state == battle::LoadCandidateState::PendingLoad ||
+                    value.state == battle::LoadCandidateState::Ready);
+          });
+      if (candidate == projection.candidates.end()) {
+        return std::nullopt;
+      }
+    } else {
+      const auto participant = std::ranges::find_if(
+          projection.capturedParticipants,
+          [&member, terminal](const auto &candidate) {
+            return candidate.accountId == member.accountId &&
+                   candidate.sessionId == member.sessionId &&
+                   candidate.generation == member.sessionGeneration &&
+                   candidate.nickname == member.nickname &&
+                   candidate.exitStatus ==
+                       (terminal
+                            ? battle::ParticipantExitStatus::TerminalPresent
+                            : battle::ParticipantExitStatus::GameplayEligible);
+          });
+      if (participant == projection.capturedParticipants.end()) {
+        return std::nullopt;
+      }
+    }
+  }
+  if (recovered.settlementBatch.has_value() &&
+      (recovered.settlementBatch->roomId() != projection.roomId ||
+       recovered.settlementBatch->battleId() != projection.battleId)) {
+    return std::nullopt;
+  }
+
+  auto cell = std::shared_ptr<RoomExecutionCell>{new RoomExecutionCell{
+      workers, deadlines, std::move(recovered.room), budget,
+      std::move(outcomeSink), readiness, capacityGate, storage,
+      writerRecoveryEpoch, continuityStorage}};
+  {
+    std::lock_guard lock{cell->mutex_};
+    cell->battle_ = std::move(recovered.battle);
+    cell->battleRecording_ = std::move(recovered.recording);
+    cell->settlementBatch_ = std::move(recovered.settlementBatch);
+    cell->settlementReservation_ = std::move(recovered.settlementReservation);
+    cell->nextBattleOrdinal_ = *recovered.nextBattleOrdinal;
+    cell->battleClockAnchor_.reset();
+    cell->recoveredActivationPending_ = true;
+    if (terminal) {
+      cell->battleCompletedLiveAt_ = std::chrono::steady_clock::now();
+      cell->queueSettlementAppendLocked();
+    }
+  }
+  return cell;
 }
 
 RoomExecutionCell::RoomExecutionCell(
@@ -88,19 +232,28 @@ RoomExecutionCell::RoomExecutionCell(
     lobby_room::Room room, WorkBudget budget, OutcomeSink outcomeSink,
     const GameplayTransportReadinessPort *readiness,
     settlement::SettlementCapacityGate *capacityGate,
-    settlement::SettlementStoragePort *storage)
+    settlement::SettlementStoragePort *storage,
+    std::uint32_t writerRecoveryEpoch,
+    battle_continuity::DurableTickWritePort *continuityStorage)
     : workers_(workers), deadlines_(deadlines), room_(std::move(room)),
       budget_(budget), outcomeSink_(std::move(outcomeSink)),
       readiness_(readiness),
       capacityGate_(capacityGate != nullptr
                         ? std::optional{*capacityGate}
                         : std::optional<settlement::SettlementCapacityGate>{}),
-      storage_(storage) {}
+      storage_(storage), writerRecoveryEpoch_(writerRecoveryEpoch),
+      continuityStorage_(continuityStorage) {}
 
 RoomCommandAdmission RoomExecutionCell::enqueue(RoomCommandEnvelope command) {
   std::lock_guard lock{mutex_};
   if (retired_) {
     return RoomCommandAdmission::RoomRetired;
+  }
+  if (recoveredActivationPending_) {
+    return RoomCommandAdmission::RoomOverloaded;
+  }
+  if (continuityRecordingFailed_) {
+    return RoomCommandAdmission::RoomOverloaded;
   }
   if (externalQueue_.size() >= kExternalQueueCapacity) {
     ++externalRejections_;
@@ -112,6 +265,9 @@ RoomCommandAdmission RoomExecutionCell::enqueue(RoomCommandEnvelope command) {
       .usesCriticalControlReservation = false,
       .envelope = std::move(command),
   });
+  if (continuityDurabilityPending_) {
+    return RoomCommandAdmission::Accepted;
+  }
   if (scheduled_) {
     return RoomCommandAdmission::Accepted;
   }
@@ -131,6 +287,12 @@ RoomExecutionCell::enqueueControl(RoomControlEnvelope command) {
   if (retired_) {
     return RoomCommandAdmission::RoomRetired;
   }
+  if (recoveredActivationPending_) {
+    return RoomCommandAdmission::ControlReserveExhausted;
+  }
+  if (continuityRecordingFailed_) {
+    return RoomCommandAdmission::ControlReserveExhausted;
+  }
   const auto generalCapacity =
       kControlQueueCapacity - (criticalControlReserved_ ? 1u : 0u);
   if (generalControlQueueDepth_ >= generalCapacity) {
@@ -146,6 +308,9 @@ RoomExecutionCell::enqueueControl(RoomControlEnvelope command) {
   ++generalControlQueueDepth_;
   internalReserveHighWatermark_ =
       std::max(internalReserveHighWatermark_, controlQueue_.size());
+  if (continuityDurabilityPending_) {
+    return RoomCommandAdmission::Accepted;
+  }
   if (scheduled_) {
     return RoomCommandAdmission::Accepted;
   }
@@ -168,15 +333,31 @@ void RoomExecutionCell::retire() {
   generalControlQueueDepth_ = 0;
   releaseCriticalDeadlineLocked();
   pendingAppendRequest_.reset();
+  pendingContinuityWrite_.reset();
+  pendingContinuityReceipt_.reset();
+  heldContinuityOutcome_.reset();
+  releasedContinuityOutcome_.reset();
+  continuityCompletion_.reset();
+  continuityDurabilityPending_ = false;
+  if (continuityCompletionLease_) {
+    continuityCompletionLease_->cancel();
+    continuityCompletionLease_.reset();
+  }
   settlementReservation_.reset();
   retainedLootResults_.clear();
+  recoveredActivationPending_ = false;
 }
 
 bool RoomExecutionCell::waitUntilIdle(std::chrono::milliseconds timeout) {
   std::unique_lock lock{mutex_};
   return idle_.wait_for(lock, timeout, [this] {
     return externalQueue_.empty() && controlQueue_.empty() && !scheduled_ &&
-           activeRuns_ == 0;
+           activeRuns_ == 0 && !continuityDurabilityPending_ &&
+           !pendingContinuityWrite_.has_value() &&
+           !pendingContinuityReceipt_.has_value() &&
+           !heldContinuityOutcome_.has_value() &&
+           !releasedContinuityOutcome_.has_value() &&
+           !continuityCompletion_.has_value();
   });
 }
 
@@ -215,6 +396,15 @@ std::optional<settlement::SettlementIntentBatch>
 RoomExecutionCell::settlementBatch() const {
   std::lock_guard lock{mutex_};
   return settlementBatch_;
+}
+
+std::optional<std::vector<std::uint8_t>>
+RoomExecutionCell::battleJournal() const {
+  std::lock_guard lock{mutex_};
+  if (!battleRecording_.has_value()) {
+    return std::nullopt;
+  }
+  return workflows::encodeJournal(*battleRecording_);
 }
 
 bool RoomExecutionCell::scheduleLocked() {
@@ -277,6 +467,205 @@ void RoomExecutionCell::submitPendingAppend() {
       admission != RoomCommandAdmission::RoomRetired) {
     std::terminate();
   }
+}
+
+void RoomExecutionCell::submitPendingContinuityWrite() {
+  std::optional<battle_continuity::DurableTickWriteRequest> request;
+  battle_continuity::DurableTickWritePort *storage = nullptr;
+  {
+    std::lock_guard lock{mutex_};
+    if (retired_ || continuityStorage_ == nullptr ||
+        !pendingContinuityWrite_.has_value()) {
+      return;
+    }
+    storage = continuityStorage_;
+    request = std::move(pendingContinuityWrite_);
+    pendingContinuityWrite_.reset();
+  }
+
+  const auto identity = request->batch.identity;
+  const auto writerEpoch = request->batch.writerRecoveryEpoch;
+  const auto lastSequence = request->batch.lastRecordSequence;
+  const auto weak = weak_from_this();
+  const auto submitted = storage->submit(
+      std::move(*request),
+      [weak](battle_continuity::DurableTickWriteOutcome outcome) {
+        if (const auto cell = weak.lock()) {
+          cell->enqueueContinuityCompletion(std::move(outcome));
+        }
+      });
+  if (submitted == battle_continuity::DurableTickSubmitResult::Accepted) {
+    return;
+  }
+  const auto failure =
+      submitted == battle_continuity::DurableTickSubmitResult::QueueFull
+          ? battle_continuity::DurableTickWriteFailure::QueueFull
+      : submitted ==
+              battle_continuity::DurableTickSubmitResult::StaleWriterEpoch
+          ? battle_continuity::DurableTickWriteFailure::StaleWriterEpoch
+      : submitted == battle_continuity::DurableTickSubmitResult::InvalidRequest
+          ? battle_continuity::DurableTickWriteFailure::InvalidBatch
+          : battle_continuity::DurableTickWriteFailure::Stopped;
+  enqueueContinuityCompletion(battle_continuity::DurableTickWriteFailed{
+      .identity = identity,
+      .writerRecoveryEpoch = writerEpoch,
+      .lastRecordSequence = lastSequence,
+      .failure = failure,
+  });
+}
+
+void RoomExecutionCell::enqueueContinuityCompletion(
+    battle_continuity::DurableTickWriteOutcome outcome) {
+  std::lock_guard lock{mutex_};
+  if (retired_ || !continuityDurabilityPending_ ||
+      continuityCompletion_.has_value()) {
+    return;
+  }
+  continuityCompletion_ = QueuedRoomCommand{
+      .admissionOrdinal = nextAdmissionOrdinal_++,
+      .lane = CommandLane::InternalControl,
+      .usesCriticalControlReservation = false,
+      .envelope =
+          RoomControlEnvelope{
+              .command = std::visit(
+                  [](auto value) -> RoomControlCommand {
+                    return RoomControlCommand{std::move(value)};
+                  },
+                  std::move(outcome)),
+              .occurredAt = std::chrono::steady_clock::now(),
+          },
+  };
+  if (scheduled_) {
+    return;
+  }
+  scheduled_ = true;
+  if (scheduleLocked()) {
+    return;
+  }
+  scheduled_ = false;
+  ++schedulingFailures_;
+  armContinuityCompletionRetryLocked();
+}
+
+void RoomExecutionCell::retryContinuityCompletionScheduling() {
+  std::lock_guard lock{mutex_};
+  if (retired_ || !continuityCompletion_.has_value() || scheduled_) {
+    return;
+  }
+  scheduled_ = true;
+  if (scheduleLocked()) {
+    return;
+  }
+  scheduled_ = false;
+  ++schedulingFailures_;
+  armContinuityCompletionRetryLocked();
+}
+
+void RoomExecutionCell::armContinuityCompletionRetryLocked() {
+  if (!continuityCompletionLease_) {
+    return;
+  }
+  const auto weak = weak_from_this();
+  static_cast<void>(continuityCompletionLease_->armAfter(
+      kCriticalSchedulingRetryDelay, [weak] {
+        if (const auto cell = weak.lock()) {
+          cell->retryContinuityCompletionScheduling();
+        }
+      }));
+}
+
+bool RoomExecutionCell::armRecoveredDeadlineLocked() {
+  if (!battle_.has_value()) {
+    return false;
+  }
+  const auto state = battle_->exportDeterministicState();
+  std::optional<std::uint64_t> deadlineTick;
+  std::optional<RoomControlCommand> command;
+  if (state.state == battle::BattleLoadState::LoadBarrierOpen &&
+      !state.combatDeadlineTick.has_value() &&
+      !state.lootDeadlineTick.has_value() &&
+      state.loadDeadlineTick.has_value()) {
+    deadlineTick = state.loadDeadlineTick;
+    command = RoomControlCommand{battle::LoadBarrierDeadlineCommand{
+        .roomId = state.roomId,
+        .battleId = state.battleId,
+    }};
+  } else if (state.state == battle::BattleLoadState::GameplayCommitted &&
+             state.resultState == battle::BattleResultState::Committed &&
+             !state.loadDeadlineTick.has_value() &&
+             !state.combatDeadlineTick.has_value() &&
+             !state.lootDeadlineTick.has_value()) {
+    return true;
+  } else if (state.state == battle::BattleLoadState::GameplayCommitted &&
+             !state.loadDeadlineTick.has_value() &&
+             !state.lootDeadlineTick.has_value() &&
+             state.combatDeadlineTick.has_value()) {
+    deadlineTick = state.combatDeadlineTick;
+    command = RoomControlCommand{
+        battle::CombatDeadlineCommand{.battleId = state.battleId}};
+  } else if (state.state == battle::BattleLoadState::GameplayCommitted &&
+             !state.loadDeadlineTick.has_value() &&
+             !state.combatDeadlineTick.has_value() &&
+             state.lootDeadlineTick.has_value()) {
+    deadlineTick = state.lootDeadlineTick;
+    command = RoomControlCommand{
+        battle::LootDeadlineCommand{.battleId = state.battleId}};
+  } else {
+    return false;
+  }
+
+  const auto remainingTicks = *deadlineTick > state.battleTime.logicalTick
+                                  ? *deadlineTick - state.battleTime.logicalTick
+                                  : 0U;
+  using MillisecondsRep = std::chrono::milliseconds::rep;
+  constexpr auto maximumDelay =
+      static_cast<std::uint64_t>(std::numeric_limits<MillisecondsRep>::max());
+  constexpr std::uint64_t millisecondsPerTick = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::nanoseconds{battle::BattleTime::tickNanos})
+          .count());
+  if (remainingTicks > maximumDelay / millisecondsPerTick) {
+    return false;
+  }
+  return reserveAndArmLoadDeadlineLocked(
+      std::chrono::milliseconds{
+          static_cast<MillisecondsRep>(remainingTicks * millisecondsPerTick)},
+      std::move(*command), state.battleId);
+}
+
+void RoomExecutionCell::queueSettlementAppendLocked() {
+  if (!settlementBatch_.has_value() || storage_ == nullptr ||
+      continuityDurabilityPending_ ||
+      settlementAppendState_ != SettlementAppendState::None) {
+    return;
+  }
+  std::vector<std::vector<std::uint8_t>> canonicalIntents;
+  canonicalIntents.reserve(settlementBatch_->intents().size());
+  for (const auto &intent : settlementBatch_->intents()) {
+    canonicalIntents.push_back(settlement::canonicalPayload(intent));
+  }
+  pendingAppendRequest_ = settlement::DurableAppendRequest{
+      .batchId = settlementBatch_->id(),
+      .roomId = settlementBatch_->roomId(),
+      .battleId = settlementBatch_->battleId(),
+      .canonicalIntents = std::move(canonicalIntents),
+  };
+  settlementAppendState_ = SettlementAppendState::Appending;
+}
+
+bool RoomExecutionCell::activateRecovered() {
+  {
+    std::lock_guard lock{mutex_};
+    if (!recoveredActivationPending_) {
+      return !retired_;
+    }
+    if (retired_ || !armRecoveredDeadlineLocked()) {
+      return false;
+    }
+    recoveredActivationPending_ = false;
+  }
+  submitPendingAppend();
+  return true;
 }
 
 bool RoomExecutionCell::reserveAndArmLoadDeadlineLocked(
@@ -348,6 +737,9 @@ void RoomExecutionCell::enqueueCriticalDeadlineControl(
   criticalControlQueued_ = true;
   internalReserveHighWatermark_ =
       std::max(internalReserveHighWatermark_, controlQueue_.size());
+  if (continuityDurabilityPending_) {
+    return;
+  }
   if (scheduled_) {
     return;
   }
@@ -432,8 +824,53 @@ battle::ClaimLootTerminalResult RoomExecutionCell::routeRetainedLootLocked(
   };
 }
 
+battle::BattleTime RoomExecutionCell::battleTimeForLocked(
+    std::chrono::steady_clock::time_point liveTime) {
+  if (!battle_.has_value()) {
+    return {};
+  }
+  const auto current = battle_->battleTime();
+  const auto battleId = battle_->projection().battleId;
+  if (!battleClockAnchor_.has_value() ||
+      battleClockAnchor_->battleId != battleId) {
+    battleClockAnchor_ = LiveBattleClockAnchor{
+        .battleId = battleId,
+        .liveTime = liveTime,
+        .battleTime = current,
+    };
+    return current;
+  }
+  if (liveTime <= battleClockAnchor_->liveTime) {
+    return current;
+  }
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           liveTime - battleClockAnchor_->liveTime)
+                           .count();
+  if (elapsed <= 0) {
+    return current;
+  }
+  const auto relative =
+      battle::BattleTime::fromElapsedNanos(static_cast<std::uint64_t>(elapsed));
+  constexpr auto maximumTick =
+      std::numeric_limits<std::uint64_t>::max() / battle::BattleTime::tickNanos;
+  const auto anchorTick = battleClockAnchor_->battleTime.logicalTick;
+  const auto candidateTick =
+      anchorTick + std::min(relative.logicalTick, maximumTick - anchorTick);
+  return battle::BattleTime::fromLogicalTick(
+      std::max(current.logicalTick, candidateTick));
+}
+
 std::optional<RoomExecutionCell::QueuedRoomCommand>
 RoomExecutionCell::popNextLocked() {
+  if (continuityCompletion_.has_value()) {
+    auto command = std::move(*continuityCompletion_);
+    continuityCompletion_.reset();
+    return command;
+  }
+  if (continuityDurabilityPending_) {
+    return std::nullopt;
+  }
   if (externalQueue_.empty() && controlQueue_.empty()) {
     return std::nullopt;
   }
@@ -455,6 +892,16 @@ RoomExecutionCell::popNextLocked() {
 }
 
 RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
+  const auto liveOccurredAt = std::visit(
+      [](const auto &envelope) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(envelope)>,
+                                     RoomCommandEnvelope>) {
+          return envelope.receivedAt;
+        } else {
+          return envelope.occurredAt;
+        }
+      },
+      queued.envelope);
   lobby_room::RoomResultCode code = lobby_room::RoomResultCode::InvalidArgument;
   RoomCommandKind kind = RoomCommandKind::SetReady;
   std::optional<shared::RequestId> requestId;
@@ -464,12 +911,15 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
   std::optional<shared::SessionGeneration> targetGeneration;
   std::optional<lobby_room::BattleAdmissionSnapshot> admission;
   std::optional<battle::BattleLoadResultCode> battleCode;
+  std::optional<battle::BattleInputResultCode> inputControlCode;
   std::optional<battle::MovementResultCode> movementCode;
   std::optional<battle::AttackTerminalResult> attackResult;
+  std::optional<battle::AttackAppliedRecord> attackApplied;
   std::optional<battle::CombatDeadlineResultCode> combatDeadlineCode;
   std::optional<battle::ClaimLootTerminalResult> lootClaimResult;
   std::optional<battle::LootDeadlineResultCode> lootDeadlineCode;
   std::optional<battle::BattleLoadProjection> battleProjection;
+  std::optional<battle::BattleResumeProjection> resumeProjection;
   std::optional<battle::StateSnapshotProjection> snapshot;
   std::optional<battle::CombatProjection> combat;
   std::optional<BattleRecoveryNotice> recoveryNotice;
@@ -478,13 +928,29 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
   bool lootResolutionOpened = false;
   bool gameplayStartCommitted = false;
   bool settlementDurable = false;
+  const auto recordingBefore =
+      battleRecording_.has_value() && battle_.has_value()
+          ? std::optional{battle_->exportDeterministicState()}
+          : std::nullopt;
+  const auto recordingBeforeRoom =
+      battleRecording_.has_value() && battle_.has_value()
+          ? workflows::captureRoomRecoveryState(room_, *battle_,
+                                                 nextBattleOrdinal_)
+          : std::nullopt;
+  std::optional<battle_continuity::CanonicalCommand> canonicalCommand;
+  std::uint16_t canonicalDecisionCode = 0U;
+  bool continuityRecordingFailed =
+      battleRecording_.has_value() && battle_.has_value() &&
+      !recordingBeforeRoom.has_value();
   if (auto *envelope = std::get_if<RoomCommandEnvelope>(&queued.envelope)) {
     requestId = envelope->requestId;
     std::visit(
         [this, &code, &kind, &actorSessionId, &actorGeneration,
          &targetSessionId, &targetGeneration, &admission, &battleCode,
-         &movementCode, &attackResult, &lootClaimResult, &battleProjection,
-         &combat, &lootResolutionOpened, &gameplayStartCommitted,
+         &movementCode, &attackResult, &attackApplied, &lootClaimResult,
+         &battleProjection, &combat, &lootResolutionOpened,
+         &gameplayStartCommitted, &recordingBefore, &canonicalCommand,
+         &canonicalDecisionCode, &continuityRecordingFailed,
          receivedAt = envelope->receivedAt](auto &&command) {
           using Command = std::remove_cvref_t<decltype(command)>;
           if constexpr (std::is_same_v<Command, lobby_room::JoinRoomCommand>) {
@@ -497,13 +963,26 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
             kind = RoomCommandKind::Leave;
             actorSessionId = command.sessionId;
             actorGeneration = command.generation;
+            if (recordingBefore.has_value()) {
+              if (const auto slot =
+                      workflows::participantSlotForSession(*recordingBefore,
+                                                           command.sessionId);
+                  slot.has_value()) {
+                canonicalCommand =
+                    battle_continuity::CanonicalCommand::participantExit(*slot,
+                                                                         true);
+              }
+            }
             const bool hadBattle = battle_.has_value();
             auto result = workflows::exitParticipant(
                 room_, battle_, command.sessionId, command.generation,
-                battle::ParticipantExitStatus::VoluntaryLeft, receivedAt);
+                battle::ParticipantExitStatus::VoluntaryLeft,
+                battleTimeForLocked(receivedAt));
             code = result.roomCode;
             if (hadBattle) {
               battleCode = result.battleCode;
+              canonicalDecisionCode =
+                  static_cast<std::uint16_t>(result.battleCode);
             }
             battleProjection = std::move(result.battle);
             gameplayStartCommitted = result.gameplayStartCommitted;
@@ -544,7 +1023,44 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
             if (result.battle.has_value()) {
               settlementReservation_ = std::move(result.reservation);
               battle_ = std::move(result.battle);
-              ++nextBattleOrdinal_;
+              battleClockAnchor_.reset();
+              battleCompletedLiveAt_.reset();
+              battleRecording_.reset();
+              const auto activeBattleId = battle_->projection().battleId.value();
+              if (activeBattleId ==
+                  std::numeric_limits<std::uint64_t>::max()) {
+                continuityRecordingFailed = true;
+              } else {
+                ++nextBattleOrdinal_;
+              }
+              if (writerRecoveryEpoch_ != 0U) {
+                const auto roomId = battle_->projection().roomId;
+                const auto originEpoch =
+                    static_cast<std::uint32_t>(roomId.value() >> 32U);
+                const auto roomState =
+                    continuityStorage_ != nullptr &&
+                            !continuityRecordingFailed
+                        ? workflows::captureRoomRecoveryState(
+                              room_, *battle_, nextBattleOrdinal_)
+                        : std::nullopt;
+                auto recording =
+                    continuityStorage_ != nullptr && roomState.has_value()
+                        ? battle_continuity::BattleRecording::start(
+                              *battle_,
+                              battle_continuity::BattleIdentity{
+                                  .originRecoveryEpoch = originEpoch,
+                                  .roomId = roomId,
+                                  .battleInstanceId =
+                                      battle_->projection().battleId,
+                              },
+                              writerRecoveryEpoch_, *roomState)
+                        : std::nullopt;
+                if (!recording.has_value()) {
+                  continuityRecordingFailed = true;
+                } else {
+                  battleRecording_ = std::move(recording);
+                }
+              }
             } else if (loadDeadlineReserved) {
               releaseCriticalDeadlineLocked();
             }
@@ -553,9 +1069,21 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
             kind = RoomCommandKind::ArenaLoadComplete;
             actorSessionId = command.sessionId;
             actorGeneration = command.generation;
+            if (recordingBefore.has_value()) {
+              if (const auto slot =
+                      workflows::participantSlotForSession(*recordingBefore,
+                                                           command.sessionId);
+                  slot.has_value()) {
+                canonicalCommand =
+                    battle_continuity::CanonicalCommand::arenaLoadComplete(
+                        *slot);
+              }
+            }
             auto result =
-                workflows::completeLoad(room_, battle_, command, readiness_);
+                workflows::completeLoad(room_, battle_, command, readiness_,
+                                        battleTimeForLocked(receivedAt));
             battleCode = result.code;
+            canonicalDecisionCode = static_cast<std::uint16_t>(result.code);
             battleProjection = std::move(result.battle);
             gameplayStartCommitted = result.gameplayStartCommitted;
             code = result.code == battle::BattleLoadResultCode::Ok
@@ -565,16 +1093,46 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
             kind = RoomCommandKind::Move;
             actorSessionId = command.sessionId;
             actorGeneration = command.generation;
+            if (recordingBefore.has_value()) {
+              if (const auto slot =
+                      workflows::participantSlotForSession(*recordingBefore,
+                                                           command.sessionId);
+                  slot.has_value()) {
+                canonicalCommand = battle_continuity::CanonicalCommand::move(
+                    *slot,
+                    battle_continuity::CommandId{.high = 0U,
+                                                 .low = command.actionSequence},
+                    command.direction);
+              }
+            }
             movementCode = battle_.has_value()
-                               ? battle_->acceptMove(command, receivedAt)
+                               ? battle_->acceptMove(
+                                     command, battleTimeForLocked(receivedAt))
                                : battle::MovementResultCode::StaleBattle;
+            canonicalDecisionCode = static_cast<std::uint16_t>(*movementCode);
             code = lobby_room::RoomResultCode::Ok;
           } else if constexpr (std::is_same_v<Command, battle::AttackCommand>) {
             kind = RoomCommandKind::Attack;
             actorSessionId = command.sessionId;
             actorGeneration = command.generation;
-            auto result = workflows::applyAttack(battle_, command, receivedAt);
+            if (recordingBefore.has_value()) {
+              if (const auto slot =
+                      workflows::participantSlotForSession(*recordingBefore,
+                                                           command.sessionId);
+                  slot.has_value()) {
+                canonicalCommand = battle_continuity::CanonicalCommand::attack(
+                    *slot,
+                    battle_continuity::CommandId{.high = command.commandId.high,
+                                                 .low = command.commandId.low},
+                    command.targetHint);
+              }
+            }
+            auto result = workflows::applyAttack(
+                battle_, command, battleTimeForLocked(receivedAt));
             attackResult = std::move(result.result);
+            canonicalDecisionCode =
+                static_cast<std::uint16_t>(attackResult->code);
+            attackApplied = std::move(result.applied);
             combat = std::move(result.combat);
             lootResolutionOpened = result.lootResolutionOpened;
             code = lobby_room::RoomResultCode::Ok;
@@ -584,7 +1142,24 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
             actorGeneration = command.generation;
             if (battle_.has_value() &&
                 battle_->projection().battleId == command.battleId) {
-              lootClaimResult = battle_->claimLoot(command, receivedAt);
+              if (recordingBefore.has_value()) {
+                if (const auto slot =
+                        workflows::participantSlotForSession(
+                            *recordingBefore, command.sessionId);
+                    slot.has_value()) {
+                  canonicalCommand =
+                      battle_continuity::CanonicalCommand::claimLoot(
+                          *slot,
+                          battle_continuity::CommandId{
+                              .high = command.commandId.high,
+                              .low = command.commandId.low},
+                          command.dropId.value);
+                }
+              }
+              lootClaimResult =
+                  battle_->claimLoot(command, battleTimeForLocked(receivedAt));
+              canonicalDecisionCode =
+                  static_cast<std::uint16_t>(lootClaimResult->code);
             } else {
               lootClaimResult = routeRetainedLootLocked(command, receivedAt);
             }
@@ -597,31 +1172,99 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
         std::get<RoomControlEnvelope>(std::move(queued.envelope));
     std::visit(
         [this, &code, &kind, &actorSessionId, &actorGeneration, &battleCode,
-         &movementCode, &combatDeadlineCode, &lootDeadlineCode,
-         &battleProjection, &snapshot, &combat, &recoveryNotice, &finalResult,
-         &gameplayStartCommitted, &settlementDurable,
+         &inputControlCode, &movementCode, &combatDeadlineCode,
+         &lootDeadlineCode, &battleProjection, &resumeProjection, &snapshot,
+         &combat, &recoveryNotice, &finalResult, &gameplayStartCommitted,
+         &settlementDurable, &recordingBefore, &canonicalCommand,
+         &canonicalDecisionCode, &continuityRecordingFailed,
          occurredAt = controlEnvelope.occurredAt](const auto &command) {
           using Command = std::remove_cvref_t<decltype(command)>;
           if constexpr (std::is_same_v<Command, ConfirmedDisconnectCommand>) {
             kind = RoomCommandKind::ConfirmedDisconnect;
             actorSessionId = command.sessionId;
             actorGeneration = command.generation;
+            if (recordingBefore.has_value()) {
+              if (const auto slot =
+                      workflows::participantSlotForSession(*recordingBefore,
+                                                           command.sessionId);
+                  slot.has_value()) {
+                canonicalCommand =
+                    battle_continuity::CanonicalCommand::participantExit(*slot,
+                                                                         false);
+              }
+            }
             const bool hadBattle = battle_.has_value();
-            auto result =
-                workflows::disconnect(room_, battle_, command.sessionId,
-                                      command.generation, occurredAt);
+            auto result = workflows::disconnect(
+                room_, battle_, command.sessionId, command.generation,
+                battleTimeForLocked(occurredAt));
             code = result.roomCode;
             if (hadBattle) {
               battleCode = result.battleCode;
+              canonicalDecisionCode =
+                  static_cast<std::uint16_t>(result.battleCode);
             }
             battleProjection = std::move(result.battle);
             gameplayStartCommitted = result.gameplayStartCommitted;
           } else if constexpr (std::is_same_v<
                                    Command,
+                                   battle::SuspendBattleInputCommand>) {
+            kind = RoomCommandKind::SuspendBattleInput;
+            actorSessionId = command.sessionId;
+            actorGeneration = command.generation;
+            if (recordingBefore.has_value()) {
+              if (const auto slot =
+                      workflows::participantSlotForSession(*recordingBefore,
+                                                           command.sessionId);
+                  slot.has_value()) {
+                canonicalCommand =
+                    battle_continuity::CanonicalCommand::suspendInput(*slot);
+              }
+            }
+            inputControlCode = battle_.has_value()
+                                   ? battle_->suspendInput(
+                                         command.sessionId, command.generation,
+                                         battleTimeForLocked(occurredAt))
+                                   : battle::BattleInputResultCode::StaleBattle;
+            canonicalDecisionCode =
+                static_cast<std::uint16_t>(*inputControlCode);
+            code = lobby_room::RoomResultCode::Ok;
+          } else if constexpr (std::is_same_v<
+                                   Command, battle::ResumeBattleInputCommand>) {
+            kind = RoomCommandKind::ResumeBattleInput;
+            actorSessionId = command.sessionId;
+            actorGeneration = command.generation;
+            if (recordingBefore.has_value()) {
+              if (const auto slot =
+                      workflows::participantSlotForSession(*recordingBefore,
+                                                           command.sessionId);
+                  slot.has_value()) {
+                canonicalCommand =
+                    battle_continuity::CanonicalCommand::resumeInput(*slot);
+              }
+            }
+            inputControlCode = battle_.has_value()
+                                   ? battle_->resumeInput(
+                                         command.sessionId, command.generation,
+                                         battleTimeForLocked(occurredAt))
+                                   : battle::BattleInputResultCode::StaleBattle;
+            canonicalDecisionCode =
+                static_cast<std::uint16_t>(*inputControlCode);
+            if (battle_.has_value()) {
+              resumeProjection = battle_->resumeProjection(command.sessionId,
+                                                           command.generation);
+            }
+            code = lobby_room::RoomResultCode::Ok;
+          } else if constexpr (std::is_same_v<
+                                   Command,
                                    battle::LoadBarrierDeadlineCommand>) {
             kind = RoomCommandKind::LoadBarrierDeadline;
+            if (recordingBefore.has_value()) {
+              canonicalCommand =
+                  battle_continuity::CanonicalCommand::loadBarrierDeadline();
+            }
             auto result = workflows::expireLoadBarrier(room_, battle_, command);
             battleCode = result.code;
+            canonicalDecisionCode = static_cast<std::uint16_t>(result.code);
             battleProjection = std::move(result.battle);
             gameplayStartCommitted = result.gameplayStartCommitted;
             code = result.code == battle::BattleLoadResultCode::Ok
@@ -630,23 +1273,84 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
           } else if constexpr (std::is_same_v<Command,
                                               battle::MovementTickCommand>) {
             kind = RoomCommandKind::MovementTick;
-            auto result = workflows::advanceGameplayTick(battle_, command);
+            if (recordingBefore.has_value()) {
+              canonicalCommand =
+                  battle_continuity::CanonicalCommand::movementTick(
+                      command.serverTick);
+            }
+            auto result = workflows::advanceGameplayTick(
+                battle_, command, battleTimeForLocked(occurredAt));
             movementCode = result.code;
+            canonicalDecisionCode = static_cast<std::uint16_t>(result.code);
             snapshot = std::move(result.snapshot);
             code = lobby_room::RoomResultCode::Ok;
           } else if constexpr (std::is_same_v<Command,
                                               battle::CombatDeadlineCommand>) {
             kind = RoomCommandKind::CombatDeadline;
-            auto result = workflows::expireCombat(battle_, command, occurredAt);
+            if (recordingBefore.has_value()) {
+              canonicalCommand =
+                  battle_continuity::CanonicalCommand::combatDeadline();
+            }
+            auto result = workflows::expireCombat(battle_, command);
             combatDeadlineCode = result.code;
+            canonicalDecisionCode = static_cast<std::uint16_t>(result.code);
             combat = std::move(result.combat);
             code = lobby_room::RoomResultCode::Ok;
           } else if constexpr (std::is_same_v<Command,
                                               battle::LootDeadlineCommand>) {
             kind = RoomCommandKind::LootDeadline;
-            lootDeadlineCode =
-                workflows::expireLoot(battle_, command, occurredAt).code;
+            if (recordingBefore.has_value()) {
+              canonicalCommand =
+                  battle_continuity::CanonicalCommand::lootDeadline();
+            }
+            lootDeadlineCode = workflows::expireLoot(battle_, command).code;
+            canonicalDecisionCode =
+                static_cast<std::uint16_t>(*lootDeadlineCode);
             code = lobby_room::RoomResultCode::Ok;
+          } else if constexpr (std::is_same_v<
+                                   Command,
+                                   battle_continuity::DurableTickCommitted>) {
+            kind = RoomCommandKind::ContinuityTickCommitted;
+            const bool correlated =
+                continuityDurabilityPending_ &&
+                pendingContinuityReceipt_.has_value() &&
+                heldContinuityOutcome_.has_value() &&
+                command.identity == pendingContinuityReceipt_->identity &&
+                command.writerRecoveryEpoch ==
+                    pendingContinuityReceipt_->writerRecoveryEpoch &&
+                command.lastRecordSequence ==
+                    pendingContinuityReceipt_->lastRecordSequence;
+            if (!correlated) {
+              code = lobby_room::RoomResultCode::InvalidArgument;
+              return;
+            }
+            continuityDurabilityPending_ = false;
+            pendingContinuityReceipt_.reset();
+            if (continuityCompletionLease_) {
+              continuityCompletionLease_->cancel();
+              continuityCompletionLease_.reset();
+            }
+            releasedContinuityOutcome_ = std::move(heldContinuityOutcome_);
+            heldContinuityOutcome_.reset();
+            code = lobby_room::RoomResultCode::Ok;
+          } else if constexpr (std::is_same_v<
+                                   Command,
+                                   battle_continuity::DurableTickWriteFailed>) {
+            kind = RoomCommandKind::ContinuityTickFailed;
+            const bool correlated =
+                continuityDurabilityPending_ &&
+                pendingContinuityReceipt_.has_value() &&
+                command.identity == pendingContinuityReceipt_->identity &&
+                command.writerRecoveryEpoch ==
+                    pendingContinuityReceipt_->writerRecoveryEpoch &&
+                command.lastRecordSequence ==
+                    pendingContinuityReceipt_->lastRecordSequence;
+            if (!correlated) {
+              code = lobby_room::RoomResultCode::InvalidArgument;
+              return;
+            }
+            continuityRecordingFailed = true;
+            code = lobby_room::RoomResultCode::InvalidArgument;
           } else if constexpr (std::is_same_v<
                                    Command,
                                    settlement::DurableAppendCompleted>) {
@@ -665,9 +1369,14 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
             settlementDurable = result.applied;
             if (result.applied) {
               if (result.retainedLootResults.has_value()) {
+                if (battleCompletedLiveAt_.has_value()) {
+                  static_cast<void>(result.retainedLootResults->expired(
+                      *battleCompletedLiveAt_));
+                }
                 retainedLootResults_.push_back(
                     std::move(*result.retainedLootResults));
               }
+              battleCompletedLiveAt_.reset();
               settlementAppendState_ = SettlementAppendState::None;
               settlementRecoveryNoticeEmitted_ = false;
             }
@@ -696,7 +1405,15 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
         },
         controlEnvelope.command);
   }
+  if (!battleCompletedLiveAt_.has_value() && battle_.has_value() &&
+      battle_->resultProjection().state ==
+          battle::BattleResultState::Committed) {
+    battleCompletedLiveAt_ = liveOccurredAt;
+  }
   if (!battle_.has_value()) {
+    battleClockAnchor_.reset();
+    battleCompletedLiveAt_.reset();
+    battleRecording_.reset();
     settlementReservation_.reset();
   }
   if (gameplayStartCommitted && battle_.has_value() &&
@@ -721,26 +1438,118 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
     ++schedulingFailures_;
     releaseCriticalDeadlineLocked();
   }
+  bool terminalBatchCreated = false;
   if (!settlementBatch_.has_value() && battle_.has_value()) {
-    settlementBatch_ = workflows::holdTerminalForSettlementDurability(
-        room_, *battle_, committedAtNow());
-    if (settlementBatch_.has_value() && storage_ != nullptr &&
-        settlementAppendState_ == SettlementAppendState::None) {
-      std::vector<std::vector<std::uint8_t>> canonicalIntents;
-      canonicalIntents.reserve(settlementBatch_->intents().size());
-      for (const auto &intent : settlementBatch_->intents()) {
-        canonicalIntents.push_back(settlement::canonicalPayload(intent));
-      }
-      pendingAppendRequest_ = settlement::DurableAppendRequest{
-          .batchId = settlementBatch_->id(),
-          .roomId = settlementBatch_->roomId(),
-          .battleId = settlementBatch_->battleId(),
-          .canonicalIntents = std::move(canonicalIntents),
-      };
-      settlementAppendState_ = SettlementAppendState::Appending;
+    auto batch = workflows::holdTerminalForSettlementDurability(
+        room_, *battle_, committedAtNow(battle_->battleTime()));
+    if (batch.has_value()) {
+      settlementBatch_ = std::move(batch);
+      terminalBatchCreated = true;
     }
   }
-  if (battle_.has_value() && !settlementBatch_.has_value()) {
+  const auto recordingAfterRoom =
+      battleRecording_.has_value() && battle_.has_value()
+          ? workflows::captureRoomRecoveryState(room_, *battle_,
+                                                 nextBattleOrdinal_)
+          : std::nullopt;
+  if (battleRecording_.has_value() && battle_.has_value() &&
+      !recordingAfterRoom.has_value()) {
+    continuityRecordingFailed = true;
+  }
+  if (battleRecording_.has_value() && recordingBefore.has_value() &&
+      battle_.has_value()) {
+    if (!recordingBeforeRoom.has_value() || !recordingAfterRoom.has_value() ||
+        (!canonicalCommand.has_value() &&
+         *recordingBefore != battle_->exportDeterministicState())) {
+      continuityRecordingFailed = true;
+    }
+    std::optional<battle_continuity::TerminalRecording> terminal;
+    if (terminalBatchCreated) {
+      terminal = workflows::captureTerminalRecording(*battle_,
+                                                      *settlementBatch_);
+      if (!canonicalCommand.has_value() || !terminal.has_value()) {
+        continuityRecordingFailed = true;
+      }
+    }
+    if (!continuityRecordingFailed && canonicalCommand.has_value() &&
+        !battleRecording_->recordDecision(
+            *canonicalCommand, *recordingBefore, *recordingBeforeRoom,
+            *battle_, *recordingAfterRoom, canonicalDecisionCode,
+            std::move(terminal))) {
+      continuityRecordingFailed = true;
+    }
+  }
+  if (!continuityRecordingFailed && battleRecording_.has_value()) {
+    if (auto batch = battleRecording_->takePendingBatch();
+        batch.has_value() && continuityStorage_ != nullptr) {
+      std::optional<battle_continuity::Bytes> privateEnvelope;
+      if (batch->firstRecordSequence == 1U) {
+        privateEnvelope =
+            battle_.has_value()
+                ? workflows::captureRecoveryEnvelope(room_, *battle_,
+                                                      batch->identity)
+                : std::nullopt;
+        if (!privateEnvelope.has_value()) {
+          continuityRecordingFailed = true;
+        }
+      }
+      if (continuityDurabilityPending_ || pendingContinuityWrite_.has_value() ||
+          pendingContinuityReceipt_.has_value() ||
+          heldContinuityOutcome_.has_value()) {
+        continuityRecordingFailed = true;
+      } else if (!continuityRecordingFailed) {
+        auto lease = deadlines_.tryReserve();
+        if (!lease) {
+          continuityRecordingFailed = true;
+        } else {
+          pendingContinuityReceipt_ = battle_continuity::DurableTickCommitted{
+              .identity = batch->identity,
+              .writerRecoveryEpoch = batch->writerRecoveryEpoch,
+              .lastRecordSequence = batch->lastRecordSequence,
+          };
+          pendingContinuityWrite_ = battle_continuity::DurableTickWriteRequest{
+              .batch = std::move(*batch),
+              .privateEnvelopePlaintext = std::move(privateEnvelope),
+          };
+          continuityCompletionLease_ = std::move(lease);
+          continuityDurabilityPending_ = true;
+        }
+      }
+    }
+  }
+  if (continuityRecordingFailed && battle_.has_value()) {
+    continuityRecordingFailed_ = true;
+    const auto failedBattle = battle_->projection();
+    recoveryNotice = BattleRecoveryNotice{
+        .roomId = failedBattle.roomId,
+        .battleId = failedBattle.battleId,
+        .reason = BattleRecoveryReason::ContinuityRecordingFailed,
+    };
+    if (const auto detail = room_.detail(); detail.has_value()) {
+      recoveryParticipants = detail->members;
+    }
+    battleProjection = failedBattle;
+    releaseCriticalDeadlineLocked();
+    externalQueue_.clear();
+    controlQueue_.clear();
+    generalControlQueueDepth_ = 0U;
+    criticalControlQueued_ = false;
+    pendingAppendRequest_.reset();
+    pendingContinuityWrite_.reset();
+    pendingContinuityReceipt_.reset();
+    heldContinuityOutcome_.reset();
+    releasedContinuityOutcome_.reset();
+    continuityCompletion_.reset();
+    continuityDurabilityPending_ = false;
+    if (continuityCompletionLease_) {
+      continuityCompletionLease_->cancel();
+      continuityCompletionLease_.reset();
+    }
+  } else {
+    queueSettlementAppendLocked();
+  }
+  if (!continuityRecordingFailed_ && battle_.has_value() &&
+      !settlementBatch_.has_value()) {
     const auto projection = battle_->projection();
     auto recovery = workflows::recoverResultGenerationFailure(
         room_, projection, battle_->resultProjection(),
@@ -750,8 +1559,18 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
       recoveryParticipants = std::move(recovery->participants);
       battleProjection = projection;
       battle_.reset();
+      battleRecording_.reset();
       settlementReservation_.reset();
     }
+  }
+  if (battle_.has_value() &&
+      battle_->projection().state == battle::BattleLoadState::LoadCancelled &&
+      !continuityDurabilityPending_) {
+    battleProjection = battle_->projection();
+    battle_.reset();
+    battleRecording_.reset();
+    battleClockAnchor_.reset();
+    settlementReservation_.reset();
   }
   if (!battle_.has_value() || settlementBatch_.has_value()) {
     releaseCriticalDeadlineLocked();
@@ -768,8 +1587,10 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
       .targetGeneration = targetGeneration,
       .code = code,
       .battleCode = battleCode,
+      .inputControlCode = inputControlCode,
       .movementCode = movementCode,
       .attackResult = std::move(attackResult),
+      .attackApplied = std::move(attackApplied),
       .combatDeadlineCode = combatDeadlineCode,
       .lootClaimResult = std::move(lootClaimResult),
       .lootDeadlineCode = lootDeadlineCode,
@@ -783,6 +1604,7 @@ RoomCommandOutcome RoomExecutionCell::applyLocked(QueuedRoomCommand queued) {
               ? std::move(battleProjection)
               : (battle_.has_value() ? std::optional{battle_->projection()}
                                      : std::nullopt),
+      .resumeProjection = std::move(resumeProjection),
       .snapshot = std::move(snapshot),
       .combat = std::move(combat),
       .recoveryNotice = std::move(recoveryNotice),
@@ -826,29 +1648,50 @@ void RoomExecutionCell::runTurn() noexcept {
               }
             },
             command->envelope);
-        outcome = applyLocked(std::move(*command));
+        const auto processedOrdinal = command->admissionOrdinal;
+        const auto processedLane = command->lane;
+        auto applied = applyLocked(std::move(*command));
         const auto completedAt = std::chrono::steady_clock::now();
-        if (enqueuedAt.time_since_epoch() >
-                std::chrono::steady_clock::duration::zero() &&
-            enqueuedAt <= processingStartedAt) {
-          outcome->queueDelay = processingStartedAt - enqueuedAt;
+        const bool releasingDurableOutcome =
+            releasedContinuityOutcome_.has_value();
+        if (releasingDurableOutcome) {
+          outcome = std::move(releasedContinuityOutcome_);
+          releasedContinuityOutcome_.reset();
+        } else {
+          outcome = std::move(applied);
+          if (enqueuedAt.time_since_epoch() >
+                  std::chrono::steady_clock::duration::zero() &&
+              enqueuedAt <= processingStartedAt) {
+            outcome->queueDelay = processingStartedAt - enqueuedAt;
+          }
+          outcome->processingDuration = completedAt - processingStartedAt;
+          if (outcome->attackResult.has_value() ||
+              outcome->lootClaimResult.has_value()) {
+            outcome->criticalTerminalLatency =
+                outcome->queueDelay + outcome->processingDuration;
+          }
         }
-        outcome->processingDuration = completedAt - processingStartedAt;
-        if (outcome->attackResult.has_value() ||
-            outcome->lootClaimResult.has_value()) {
-          outcome->criticalTerminalLatency =
-              outcome->queueDelay + outcome->processingDuration;
+
+        if (continuityDurabilityPending_ &&
+            pendingContinuityWrite_.has_value() &&
+            !heldContinuityOutcome_.has_value()) {
+          heldContinuityOutcome_ = std::move(outcome);
+          outcome.reset();
         }
+
         ++processedCommands_;
-        if (outcome->lane == CommandLane::External) {
+        if (processedLane == CommandLane::External) {
           ++processedExternalCommands_;
         } else {
           ++processedControlCommands_;
         }
-        lastProcessedOrdinal_ = outcome->admissionOrdinal;
+        lastProcessedOrdinal_ = processedOrdinal;
       }
+      submitPendingContinuityWrite();
       submitPendingAppend();
-      outcomeSink_(std::move(*outcome));
+      if (outcome.has_value()) {
+        outcomeSink_(std::move(*outcome));
+      }
       ++processed;
       if (std::chrono::steady_clock::now() - startedAt >= budget_.maxWallTime) {
         break;
@@ -856,7 +1699,14 @@ void RoomExecutionCell::runTurn() noexcept {
     }
 
     std::lock_guard lock{mutex_};
-    if (externalQueue_.empty() && controlQueue_.empty()) {
+    if (continuityDurabilityPending_ && !continuityCompletion_.has_value()) {
+      --activeRuns_;
+      scheduled_ = false;
+      idle_.notify_all();
+      return;
+    }
+    if (externalQueue_.empty() && controlQueue_.empty() &&
+        !continuityCompletion_.has_value()) {
       --activeRuns_;
       scheduled_ = false;
       idle_.notify_all();

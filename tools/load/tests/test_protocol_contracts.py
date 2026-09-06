@@ -41,7 +41,7 @@ class ProtocolContractTests(unittest.TestCase):
                 message = decode_tcp_frame(frame)
                 self.assertEqual(frame, encode_tcp_message(message.name, message.fields), path.name)
                 count += 1
-        self.assertEqual(27, count)
+        self.assertEqual(30, count)
 
     def test_every_rudp_golden_vector_round_trips(self):
         count = 0
@@ -56,7 +56,7 @@ class ProtocolContractTests(unittest.TestCase):
                     f"{path.name}:{vector['semanticName']}",
                 )
                 count += 1
-        self.assertEqual(14, count)
+        self.assertEqual(31, count)
 
     def test_tcp_negative_corpus_and_unknown_message_are_rejected(self):
         contract = json.loads((GOLDEN / "battle-recovery-v1.json").read_text())

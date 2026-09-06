@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using LootOfLegends.Protocol;
 using LootOfLegends.Transport.Rudp;
 
 namespace LootOfLegends.Battle.Combat
@@ -65,12 +66,11 @@ namespace LootOfLegends.Battle.Combat
 
     public sealed class BattleCombatReadModel
     {
-        private const uint FrozenMaximumHitPoints = 1600;
-
         private readonly ulong battleInstanceId;
         private readonly int ownerThreadId;
         private bool hasSnapshot;
         private uint lifecycleSequence;
+        private uint actionSequence;
         private RudpCombatTerminalEvent pendingLifecycleTerminal;
 
         public BattleCombatReadModel(ulong battleInstanceId)
@@ -94,8 +94,11 @@ namespace LootOfLegends.Battle.Combat
             : Outcome.ToString();
         public RudpCommandId LastAttackCommandId { get; private set; }
         public RudpAttackResultCode? LastAttackResult { get; private set; }
+        public RudpAttackApplied LastAppliedAttack { get; private set; }
         public uint SnapshotSequence { get; private set; }
         public uint ServerTick { get; private set; }
+        public int PositionXMillimeters { get; private set; }
+        public int PositionYMillimeters { get; private set; }
 
         public bool Apply(object serverMessage)
         {
@@ -114,6 +117,8 @@ namespace LootOfLegends.Battle.Combat
                     return Apply(spawned);
                 case RudpAttackTerminalResult result:
                     return Apply(result);
+                case RudpAttackApplied applied:
+                    return Apply(applied);
                 case RudpCombatTerminalEvent terminal:
                     return Apply(terminal);
                 case RudpMonsterStateSnapshot snapshot:
@@ -121,6 +126,56 @@ namespace LootOfLegends.Battle.Combat
                 default:
                     return false;
             }
+        }
+
+        public bool ApplyResumeSnapshot(BattleResumeSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+            if (snapshot.BattleInstanceId != battleInstanceId)
+            {
+                return false;
+            }
+            HasMonster = snapshot.Monster != null;
+            if (snapshot.Monster == null)
+            {
+                MonsterId = 0;
+                HitPoints = 0;
+                MaximumHitPoints = 0;
+                MonsterState = RudpMonsterState.Alive;
+                Outcome = RudpCombatOutcome.None;
+                PositionXMillimeters = 0;
+                PositionYMillimeters = 0;
+            }
+            else
+            {
+                MonsterId = snapshot.Monster.MonsterId;
+                HitPoints = snapshot.Monster.HitPoints;
+                MaximumHitPoints = snapshot.Monster.MaximumHitPoints;
+                MonsterState = snapshot.Monster.State == BattleResumeMonsterState.Dead
+                    ? RudpMonsterState.Dead
+                    : snapshot.Monster.State == BattleResumeMonsterState.TimedOut
+                        ? RudpMonsterState.TimedOut
+                        : snapshot.Monster.State == BattleResumeMonsterState.Dying
+                            ? RudpMonsterState.Dying
+                            : RudpMonsterState.Alive;
+                PositionXMillimeters = snapshot.Monster.PositionXMillimeters;
+                PositionYMillimeters = snapshot.Monster.PositionYMillimeters;
+                Outcome = snapshot.Phase == BattleResumePhase.Result && snapshot.Result != null
+                    ? snapshot.Result.Outcome == FinalResultOutcome.MonsterDefeated
+                        ? RudpCombatOutcome.MonsterDefeated
+                        : RudpCombatOutcome.CombatTimeout
+                    : RudpCombatOutcome.None;
+            }
+            // TCP snapshotId and the fresh-generation RUDP sequence are
+            // independent ordering domains.
+            SnapshotSequence = 0;
+            ServerTick = snapshot.ServerTick;
+            hasSnapshot = false;
+            pendingLifecycleTerminal = null;
+            return true;
         }
 
         private bool Apply(RudpMonsterSpawned spawned)
@@ -172,7 +227,7 @@ namespace LootOfLegends.Battle.Combat
                 : result.RemainingHitPoints;
             HasMonster = true;
             MonsterId = result.MonsterId;
-            MaximumHitPoints = FrozenMaximumHitPoints;
+            MaximumHitPoints = Math.Max(MaximumHitPoints, result.RemainingHitPoints);
             HitPoints = nextHitPoints;
             if (result.CombatOutcome == RudpCombatOutcome.MonsterDefeated)
             {
@@ -183,6 +238,37 @@ namespace LootOfLegends.Battle.Combat
             {
                 Outcome = result.CombatOutcome;
                 MonsterState = RudpMonsterState.TimedOut;
+            }
+            return true;
+        }
+
+        private bool Apply(RudpAttackApplied applied)
+        {
+            if (applied.BattleInstanceId != battleInstanceId ||
+                applied.EventSequence <= actionSequence ||
+                (HasMonster && MonsterId != applied.MonsterId) ||
+                (Outcome != RudpCombatOutcome.None &&
+                 applied.CombatOutcome != RudpCombatOutcome.None &&
+                 applied.CombatOutcome != Outcome))
+            {
+                return false;
+            }
+            actionSequence = applied.EventSequence;
+            LastAppliedAttack = applied;
+            uint priorHitPoints = HasMonster
+                ? HitPoints
+                : applied.RemainingHitPoints;
+            HasMonster = true;
+            MonsterId = applied.MonsterId;
+            MaximumHitPoints = Math.Max(
+                MaximumHitPoints,
+                applied.RemainingHitPoints + applied.ActualDamage);
+            HitPoints = Math.Min(priorHitPoints, applied.RemainingHitPoints);
+            ServerTick = Math.Max(ServerTick, applied.ServerTick);
+            if (applied.CombatOutcome == RudpCombatOutcome.MonsterDefeated)
+            {
+                Outcome = applied.CombatOutcome;
+                MonsterState = RudpMonsterState.Dead;
             }
             return true;
         }
@@ -238,7 +324,7 @@ namespace LootOfLegends.Battle.Combat
             }
             HasMonster = true;
             MonsterId = snapshot.MonsterId;
-            MaximumHitPoints = FrozenMaximumHitPoints;
+            MaximumHitPoints = Math.Max(MaximumHitPoints, snapshot.HitPoints);
             HitPoints = snapshot.HitPoints;
             MonsterState = snapshot.MonsterState;
             SnapshotSequence = snapshot.SnapshotSequence;

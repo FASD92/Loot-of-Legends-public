@@ -54,6 +54,7 @@ enum class RudpMonsterState : std::uint8_t {
 enum class RudpEventStreamKind : std::uint8_t {
   CombatLifecycle = 1,
   LootLifecycle = 2,
+  CombatAction = 3,
 };
 
 struct RudpAttackIntent final {
@@ -74,6 +75,21 @@ struct RudpAttackTerminalResult final {
   RudpCombatOutcome combatOutcome;
 
   bool operator==(const RudpAttackTerminalResult &) const = default;
+};
+
+struct RudpAttackApplied final {
+  RudpEventId eventId;
+  std::uint64_t battleInstanceId;
+  RudpEventStreamKind eventStreamKind;
+  std::uint32_t eventSequence;
+  std::uint64_t attackerSessionId;
+  std::uint64_t monsterId;
+  std::uint32_t actualDamage;
+  std::uint32_t remainingHitPoints;
+  std::uint32_t serverTick;
+  RudpCombatOutcome combatOutcome;
+
+  bool operator==(const RudpAttackApplied &) const = default;
 };
 
 struct RudpMonsterSpawned final {
@@ -115,8 +131,9 @@ struct RudpMonsterStateSnapshot final {
 };
 
 using RudpCombatMessage =
-    std::variant<RudpAttackIntent, RudpAttackTerminalResult, RudpMonsterSpawned,
-                 RudpCombatTerminalEvent, RudpMonsterStateSnapshot>;
+    std::variant<RudpAttackIntent, RudpAttackTerminalResult, RudpAttackApplied,
+                 RudpMonsterSpawned, RudpCombatTerminalEvent,
+                 RudpMonsterStateSnapshot>;
 
 enum class RudpCombatCodecError : std::uint8_t {
   None,

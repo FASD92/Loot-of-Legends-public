@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using LootOfLegends.Battle;
 using LootOfLegends.Battle.Combat;
 using LootOfLegends.Battle.Loot;
+using LootOfLegends.LobbyRoom;
 using LootOfLegends.Presentation.Common;
 using LootOfLegends.Presentation.FinalResult;
 using LootOfLegends.Protocol;
@@ -29,7 +30,10 @@ namespace LootOfLegends.Tests.PlayMode
             var resultView = new RecordingFinalResultView();
             var presenter = new BattleRecoveryPresenter(result, recoveryView, lobby);
             var finalPresenter = new FinalResultPresenter(
-                result, resultView, new RecordingRoomReturnNavigation());
+                result,
+                resultView,
+                new RecordingRoomReturnNavigation(),
+                LeaveOk);
 
             var notice = new BattleRecoveryNotice(
                 7, 9, BattleRecoveryReason.ResultGenerationFailed);
@@ -75,7 +79,7 @@ namespace LootOfLegends.Tests.PlayMode
             var resultView = new RecordingFinalResultView();
             var roomReturn = new RecordingRoomReturnNavigation();
             var resultPresenter = new FinalResultPresenter(
-                result, resultView, roomReturn);
+                result, resultView, roomReturn, LeaveOk);
 
             var pending = new BattleRecoveryNotice(
                 7, 10, BattleRecoveryReason.SettlementRecoveryPending);
@@ -102,6 +106,8 @@ namespace LootOfLegends.Tests.PlayMode
 
             router.OnMessage(AllUnreadyRoom(7));
             resultPresenter.Render();
+            Assert.That(roomReturn.Calls, Is.EqualTo(0));
+            resultPresenter.ReturnToRoom();
             Assert.That(roomReturn.Calls, Is.EqualTo(1));
             Assert.That(lobby.Calls, Is.EqualTo(0));
             yield return null;
@@ -140,6 +146,12 @@ namespace LootOfLegends.Tests.PlayMode
                     new BattleParticipant(2, 1, "trinity")
                 }));
             return load;
+        }
+
+        private static Task<RoomCommandResult> LeaveOk(
+            CancellationToken cancellationToken)
+        {
+            return Task.FromResult(RoomCommandResult.Ok);
         }
 
         private static void AssertInputDisabled(BattleLoadReadModel load)
@@ -226,6 +238,10 @@ namespace LootOfLegends.Tests.PlayMode
             }
 
             public void Hide()
+            {
+            }
+
+            public void SetActions(bool enabled, string statusCopy)
             {
             }
         }

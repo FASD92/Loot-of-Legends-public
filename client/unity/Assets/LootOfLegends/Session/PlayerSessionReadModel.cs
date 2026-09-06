@@ -75,6 +75,25 @@ namespace LootOfLegends.Session
             }
         }
 
+        public bool ApplyResumedWelcome(
+            ulong resumeRequestId,
+            WelcomeSession welcome)
+        {
+            if (resumeRequestId == 0 || welcome == null ||
+                State != PlayerSessionState.Authenticated ||
+                welcome.RequestId != resumeRequestId ||
+                welcome.SessionId != SessionId ||
+                welcome.SessionGeneration < SessionGeneration)
+            {
+                return false;
+            }
+            SessionGeneration = welcome.SessionGeneration;
+            Nickname = welcome.Nickname;
+            LastFailure = PlayerSessionFailure.None;
+            Changed?.Invoke();
+            return true;
+        }
+
         public bool ConfirmRudpFailure()
         {
             if (State != PlayerSessionState.Authenticated ||

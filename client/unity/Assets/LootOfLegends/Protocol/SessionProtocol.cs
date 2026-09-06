@@ -10,7 +10,8 @@ namespace LootOfLegends.Protocol
         AlreadyConsumed = 3,
         WrongAudience = 4,
         DependencyUnavailable = 5,
-        PreAuthCommand = 6
+        PreAuthCommand = 6,
+        ResumeUnavailable = 7
     }
 
     public enum SessionReplacedReason : ushort
@@ -152,7 +153,7 @@ namespace LootOfLegends.Protocol
         internal static bool IsValid(AuthenticationRejectedReason reason)
         {
             return reason >= AuthenticationRejectedReason.Invalid &&
-                reason <= AuthenticationRejectedReason.PreAuthCommand;
+                reason <= AuthenticationRejectedReason.ResumeUnavailable;
         }
 
         private static WelcomeSession DecodeWelcome(byte[] frame)

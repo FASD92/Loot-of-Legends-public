@@ -80,6 +80,50 @@ namespace LootOfLegends.Battle
             return true;
         }
 
+        public bool ApplyResumeSnapshot(BattleResumeSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+            if (snapshot.Result == null)
+            {
+                if (CurrentRoomId != snapshot.RoomId ||
+                    CurrentBattleInstanceId != snapshot.BattleInstanceId ||
+                    HasFinalResult)
+                {
+                    BeginBattle(snapshot.RoomId, snapshot.BattleInstanceId);
+                }
+                return true;
+            }
+            BattleFinalResult result;
+            try
+            {
+                result = new BattleFinalResult(
+                    snapshot.RoomId,
+                    snapshot.BattleInstanceId,
+                    snapshot.Result.Outcome,
+                    snapshot.Result.Entries);
+            }
+            catch (ArgumentException error)
+            {
+                throw new InvalidOperationException(
+                    "Battle resume result snapshot is invalid", error);
+            }
+            if (CurrentRoomId != snapshot.RoomId ||
+                CurrentBattleInstanceId != snapshot.BattleInstanceId ||
+                IsBattleDisposed)
+            {
+                BeginBattle(snapshot.RoomId, snapshot.BattleInstanceId);
+            }
+            if (HasFinalResult)
+            {
+                return FinalResult.Outcome == result.Outcome &&
+                    FinalResult.Entries.Count == result.Entries.Count;
+            }
+            return Apply(result);
+        }
+
         public bool ConfirmLobbyReturn()
         {
             if (RecoveryState != BattleRecoveryState.ResultGenerationFailed ||

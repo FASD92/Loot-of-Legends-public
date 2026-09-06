@@ -38,6 +38,11 @@ namespace LootOfLegends.Transport
         void OnMessage(BattleRecoveryNotice message);
     }
 
+    public interface IBattleResumeInboundMessageSink
+    {
+        void OnMessage(BattleResumeSnapshot message);
+    }
+
     public interface IRudpBindCapabilitySink
     {
         void OnRudpBindCapability(RudpBindCapability capability);
@@ -163,6 +168,10 @@ namespace LootOfLegends.Transport
                     else if (messageId == 37)
                     {
                         router.Dispatch(BattleRecoveryProtocolCodec.DecodeServerFrame(frame));
+                    }
+                    else if (messageId == 39)
+                    {
+                        router.Dispatch(BattleSessionResumeProtocolCodec.DecodeServerFrame(frame));
                     }
                     else
                     {

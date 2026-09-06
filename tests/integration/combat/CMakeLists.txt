@@ -10,7 +10,7 @@ add_test(NAME combat_outcome COMMAND combat_outcome_tests)
 add_executable(combat_protocol_tests
   CombatProtocolTests.cpp)
 target_compile_definitions(combat_protocol_tests PRIVATE
-  LOOT_COMBAT_GOLDEN_PATH="${PROJECT_SOURCE_DIR}/contracts/protocol/golden/combat-v1.json")
+  LOOT_COMBAT_GOLDEN_PATH="${PROJECT_SOURCE_DIR}/contracts/protocol/golden/combat-v4.json")
 target_link_libraries(combat_protocol_tests PRIVATE
   lol_battle
   lol_transport_rudp)

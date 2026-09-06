@@ -32,7 +32,19 @@ public:
          RoomExecutionCell::OutcomeSink outcomeSink,
          const GameplayTransportReadinessPort *readiness = nullptr,
          settlement::SettlementCapacityGate *capacityGate = nullptr,
-         settlement::SettlementStoragePort *storage = nullptr);
+         settlement::SettlementStoragePort *storage = nullptr,
+         std::uint32_t writerRecoveryEpoch = 0U,
+         battle_continuity::DurableTickWritePort *continuityStorage = nullptr);
+  [[nodiscard]] std::optional<RoomDirectoryEntry>
+  createRecovered(runtime::WorkerPool &workers,
+                  runtime::DeadlineScheduler &deadlines,
+                  RecoveredRoomExecutionState recovered, WorkBudget budget,
+                  RoomExecutionCell::OutcomeSink outcomeSink,
+                  const GameplayTransportReadinessPort *readiness,
+                  settlement::SettlementCapacityGate *capacityGate,
+                  settlement::SettlementStoragePort *storage,
+                  std::uint32_t writerRecoveryEpoch,
+                  battle_continuity::DurableTickWritePort *continuityStorage);
   [[nodiscard]] std::optional<RoomDirectoryEntry>
   lookup(shared::RoomId roomId) const;
   [[nodiscard]] bool updateSummary(lobby_room::RoomSummary summary);
@@ -40,6 +52,7 @@ public:
   [[nodiscard]] bool remove(shared::RoomId roomId);
   [[nodiscard]] std::vector<lobby_room::RoomSummary> summaries() const;
   [[nodiscard]] std::size_t size() const;
+  [[nodiscard]] bool activateRecovered();
 
 private:
   mutable std::mutex mutex_;

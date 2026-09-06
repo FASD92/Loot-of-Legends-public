@@ -2,11 +2,15 @@
 
 #include "AuthClaimCoordinator.hpp"
 
+#include <lol/battle_continuity/BattleReplay.hpp>
+#include <lol/battle_continuity/Durability.hpp>
 #include <lol/game_flow/RoomCommandGateway.hpp>
 #include <lol/meta/MetaClaimClient.hpp>
 #include <lol/runtime/DeadlineScheduler.hpp>
 #include <lol/runtime/WorkerPool.hpp>
 #include <lol/session/SessionRegistry.hpp>
+#include <lol/settlement/SettlementCapacityGate.hpp>
+#include <lol/settlement/SettlementPublication.hpp>
 #include <lol/transport/rudp/RudpBindingRegistry.hpp>
 #include <lol/transport/rudp/RudpCombatCodec.hpp>
 #include <lol/transport/rudp/RudpLootCodec.hpp>
@@ -53,10 +57,12 @@ using lol::battle::StateSnapshotProjection;
 using lol::game_flow::ArenaGameplayStart;
 using lol::game_flow::AuthenticatedRoomSession;
 using lol::game_flow::BattleParticipantProjection;
+using lol::game_flow::CombatAttackAppliedOutbound;
 using lol::game_flow::CombatAttackResultOutbound;
 using lol::game_flow::CombatBattleRetiredOutbound;
 using lol::game_flow::CombatMonsterSpawnedOutbound;
 using lol::game_flow::CombatMonsterStateOutbound;
+using lol::game_flow::CombatOutboundMessage;
 using lol::game_flow::CombatOutboundIntent;
 using lol::game_flow::CombatTerminalEventOutbound;
 using lol::game_flow::CreateRoomRequest;
@@ -75,6 +81,11 @@ using lol::meta::ClaimOutcome;
 using lol::runtime::WorkerPool;
 using lol::runtime::WorkerPoolConfig;
 using lol::session::SessionRegistry;
+using lol::settlement::DurableAppendRequest;
+using lol::settlement::OutboxBacklogSnapshot;
+using lol::settlement::SettlementCapacityGate;
+using lol::settlement::SettlementStoragePort;
+using lol::settlement::SubmitAppendResult;
 using lol::shared::AccountId;
 using lol::shared::BattleInstanceId;
 using lol::shared::RequestId;
@@ -82,6 +93,7 @@ using lol::shared::RoomId;
 using lol::shared::SessionGeneration;
 using lol::shared::SessionId;
 using lol::transport::rudp::ReliableQueueAdmission;
+using lol::transport::rudp::RudpAttackApplied;
 using lol::transport::rudp::RudpAttackIntent;
 using lol::transport::rudp::RudpAttackResultCode;
 using lol::transport::rudp::RudpAttackTerminalResult;
@@ -108,7 +120,7 @@ using lol::transport::rudp::RudpMonsterSpawned;
 using lol::transport::rudp::RudpMonsterState;
 using lol::transport::rudp::RudpMonsterStateSnapshot;
 
-constexpr auto kStart = std::chrono::steady_clock::time_point{};
+const auto kStart = std::chrono::steady_clock::now() + 1h;
 
 AccountId account(std::uint8_t suffix) {
   AccountId::Bytes bytes{};
@@ -390,7 +402,30 @@ private:
   std::vector<std::uint64_t> leases_;
 };
 
-bool createCommittedRoom(RoomCommandGateway &gateway, WorkerPool &workers) {
+class UnusedSettlementStorage final : public SettlementStoragePort {
+public:
+  SubmitAppendResult submit(DurableAppendRequest, CompletionSink) override {
+    return SubmitAppendResult::StorageUnavailable;
+  }
+};
+
+class ImmediateContinuityStorage final
+    : public lol::battle_continuity::DurableTickWritePort {
+public:
+  lol::battle_continuity::DurableTickSubmitResult
+  submit(lol::battle_continuity::DurableTickWriteRequest request,
+         CompletionSink completion) override {
+    completion(lol::battle_continuity::DurableTickCommitted{
+        .identity = request.batch.identity,
+        .writerRecoveryEpoch = request.batch.writerRecoveryEpoch,
+        .lastRecordSequence = request.batch.lastRecordSequence,
+    });
+    return lol::battle_continuity::DurableTickSubmitResult::Accepted;
+  }
+};
+
+bool createCommittedRoom(RoomCommandGateway &gateway, WorkerPool &workers,
+                         RoomId roomId = RoomId{1}) {
   const auto host = session(1);
   const auto member = session(2);
   return gateway.submit(RoomCommandEnvelope{
@@ -402,7 +437,7 @@ bool createCommittedRoom(RoomCommandGateway &gateway, WorkerPool &workers) {
          gateway.submit(RoomCommandEnvelope{
              .session = member,
              .command = JoinRoomRequest{.requestId = RequestId{2},
-                                        .roomId = RoomId{1}}}) ==
+                                        .roomId = roomId}}) ==
              RoomSubmitResult::Accepted &&
          gateway.submit(RoomCommandEnvelope{
              .session = host,
@@ -425,7 +460,7 @@ bool createCommittedRoom(RoomCommandGateway &gateway, WorkerPool &workers) {
                                  .command =
                                      lol::game_flow::ArenaLoadCompleteRequest{
                                          .requestId = RequestId{6},
-                                         .roomId = RoomId{1},
+                                         .roomId = roomId,
                                          .battleId = BattleInstanceId{1}}}) ==
              RoomSubmitResult::Accepted &&
          gateway.submit(
@@ -433,10 +468,74 @@ bool createCommittedRoom(RoomCommandGateway &gateway, WorkerPool &workers) {
                                  .command =
                                      lol::game_flow::ArenaLoadCompleteRequest{
                                          .requestId = RequestId{7},
-                                         .roomId = RoomId{1},
+                                         .roomId = roomId,
                                          .battleId = BattleInstanceId{1}}}) ==
              RoomSubmitResult::Accepted &&
          workers.waitUntilIdle(2s);
+}
+
+bool actualGatewayRecordsOnlyAdmittedCanonicalCommands() {
+  constexpr auto roomValue = (7ULL << 32U) | 1ULL;
+  const auto roomId = RoomId{roomValue};
+  RudpBindingRegistry bindings;
+  RudpGameplayReadiness readiness{bindings};
+  const auto hostEpoch = bind(bindings, 1);
+  const auto memberEpoch = bind(bindings, 2);
+  if (!hostEpoch.has_value() || !memberEpoch.has_value()) {
+    return false;
+  }
+
+  ManualDeadlineScheduler deadlines;
+  WorkerPool workers{WorkerPoolConfig{.threadCount = 2, .queueCapacity = 64}};
+  IntentCollector intents;
+  CombatIntentCollector combat;
+  SettlementCapacityGate capacity;
+  capacity.updateBacklog(OutboxBacklogSnapshot{
+      .unretiredRecords = 0U,
+      .unretiredBytes = 0U,
+      .oldestPendingAge = 0ms,
+      .storageHealthy = true,
+  });
+  UnusedSettlementStorage storage;
+  ImmediateContinuityStorage continuity;
+  RoomCommandGateway gateway{
+      workers,
+      readiness,
+      [&intents](LobbyRoomOutboundIntent intent) {
+        intents.add(std::move(intent));
+      },
+      [](StateSnapshotProjection) {},
+      [&combat](CombatOutboundIntent intent) { combat.add(std::move(intent)); },
+      deadlines,
+      capacity,
+      storage,
+      continuity,
+      roomId};
+  RudpCombatFlow flow{bindings, gateway};
+  if (!createCommittedRoom(gateway, workers, roomId)) {
+    return false;
+  }
+  feedCombat(flow, combat);
+
+  const auto attack = attackDatagram(1, *hostEpoch, 2, 501, 1);
+  if (!attack.has_value() ||
+      flow.submitAttack(*attack, endpoint(1), kStart) !=
+          RudpCombatSubmitResult::Accepted ||
+      !workers.waitUntilIdle(2s)) {
+    return false;
+  }
+  const auto admitted = gateway.battleJournal(roomId);
+  if (!admitted.has_value() ||
+      !lol::battle_continuity::BattleReplayer::replayJournal(*admitted).ok()) {
+    return false;
+  }
+
+  const auto duplicate = flow.submitAttack(*attack, endpoint(1), kStart + 1ms);
+  const auto stalePeer = flow.submitAttack(*attack, endpoint(99), kStart + 2ms);
+  const auto afterRejected = gateway.battleJournal(roomId);
+  return duplicate == RudpCombatSubmitResult::StaleTransport &&
+         stalePeer == RudpCombatSubmitResult::PeerRejected &&
+         workers.waitUntilIdle(2s) && afterRejected == admitted;
 }
 
 // Parameterized committed-room helper used by the repeated-lifecycle test so
@@ -553,9 +652,9 @@ bool reorderedReliableCommandsReachApplicationExactlyOnce() {
             std::get_if<CombatAttackResultOutbound>(&intent.message);
         result != nullptr) {
       if ((result->result.commandId == CommandId{.high = 0, .low = 101} &&
-           result->result.remainingHitPoints == 1580) ||
+           result->result.remainingHitPoints == 1500) ||
           (result->result.commandId == CommandId{.high = 0, .low = 102} &&
-           result->result.remainingHitPoints == 1560)) {
+           result->result.remainingHitPoints == 1400)) {
         ++acceptedAttackResults;
       }
     }
@@ -731,7 +830,8 @@ bool realBindingDrivesAttackTerminalAndSnapshot() {
   }
   feedCombat(flow, combat);
 
-  bool sawAcceptedResult = false;
+  std::size_t acceptedResults = 0;
+  std::size_t appliedEvents = 0;
   polled = flow.pollReliable(std::chrono::steady_clock::now());
   for (const auto &transmission : polled.transmissions) {
     const auto decoded = RudpCombatCodec::decode(transmission.datagram);
@@ -741,8 +841,17 @@ bool realBindingDrivesAttackTerminalAndSnapshot() {
             : nullptr;
     if (result != nullptr && result->commandId.low == 1 &&
         result->resultCode == RudpAttackResultCode::Ok &&
-        result->remainingHitPoints == 1580) {
-      sawAcceptedResult = true;
+        result->remainingHitPoints == 1500) {
+      ++acceptedResults;
+    }
+    const auto *applied =
+        decoded.message.has_value()
+            ? std::get_if<RudpAttackApplied>(&*decoded.message)
+            : nullptr;
+    if (applied != nullptr && applied->attackerSessionId == 1 &&
+        applied->eventSequence == 1 && applied->actualDamage == 100 &&
+        applied->remainingHitPoints == 1500) {
+      ++appliedEvents;
     }
   }
   bool sawHpSnapshot = false;
@@ -752,12 +861,12 @@ bool realBindingDrivesAttackTerminalAndSnapshot() {
         decoded.message.has_value()
             ? std::get_if<RudpMonsterStateSnapshot>(&*decoded.message)
             : nullptr;
-    if (state != nullptr && state->hitPoints == 1580 &&
+    if (state != nullptr && state->hitPoints == 1500 &&
         state->monsterState == RudpMonsterState::Alive) {
       sawHpSnapshot = true;
     }
   }
-  if (!sawAcceptedResult || !sawHpSnapshot) {
+  if (acceptedResults != 1 || appliedEvents != 2 || !sawHpSnapshot) {
     return false;
   }
 
@@ -775,15 +884,19 @@ bool realBindingDrivesAttackTerminalAndSnapshot() {
     return false;
   }
   bool sawRetainedResult = false;
+  bool sawReplayApplied = false;
   for (auto intent : combat.take()) {
     const auto *result =
         std::get_if<CombatAttackResultOutbound>(&intent.message);
-    if (result != nullptr && result->result.remainingHitPoints == 1580) {
+    if (result != nullptr && result->result.remainingHitPoints == 1500) {
       sawRetainedResult = true;
+    }
+    if (std::holds_alternative<CombatAttackAppliedOutbound>(intent.message)) {
+      sawReplayApplied = true;
     }
     static_cast<void>(flow.handleCombatOutbound(std::move(intent)));
   }
-  if (!sawRetainedResult) {
+  if (!sawRetainedResult || sawReplayApplied) {
     return false;
   }
   for (const auto &snapshot : flow.takeUnreliableSnapshots()) {
@@ -792,7 +905,7 @@ bool realBindingDrivesAttackTerminalAndSnapshot() {
         decoded.message.has_value()
             ? std::get_if<RudpMonsterStateSnapshot>(&*decoded.message)
             : nullptr;
-    if (state == nullptr || state->hitPoints != 1580) {
+    if (state == nullptr || state->hitPoints != 1500) {
       return false;
     }
   }
@@ -992,7 +1105,7 @@ bool combatFlowReliableQueueAdmissionAckAndExpiry() {
   for (auto intent : combat.take()) {
     const auto *result =
         std::get_if<CombatAttackResultOutbound>(&intent.message);
-    if (result != nullptr && result->result.remainingHitPoints == 1580) {
+    if (result != nullptr && result->result.remainingHitPoints == 1500) {
       recovered = true;
     }
     static_cast<void>(flow.handleCombatOutbound(std::move(intent)));
@@ -1006,7 +1119,7 @@ bool combatFlowReliableQueueAdmissionAckAndExpiry() {
         decoded.message.has_value()
             ? std::get_if<RudpMonsterStateSnapshot>(&*decoded.message)
             : nullptr;
-    if (state == nullptr || state->hitPoints != 1580) {
+    if (state == nullptr || state->hitPoints != 1500) {
       return false;
     }
   }
@@ -1067,7 +1180,7 @@ bool combatFlowSnapshotServerTickAndSharedSequence() {
             ? std::get_if<RudpMonsterStateSnapshot>(&*decoded.message)
             : nullptr;
     if (state == nullptr || state->serverTick != 7 ||
-        state->hitPoints != 1580 ||
+        state->hitPoints != 1500 ||
         state->monsterState != RudpMonsterState::Alive) {
       return false;
     }
@@ -1138,7 +1251,7 @@ bool combatFlowRebindCannotDeliverOldGenerationOutput() {
                   CombatProjection{
                       .battleId = BattleInstanceId{1},
                       .monsterId = 1,
-                      .hitPoints = 1580,
+                      .hitPoints = 1500,
                       .monsterState = MonsterState::Alive,
                       .outcome = CombatOutcome::None,
                       .terminal = std::nullopt,
@@ -1216,8 +1329,8 @@ bool combatFlowReliableAdmissionIsExplicitAndRetryRecovers() {
                         .battleId = BattleInstanceId{1},
                         .code = AttackResultCode::Ok,
                         .monsterId = 1,
-                        .remainingHitPoints = 1580,
-                        .rulesetVersion = 1,
+                        .remainingHitPoints = 1500,
+                        .rulesetVersion = 4,
                         .outcome = CombatOutcome::None,
                     }},
     };
@@ -1268,7 +1381,7 @@ bool combatFlowReliableAdmissionIsExplicitAndRetryRecovers() {
     const auto *result =
         std::get_if<CombatAttackResultOutbound>(&intent.message);
     if (result != nullptr && result->result.commandId.low == 1 &&
-        result->result.remainingHitPoints == 1580) {
+        result->result.remainingHitPoints == 1500) {
       sawRetainedResult = true;
     }
     static_cast<void>(flow.handleCombatOutbound(std::move(intent)));
@@ -1286,7 +1399,7 @@ bool combatFlowReliableAdmissionIsExplicitAndRetryRecovers() {
             ? std::get_if<RudpAttackTerminalResult>(&*decoded.message)
             : nullptr;
     if (result != nullptr && result->commandId.low == 1 &&
-        result->remainingHitPoints == 1580) {
+        result->remainingHitPoints == 1500) {
       sawRecoveredResult = true;
     }
   }
@@ -1334,7 +1447,7 @@ bool combatFlowTimeoutProjectionEncodesTimedOut() {
               .outcome = CombatOutcome::CombatTimeout,
               .monsterId = 1,
               .serverTick = 7,
-              .rulesetVersion = 1,
+              .rulesetVersion = 4,
           },
       .serverTick = 7,
   };
@@ -1466,8 +1579,8 @@ bool combatFlowReliableStateCountsBoundByLifecycle() {
                           .battleId = BattleInstanceId{1},
                           .code = AttackResultCode::Ok,
                           .monsterId = 1,
-                          .remainingHitPoints = 1580,
-                          .rulesetVersion = 1,
+                          .remainingHitPoints = 1500,
+                          .rulesetVersion = 4,
                           .outcome = CombatOutcome::None,
                       }},
       };
@@ -1633,7 +1746,7 @@ bool combatFlowReliableStateCountsBoundByLifecycle() {
 }
 
 // Finding 1 evidence: repeated battle lifecycles do not retain old snapshot
-// sequence identities; encoding a terminal projection retires the battle.
+// sequence identities; explicit teardown retires each battle.
 bool combatFlowSnapshotSequenceCountsBoundByLifecycle() {
   RudpBindingRegistry bindings;
   RudpGameplayReadiness readiness{bindings};
@@ -1681,7 +1794,7 @@ bool combatFlowSnapshotSequenceCountsBoundByLifecycle() {
                         .battleId = BattleInstanceId{battleId},
                         .monsterId = 1,
                         .hitPoints =
-                            terminal ? std::uint32_t{0} : std::uint32_t{1580},
+                            terminal ? std::uint32_t{0} : std::uint32_t{1500},
                         .monsterState =
                             terminal ? MonsterState::Dead : MonsterState::Alive,
                         .outcome = terminal ? CombatOutcome::MonsterDefeated
@@ -1697,7 +1810,7 @@ bool combatFlowSnapshotSequenceCountsBoundByLifecycle() {
                                       .outcome = CombatOutcome::MonsterDefeated,
                                       .monsterId = 1,
                                       .serverTick = 1,
-                                      .rulesetVersion = 1,
+                                      .rulesetVersion = 4,
                                   }}
                                 : std::nullopt,
                         .serverTick = 1,
@@ -1713,11 +1826,127 @@ bool combatFlowSnapshotSequenceCountsBoundByLifecycle() {
       return false;
     }
     static_cast<void>(flow.handleCombatOutbound(stateIntent(battleId, true)));
+    if (flow.snapshotSequenceCount() != 1) {
+      return false;
+    }
+    static_cast<void>(flow.handleCombatOutbound(
+        CombatOutboundIntent{.actorSessionId = std::nullopt,
+                              .actorGeneration = std::nullopt,
+                              .message = CombatBattleRetiredOutbound{
+                                  .battleId = BattleInstanceId{battleId}}}));
     if (flow.snapshotSequenceCount() != 0) {
       return false;
     }
   }
   return true;
+}
+
+// A MonsterDefeated combat snapshot and the following Open loot snapshot
+// share one monotonic battle-local sequence. The identity is retired only by
+// the explicit room teardown outbound.
+bool combatFlowTerminalLootSnapshotSequenceStaysMonotonicUntilRetire() {
+  RudpBindingRegistry bindings;
+  RudpGameplayReadiness readiness{bindings};
+  if (!bind(bindings, 1).has_value()) {
+    return false;
+  }
+
+  WorkerPool workers{WorkerPoolConfig{.threadCount = 2, .queueCapacity = 64}};
+  RoomCommandGateway gateway{workers, readiness,
+                             [](LobbyRoomOutboundIntent) {},
+                             [](StateSnapshotProjection) {},
+                             [](CombatOutboundIntent) {}};
+  RudpCombatFlow flow{bindings, gateway};
+
+  const CombatTerminalRecord terminal{
+      .eventId = EventId{.high = 1, .low = 2},
+      .battleId = BattleInstanceId{1},
+      .eventSequence = 2,
+      .outcome = CombatOutcome::MonsterDefeated,
+      .monsterId = 1,
+      .serverTick = 1,
+      .rulesetVersion = 4,
+  };
+  const auto terminalState = CombatOutboundIntent{
+      .actorSessionId = std::nullopt,
+      .actorGeneration = std::nullopt,
+      .message = CombatMonsterStateOutbound{
+          .projection = CombatProjection{
+              .battleId = BattleInstanceId{1},
+              .monsterId = 1,
+              .hitPoints = 0,
+              .monsterState = MonsterState::Dead,
+              .outcome = CombatOutcome::MonsterDefeated,
+              .terminal = terminal,
+              .serverTick = 1,
+          },
+          .participants = std::vector<BattleParticipantProjection>{
+              {.sessionId = SessionId{1},
+               .generation = SessionGeneration{1},
+               .nickname = "player-1"}},
+      }};
+  static_cast<void>(flow.handleCombatOutbound(
+      std::move(terminalState)));
+  const auto terminalSnapshots = flow.takeUnreliableSnapshots();
+  if (terminalSnapshots.size() != 1 || flow.snapshotSequenceCount() != 1) {
+    return false;
+  }
+  const auto terminalDecoded =
+      RudpCombatCodec::decode(terminalSnapshots.front().datagram);
+  const auto *terminalProjection =
+      terminalDecoded.message.has_value()
+          ? std::get_if<RudpMonsterStateSnapshot>(&*terminalDecoded.message)
+          : nullptr;
+  if (terminalProjection == nullptr) {
+    return false;
+  }
+
+  const auto lootState = CombatOutboundIntent{
+      .actorSessionId = std::nullopt,
+      .actorGeneration = std::nullopt,
+      .message = lol::game_flow::LootStateOutbound{
+          .projection = lol::battle::LootProjection{
+              .battleId = BattleInstanceId{1},
+              .resolution = lol::battle::LootResolutionState::Open,
+              .drops = {lol::battle::LootDropProjection{
+                  .dropId = lol::battle::DropId{1},
+                  .itemId = lol::battle::ItemId{1},
+                  .quantity = 1,
+                  .position = lol::battle::DropPosition{100, 200},
+                  .state = lol::battle::LootDropState::Available,
+                  .owner = std::nullopt,
+              }},
+              .holdings = {},
+          },
+          .participants = std::vector<BattleParticipantProjection>{
+              {.sessionId = SessionId{1},
+               .generation = SessionGeneration{1},
+               .nickname = "player-1"}},
+      }};
+  static_cast<void>(flow.handleCombatOutbound(std::move(lootState)));
+  const auto lootSnapshots = flow.takeUnreliableSnapshots();
+  if (lootSnapshots.size() != 1 || flow.snapshotSequenceCount() != 1) {
+    return false;
+  }
+  const auto lootDecoded =
+      RudpLootCodec::decode(lootSnapshots.front().datagram);
+  const auto *lootProjection =
+      lootDecoded.message.has_value()
+          ? std::get_if<RudpDropStateSnapshot>(&*lootDecoded.message)
+          : nullptr;
+  if (lootProjection == nullptr ||
+      lootProjection->resolutionState !=
+          lol::transport::rudp::RudpLootResolutionState::Open ||
+      lootProjection->snapshotSequence <= terminalProjection->snapshotSequence) {
+    return false;
+  }
+
+  static_cast<void>(flow.handleCombatOutbound(
+      CombatOutboundIntent{.actorSessionId = std::nullopt,
+                            .actorGeneration = std::nullopt,
+                            .message = CombatBattleRetiredOutbound{
+                                .battleId = BattleInstanceId{1}}}));
+  return flow.snapshotSequenceCount() == 0;
 }
 
 // Finding 2 evidence: the real combat deadline control command traverses the
@@ -2050,15 +2279,18 @@ bool rudpPeerFailureClosesCurrentOnceAndCannotCloseReplacement() {
       .endpoint = endpoint(3),
   };
   const auto closed = coordinator.closeRudpPeer(currentFailure);
-  return closed.has_value() && closed->connectionEpoch == 103 &&
-         closed->sessionId == replacement->sessionId &&
-         closed->generation == replacement->generation &&
-         !coordinator.closeRudpPeer(currentFailure).has_value() &&
-         sessions.activeSessionCount() == 1 &&
-         !bindings.isBound(replacement->sessionId.value(),
-                           replacement->generation.value()) &&
-         bindings.isBound(member->sessionId.value(),
-                          member->generation.value());
+  if (!closed.has_value() || closed->connectionEpoch != 103 ||
+      closed->sessionId != replacement->sessionId ||
+      closed->generation != replacement->generation ||
+      coordinator.closeRudpPeer(currentFailure).has_value() ||
+      sessions.activeSessionCount() != 2 ||
+      bindings.isBound(replacement->sessionId.value(),
+                       replacement->generation.value()) ||
+      !bindings.isBound(member->sessionId.value(),
+                        member->generation.value())) {
+    return false;
+  }
+  return coordinator.closeConnection(103) && sessions.activeSessionCount() == 1;
 }
 
 // Recovery A: an accepted same-generation TransportEpoch rebind, with no new
@@ -2120,7 +2352,7 @@ bool combatFlowRebindDropsOldEpochWithoutNewOutbound() {
 }
 
 // A committed room whose last active participant leaves has an immutable
-// cancellation source. The flow retains the Battle/Room identity until a future
+// cancellation source. Slice 6 retains the Battle/Room identity until a future
 // durability completion while retiring its now-recipientless transport state.
 bool combatFlowCancellationHoldsSnapshotUntilDurability() {
   RudpBindingRegistry bindings;
@@ -2558,7 +2790,7 @@ bool combatFlowPostTerminalExitStaysHeldWithoutNewOutput() {
   }
 
   // Real timeout while the room is active: exactly one terminal event and the
-  // terminal projection retires the snapshot identity.
+  // terminal projection keeps the snapshot identity for following loot state.
   deadlines.advance(30s);
   if (!workers.waitUntilIdle(2s)) {
     return false;
@@ -2575,7 +2807,7 @@ bool combatFlowPostTerminalExitStaysHeldWithoutNewOutput() {
     }
     static_cast<void>(flow.handleCombatOutbound(std::move(intent)));
   }
-  if (timeoutTerminalCount != 1 || flow.snapshotSequenceCount() != 0) {
+  if (timeoutTerminalCount != 1 || flow.snapshotSequenceCount() != 1) {
     return false;
   }
 
@@ -2708,7 +2940,8 @@ bool lootFlowUsesRealGatewayAndServerProjection() {
 } // namespace
 
 int main() {
-  return reorderedReliableCommandsReachApplicationExactlyOnce() &&
+  return actualGatewayRecordsOnlyAdmittedCanonicalCommands() &&
+                 reorderedReliableCommandsReachApplicationExactlyOnce() &&
                  roomAdmissionFailurePreservesPeerIdentityWithoutMutation() &&
                  realBindingDrivesAttackTerminalAndSnapshot() &&
                  combatFlowEmitsStableLifecycleEvents() &&
@@ -2719,6 +2952,7 @@ int main() {
                  combatFlowTimeoutProjectionEncodesTimedOut() &&
                  combatFlowReliableStateCountsBoundByLifecycle() &&
                  combatFlowSnapshotSequenceCountsBoundByLifecycle() &&
+                 combatFlowTerminalLootSnapshotSequenceStaysMonotonicUntilRetire() &&
                  combatFlowDeadlineDrivesRealTimeoutPath() &&
                  combatFlowInvalidateDropsOldEpochTransmission() &&
                  combatFlowSessionAuthCloseRemovesReliableState() &&

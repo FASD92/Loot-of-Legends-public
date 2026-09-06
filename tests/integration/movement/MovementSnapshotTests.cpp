@@ -437,7 +437,7 @@ bool realBindingDrivesGameplayAndLatestSnapshots() {
   captured = snapshots.copy();
   if (captured.size() != 2 || captured[1].snapshotSequence != 2 ||
       captured[1].serverTick != 4 || captured[1].players.size() != 2 ||
-      captured[1].players[0].posXMillimeter != 500 ||
+      captured[1].players[0].posXMillimeter != 3000 ||
       captured[1].players[0].posYMillimeter != 500) {
     return false;
   }

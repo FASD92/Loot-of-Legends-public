@@ -1,10 +1,12 @@
 add_library(lol_game_flow STATIC
+  src/BattleContinuityRecovery.cpp
   src/RoomCommandGateway.cpp
   src/execution/RoomExecutionCell.cpp
   src/execution/RoomExecutionDirectory.cpp
   src/execution/SessionRouteIndex.cpp
   src/workflows/BattleRecoveryWorkflow.cpp
   src/workflows/BattleTerminalWorkflow.cpp
+  src/workflows/BattleContinuityWorkflow.cpp
   src/workflows/CombatTickWorkflow.cpp
   src/workflows/DurabilityCompletionWorkflow.cpp
   src/workflows/GameplayTickWorkflow.cpp
@@ -17,7 +19,9 @@ target_include_directories(lol_game_flow
 target_link_libraries(lol_game_flow PUBLIC
   lol_lobby_room
   lol_battle
+  lol_battle_continuity
   lol_settlement
+  lol_session
   lol_runtime)
 
 loot_apply_compile_policy(lol_game_flow)
@@ -44,4 +48,19 @@ if(BUILD_TESTING)
   loot_apply_compile_policy(battle_recovery_workflow_tests)
   add_test(NAME battle_recovery_workflow
     COMMAND battle_recovery_workflow_tests)
+
+  add_executable(recovered_battle_install_tests
+    tests/RecoveredBattleInstallTests.cpp)
+  target_include_directories(recovered_battle_install_tests PRIVATE src)
+  target_link_libraries(recovered_battle_install_tests PRIVATE lol_game_flow)
+  loot_apply_compile_policy(recovered_battle_install_tests)
+  add_test(NAME recovered_battle_install COMMAND recovered_battle_install_tests)
+
+  add_executable(battle_continuity_recovery_tests
+    tests/BattleContinuityRecoveryTests.cpp)
+  target_include_directories(battle_continuity_recovery_tests PRIVATE src)
+  target_link_libraries(battle_continuity_recovery_tests PRIVATE lol_game_flow)
+  loot_apply_compile_policy(battle_continuity_recovery_tests)
+  add_test(NAME battle_continuity_recovery
+    COMMAND battle_continuity_recovery_tests)
 endif()

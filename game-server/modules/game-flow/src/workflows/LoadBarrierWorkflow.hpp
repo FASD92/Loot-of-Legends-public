@@ -4,7 +4,6 @@
 #include <lol/game_flow/GameplayTransportReadinessPort.hpp>
 #include <lol/lobby_room/RoomApi.hpp>
 
-#include <chrono>
 #include <optional>
 
 namespace lol::game_flow::workflows {
@@ -22,11 +21,10 @@ struct LoadDisconnectWorkflowResult final {
   bool gameplayStartCommitted;
 };
 
-[[nodiscard]] LoadBarrierWorkflowResult
-completeLoad(lobby_room::Room &room,
-             std::optional<battle::BattleInstance> &battle,
-             const battle::ArenaLoadCompleteCommand &command,
-             const GameplayTransportReadinessPort *readiness);
+[[nodiscard]] LoadBarrierWorkflowResult completeLoad(
+    lobby_room::Room &room, std::optional<battle::BattleInstance> &battle,
+    const battle::ArenaLoadCompleteCommand &command,
+    const GameplayTransportReadinessPort *readiness, battle::BattleTime at);
 
 // Single composition seam for both voluntary leave and confirmed disconnect:
 // battle participant exit/freeze first, then lobby-room membership removal in
@@ -34,14 +32,13 @@ completeLoad(lobby_room::Room &room,
 [[nodiscard]] LoadDisconnectWorkflowResult exitParticipant(
     lobby_room::Room &room, std::optional<battle::BattleInstance> &battle,
     shared::SessionId sessionId, shared::SessionGeneration generation,
-    battle::ParticipantExitStatus exitStatus,
-    std::chrono::steady_clock::time_point completedAt);
+    battle::ParticipantExitStatus exitStatus, battle::BattleTime completedAt);
 
 [[nodiscard]] LoadDisconnectWorkflowResult
 disconnect(lobby_room::Room &room,
            std::optional<battle::BattleInstance> &battle,
            shared::SessionId sessionId, shared::SessionGeneration generation,
-           std::chrono::steady_clock::time_point completedAt);
+           battle::BattleTime completedAt);
 
 [[nodiscard]] LoadBarrierWorkflowResult
 expireLoadBarrier(lobby_room::Room &room,

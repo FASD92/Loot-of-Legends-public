@@ -431,8 +431,8 @@ bool heartbeatRefreshesPeerAndTimeoutClosesSession() {
          expired.front().sessionId == authenticated.authenticated->sessionId &&
          expired.front().generation ==
              authenticated.authenticated->generation &&
-         sessions.activeSessionCount() == 0 && bindings.boundCount() == 0 &&
-         !coordinator.closeConnection(201);
+         sessions.activeSessionCount() == 1 && bindings.boundCount() == 0 &&
+         coordinator.closeConnection(201) && sessions.activeSessionCount() == 0;
 }
 
 bool concurrentIngressAndOutboundShareABoundedOwner() {

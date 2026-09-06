@@ -3,7 +3,8 @@
   "rootNamespace": "LootOfLegends.Battle",
   "references": [
     "LootOfLegends.Protocol",
-    "LootOfLegends.Transport"
+    "LootOfLegends.Transport",
+    "LootOfLegends.Session"
   ],
   "noEngineReferences": true
 }

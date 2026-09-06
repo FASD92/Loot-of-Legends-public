@@ -9,6 +9,7 @@ namespace lol::game_flow {
 enum class BattleRecoveryReason : std::uint8_t {
   ResultGenerationFailed = 1,
   SettlementRecoveryPending = 2,
+  ContinuityRecordingFailed = 3,
 };
 
 struct BattleRecoveryNotice final {

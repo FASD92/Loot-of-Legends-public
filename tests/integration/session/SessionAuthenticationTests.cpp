@@ -35,12 +35,19 @@ using lol::meta::MetaClaimClientConfig;
 using lol::transport::tcp::AuthenticateGameSession;
 using lol::transport::tcp::AuthenticationRejected;
 using lol::transport::tcp::AuthenticationRejectedReason;
+using lol::transport::tcp::BattleResumeDrop;
+using lol::transport::tcp::BattleResumeMonster;
+using lol::transport::tcp::BattleResumePhase;
+using lol::transport::tcp::BattleResumePlayer;
+using lol::transport::tcp::BattleResumeSnapshot;
+using lol::transport::tcp::BattleResumeSnapshotApplied;
 using lol::transport::tcp::CloseReason;
 using lol::transport::tcp::CodecError;
 using lol::transport::tcp::ConnectionPhase;
 using lol::transport::tcp::NormalizedAuthRequest;
 using lol::transport::tcp::PreAuthLimits;
 using lol::transport::tcp::RequestRudpBindCapability;
+using lol::transport::tcp::ResumeBattleSession;
 using TcpRudpBindCapability = lol::transport::tcp::RudpBindCapability;
 using lol::transport::tcp::SessionControlMessage;
 using lol::transport::tcp::SessionProtocolCodec;
@@ -113,6 +120,98 @@ bool codecMatchesAllGoldenVectors() {
     }
   }
   return true;
+}
+
+bool resumeControlMessagesMatchGoldenVectors() {
+  const SessionControlMessage request{ResumeBattleSession{
+      .requestId = 7,
+      .previousSessionId = 2,
+      .previousSessionGeneration = 3,
+      .credential = kCredentialA,
+  }};
+  const auto encodedRequest = SessionProtocolCodec::encodeFrame(request);
+  const auto expectedRequest = fromHex(
+      "0000004a0100000028000000000000000700000000000000020000000000000003"
+      "002b41414141414141414141414141414141414141414141414141414141414141"
+      "414141414141414141414141");
+  if (!encodedRequest.has_value() || *encodedRequest != expectedRequest) {
+    return false;
+  }
+  const auto preAuth = SessionProtocolCodec::decodePreAuthPayload(
+      std::span{*encodedRequest}.subspan(4));
+  if (preAuth.kind !=
+          lol::transport::tcp::DecodedPreAuthFrame::Kind::Authenticate ||
+      !preAuth.request.has_value() || !preAuth.request->resumeRequested ||
+      preAuth.request->previousSessionId != 2 ||
+      preAuth.request->previousSessionGeneration != 3 ||
+      preAuth.request->credential != kCredentialA) {
+    return false;
+  }
+
+  const SessionControlMessage snapshot{BattleResumeSnapshot{
+      .requestId = 7,
+      .snapshotId = 11,
+      .roomId = 5,
+      .battleInstanceId = 9,
+      .playerSessionId = 2,
+      .sessionGeneration = 3,
+      .phase = BattleResumePhase::Combat,
+      .remainingMillis = 12345,
+      .serverTick = 99,
+      .players = {BattleResumePlayer{.sessionId = 2,
+                                     .positionXMillimeters = -100,
+                                     .positionYMillimeters = 200,
+                                     .healthKnown = false,
+                                     .hitPoints = 0,
+                                     .maximumHitPoints = 0,
+                                     .alive = true},
+                  BattleResumePlayer{.sessionId = 4,
+                                     .positionXMillimeters = 300,
+                                     .positionYMillimeters = -400,
+                                     .healthKnown = false,
+                                     .hitPoints = 0,
+                                     .maximumHitPoints = 0,
+                                     .alive = true}},
+      .monster = BattleResumeMonster{.monsterId = 1,
+                                     .positionXMillimeters = 0,
+                                     .positionYMillimeters = 0,
+                                     .hitPoints = 1200,
+                                     .maximumHitPoints = 1600,
+                                     .state = 0},
+      .drops = {BattleResumeDrop{.dropId = 1,
+                                 .itemId = 2,
+                                 .quantity = 1,
+                                 .positionXMillimeters = 10,
+                                 .positionYMillimeters = 20,
+                                 .state = 0,
+                                 .ownerSessionId = 0}},
+      .score = 0,
+      .result = std::nullopt,
+  }};
+  const auto encodedSnapshot = SessionProtocolCodec::encodeFrame(snapshot);
+  if (!encodedSnapshot.has_value()) {
+    return false;
+  }
+  const auto decodedSnapshot =
+      SessionProtocolCodec::decodeFrame(*encodedSnapshot);
+  if (decodedSnapshot.error != CodecError::None ||
+      !decodedSnapshot.message.has_value() ||
+      *decodedSnapshot.message != snapshot) {
+    return false;
+  }
+
+  const SessionControlMessage applied{
+      BattleResumeSnapshotApplied{.snapshotId = 11}};
+  const auto encodedApplied = SessionProtocolCodec::encodeFrame(applied);
+  const auto expectedApplied = fromHex("0000000d0100000029000000000000000b");
+  const auto decodedApplied =
+      encodedApplied.has_value()
+          ? SessionProtocolCodec::decodeFrame(*encodedApplied)
+          : lol::transport::tcp::DecodedSessionFrame{};
+  return encodedApplied.has_value() && *encodedApplied == expectedApplied &&
+         decodedApplied.error == CodecError::None &&
+         decodedApplied.message.has_value() &&
+         *decodedApplied.message == applied;
 }
 
 class CompletionCollector final {
@@ -326,8 +425,109 @@ bool endToEndCoversReplayExpiryReplacementAndStaleDisconnect() {
          sessions.activeSessionCount() == 0;
 }
 
+bool freshCredentialResumeHasOneOwnerAndKeepsSessionIdentity() {
+  std::size_t nextResponse = 0;
+  const HttpsResult claimed{
+      .status = HttpsStatus::Response,
+      .statusCode = 200,
+      .body =
+          R"({"accountId":"00000000-0000-4000-8000-000000000001","nickname":"player-one"})"};
+  CompletionCollector collector;
+  lol::session::SessionRegistry sessions;
+  lol::transport::rudp::RudpBindingRegistry rudpBindings;
+  lol::app::AuthClaimCoordinator correlations{sessions, rudpBindings};
+  MetaClaimClient client{
+      MetaClaimClientConfig{
+          .claimUrl = "https://meta.test/internal/v1/game-credentials/claim",
+          .serviceCredential = "test-only-service-placeholder",
+          .timeout = 50ms,
+          .maxOutstanding = 4,
+          .maxResponseBytes = 1024,
+      },
+      [&nextResponse, claimed](HttpsRequest, std::chrono::milliseconds) {
+        ++nextResponse;
+        return claimed;
+      },
+      [&collector](ClaimCompletion completion) {
+        collector.add(std::move(completion));
+      }};
+  SessionAuthFlow flow{correlations, client};
+
+  TcpConnection first{limits(), kOpenedAt};
+  auto firstDispatch =
+      authenticate(201, 10, kCredentialA, 1000, first, flow, client, collector);
+  if (!firstDispatch.has_value() || firstDispatch->size() != 1) {
+    return false;
+  }
+  const auto decodedWelcome =
+      SessionProtocolCodec::decodeFrame(firstDispatch->front().frame);
+  const auto *welcome = decodedWelcome.message.has_value()
+                            ? std::get_if<Welcome>(&*decodedWelcome.message)
+                            : nullptr;
+  if (welcome == nullptr ||
+      !flow.detach(201, kOpenedAt + std::chrono::seconds{30})) {
+    return false;
+  }
+
+  TcpConnection winner{limits(), kOpenedAt};
+  TcpConnection loser{limits(), kOpenedAt};
+  const auto beginResume = [&](TcpConnection &connection, std::uint64_t epoch,
+                               std::uint64_t requestId,
+                               const char *credential) {
+    const auto frame = SessionProtocolCodec::encodeFrame(ResumeBattleSession{
+        .requestId = requestId,
+        .previousSessionId = welcome->sessionId,
+        .previousSessionGeneration = welcome->sessionGeneration,
+        .credential = credential,
+    });
+    if (!frame.has_value()) {
+      return false;
+    }
+    std::vector<NormalizedAuthRequest> requests;
+    connection.onBytes(*frame, kOpenedAt + 1ms,
+                       SessionProtocolCodec::decodePreAuthPayload,
+                       [&requests](NormalizedAuthRequest request) {
+                         requests.push_back(std::move(request));
+                       });
+    return requests.size() == 1 && flow.begin(epoch, requests.front()).empty();
+  };
+  if (!beginResume(winner, 202, 11, kCredentialB) ||
+      !beginResume(loser, 203, 12, kCredentialC) || !client.waitUntilIdle(1s)) {
+    return false;
+  }
+  auto completions = collector.take();
+  if (completions.size() != 2 || nextResponse != 3) {
+    return false;
+  }
+  auto winnerDispatch = flow.complete(completions[0], 1001, kOpenedAt + 29s);
+  auto loserDispatch = flow.complete(completions[1], 1002, kOpenedAt + 29s);
+  if (winnerDispatch.size() != 1 || loserDispatch.size() != 1 ||
+      winnerDispatch[0].transition != ConnectionTransition::MarkAuthenticated ||
+      loserDispatch[0].transition != ConnectionTransition::CloseAfterWrite) {
+    return false;
+  }
+  const auto resumed =
+      SessionProtocolCodec::decodeFrame(winnerDispatch[0].frame);
+  const auto rejected =
+      SessionProtocolCodec::decodeFrame(loserDispatch[0].frame);
+  const auto *resumedWelcome = resumed.message.has_value()
+                                   ? std::get_if<Welcome>(&*resumed.message)
+                                   : nullptr;
+  const auto *resumeRejected =
+      rejected.message.has_value()
+          ? std::get_if<AuthenticationRejected>(&*rejected.message)
+          : nullptr;
+  return resumedWelcome != nullptr &&
+         resumedWelcome->sessionId == welcome->sessionId &&
+         resumedWelcome->sessionGeneration == welcome->sessionGeneration &&
+         resumeRejected != nullptr &&
+         resumeRejected->reason ==
+             AuthenticationRejectedReason::ResumeUnavailable &&
+         sessions.activeSessionCount() == 1;
+}
+
 bool unsupportedMessageRemainsRejected() {
-  static_assert(std::variant_size_v<SessionControlMessage> == 6);
+  static_assert(std::variant_size_v<SessionControlMessage> == 9);
   const auto unknownFrame = fromHex("000000050100000005");
   const auto unknown = SessionProtocolCodec::decodeFrame(unknownFrame);
   const auto unknownPreAuth = SessionProtocolCodec::decodePreAuthPayload(
@@ -356,8 +556,14 @@ int main() {
   if (!endToEndCoversReplayExpiryReplacementAndStaleDisconnect()) {
     return 2;
   }
-  if (!unsupportedMessageRemainsRejected()) {
+  if (!resumeControlMessagesMatchGoldenVectors()) {
     return 3;
+  }
+  if (!freshCredentialResumeHasOneOwnerAndKeepsSessionIdentity()) {
+    return 4;
+  }
+  if (!unsupportedMessageRemainsRejected()) {
+    return 5;
   }
   return EXIT_SUCCESS;
 }

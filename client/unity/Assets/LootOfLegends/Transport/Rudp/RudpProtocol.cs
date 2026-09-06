@@ -202,7 +202,8 @@ namespace LootOfLegends.Transport.Rudp
     public enum RudpEventStreamKind : byte
     {
         CombatLifecycle = 1,
-        LootLifecycle = 2
+        LootLifecycle = 2,
+        CombatAction = 3
     }
 
     public sealed class RudpAttackTerminalResult
@@ -235,6 +236,48 @@ namespace LootOfLegends.Transport.Rudp
         public ulong MonsterId { get; }
         public uint RemainingHitPoints { get; }
         public ushort RulesetVersion { get; }
+        public RudpCombatOutcome CombatOutcome { get; }
+    }
+
+    public sealed class RudpAttackApplied
+    {
+        public RudpAttackApplied(
+            RudpEventId eventId,
+            ulong battleInstanceId,
+            RudpEventStreamKind eventStreamKind,
+            uint eventSequence,
+            ulong attackerSessionId,
+            ulong monsterId,
+            uint actualDamage,
+            uint remainingHitPoints,
+            uint serverTick,
+            RudpCombatOutcome combatOutcome)
+        {
+            EventId = eventId;
+            BattleInstanceId = battleInstanceId;
+            EventStreamKind = eventStreamKind;
+            EventSequence = eventSequence;
+            AttackerSessionId = attackerSessionId;
+            MonsterId = monsterId;
+            ActualDamage = actualDamage;
+            RemainingHitPoints = remainingHitPoints;
+            ServerTick = serverTick;
+            CombatOutcome = combatOutcome;
+            if (!RudpProtocolCodec.IsValid(this))
+            {
+                throw new ArgumentException("Invalid attack applied event");
+            }
+        }
+
+        public RudpEventId EventId { get; }
+        public ulong BattleInstanceId { get; }
+        public RudpEventStreamKind EventStreamKind { get; }
+        public uint EventSequence { get; }
+        public ulong AttackerSessionId { get; }
+        public ulong MonsterId { get; }
+        public uint ActualDamage { get; }
+        public uint RemainingHitPoints { get; }
+        public uint ServerTick { get; }
         public RudpCombatOutcome CombatOutcome { get; }
     }
 
@@ -612,13 +655,20 @@ namespace LootOfLegends.Transport.Rudp
         private const ushort MonsterSpawnedMessageId = 29;
         private const ushort CombatTerminalEventMessageId = 30;
         private const ushort MonsterStateSnapshotMessageId = 31;
+        private const ushort AttackAppliedMessageId = 38;
         private const ushort ClaimLootIntentMessageId = 32;
         private const ushort ClaimLootTerminalResultMessageId = 33;
         private const ushort DropSpawnedMessageId = 34;
         private const ushort DropStateSnapshotMessageId = 35;
-        private const uint CombatMaximumHitPoints = 1600;
-        private const uint CombatAttackDamage = 20;
-        private const ushort CombatRulesetVersion = 1;
+        private const uint CombatMinimumParticipants = 2;
+        private const uint CombatMaximumParticipants = 10;
+        private const uint CombatHitPointsPerParticipant = 800;
+        private const uint CombatMinimumHitPoints =
+            CombatMinimumParticipants * CombatHitPointsPerParticipant;
+        private const uint CombatMaximumHitPoints =
+            CombatMaximumParticipants * CombatHitPointsPerParticipant;
+        private const uint CombatAttackDamage = 100;
+        private const ushort CombatRulesetVersion = 4;
         private const uint CrcPolynomial = 0xedb88320;
 
         public static byte[] EncodeBindCapabilityRequest(ulong requestId)
@@ -813,6 +863,23 @@ namespace LootOfLegends.Transport.Rudp
                         ReadUInt32(wire.Payload, 24),
                         (RudpMonsterState)wire.Payload[28]));
                 }
+                if (wire.Header.MessageId == AttackAppliedMessageId &&
+                    wire.Header.Flag == RudpFlag.Reliable &&
+                    wire.Header.TransportEpoch != 0 && wire.Payload.Length == 58)
+                {
+                    return new RudpInboundDatagram(wire.Header, new RudpAttackApplied(
+                        new RudpEventId(
+                            ReadUInt64(wire.Payload, 0), ReadUInt64(wire.Payload, 8)),
+                        ReadUInt64(wire.Payload, 16),
+                        (RudpEventStreamKind)wire.Payload[24],
+                        ReadUInt32(wire.Payload, 25),
+                        ReadUInt64(wire.Payload, 29),
+                        ReadUInt64(wire.Payload, 37),
+                        ReadUInt32(wire.Payload, 45),
+                        ReadUInt32(wire.Payload, 49),
+                        ReadUInt32(wire.Payload, 53),
+                        (RudpCombatOutcome)wire.Payload[57]));
+                }
                 if (wire.Header.MessageId == ClaimLootTerminalResultMessageId &&
                     wire.Header.Flag == RudpFlag.Reliable &&
                     wire.Header.TransportEpoch != 0 && wire.Payload.Length == 34)
@@ -873,13 +940,25 @@ namespace LootOfLegends.Transport.Rudp
                     message.RemainingHitPoints == 0);
         }
 
+        internal static bool IsValid(RudpAttackApplied message)
+        {
+            return message.EventId != null && message.BattleInstanceId != 0 &&
+                   message.EventStreamKind == RudpEventStreamKind.CombatAction &&
+                   message.EventSequence != 0 && message.AttackerSessionId != 0 &&
+                   message.MonsterId == 1 && message.ActualDamage == CombatAttackDamage &&
+                   ValidCombatHitPoints(message.RemainingHitPoints) &&
+                   (byte)message.CombatOutcome <= (byte)RudpCombatOutcome.CombatTimeout &&
+                   (message.CombatOutcome != RudpCombatOutcome.MonsterDefeated ||
+                    message.RemainingHitPoints == 0);
+        }
+
         internal static bool IsValid(RudpMonsterSpawned message)
         {
             return message.EventId != null && message.BattleInstanceId != 0 &&
                    message.EventStreamKind == RudpEventStreamKind.CombatLifecycle &&
                    message.EventSequence == 1 && message.MonsterId == 1 &&
                    message.PositionXMillimeters == 0 && message.PositionYMillimeters == 0 &&
-                   message.MaximumHitPoints == CombatMaximumHitPoints &&
+                   ValidCombatMaximumHitPoints(message.MaximumHitPoints) &&
                    message.RulesetVersion == CombatRulesetVersion;
         }
 
@@ -1199,6 +1278,13 @@ namespace LootOfLegends.Transport.Rudp
         private static bool ValidCombatHitPoints(uint hitPoints)
         {
             return hitPoints <= CombatMaximumHitPoints && hitPoints % CombatAttackDamage == 0;
+        }
+
+        private static bool ValidCombatMaximumHitPoints(uint hitPoints)
+        {
+            return hitPoints >= CombatMinimumHitPoints &&
+                   hitPoints <= CombatMaximumHitPoints &&
+                   hitPoints % CombatHitPointsPerParticipant == 0;
         }
 
         private static bool ValidLootItem(ulong itemId)

@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using LootOfLegends.Battle;
@@ -63,7 +62,8 @@ namespace LootOfLegends.Presentation
             BattleCombatReadModel combat,
             BattleLootReadModel loot,
             ArenaPlayerFlowReadModel presentation,
-            ArenaInputFacade input)
+            ArenaInputFacade input,
+            ulong localSessionId)
         {
             Movement = movement ?? throw new ArgumentNullException(nameof(movement));
             MovementReadModel = movementReadModel ??
@@ -73,6 +73,11 @@ namespace LootOfLegends.Presentation
             Presentation = presentation ??
                 throw new ArgumentNullException(nameof(presentation));
             Input = input ?? throw new ArgumentNullException(nameof(input));
+            if (localSessionId == 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(localSessionId));
+            }
+            LocalSessionId = localSessionId;
         }
 
         public BattleMovementClient Movement { get; }
@@ -81,32 +86,25 @@ namespace LootOfLegends.Presentation
         public BattleLootReadModel Loot { get; }
         public ArenaPlayerFlowReadModel Presentation { get; }
         public ArenaInputFacade Input { get; }
+        public ulong LocalSessionId { get; }
         public bool IsTransportReady => Movement.IsBound;
     }
 
     public sealed class PlayerFlowKeyboardInput
     {
-        private readonly LobbyRoomReadModel lobbyRoom;
         private readonly ILobbyRoomCommands roomCommands;
-        private readonly IRoomHostStartAction hostStart;
         private readonly Func<ArenaInputBinding> arena;
         private readonly Action<string> showStatus;
         private Task inFlight;
         private double nextMoveAt;
 
         public PlayerFlowKeyboardInput(
-            LobbyRoomReadModel lobbyRoom,
             ILobbyRoomCommands roomCommands,
-            IRoomHostStartAction hostStart,
             Func<ArenaInputBinding> arena,
             Action<string> showStatus)
         {
-            this.lobbyRoom = lobbyRoom ??
-                throw new ArgumentNullException(nameof(lobbyRoom));
             this.roomCommands = roomCommands ??
                 throw new ArgumentNullException(nameof(roomCommands));
-            this.hostStart = hostStart ??
-                throw new ArgumentNullException(nameof(hostStart));
             this.arena = arena ?? throw new ArgumentNullException(nameof(arena));
             this.showStatus = showStatus ??
                 throw new ArgumentNullException(nameof(showStatus));
@@ -121,55 +119,15 @@ namespace LootOfLegends.Presentation
             }
 
             ArenaInputBinding currentArena = arena();
-            if (currentArena != null &&
-                SceneManager.GetActiveScene().name == "ArenaScene")
+            if (currentArena == null ||
+                SceneManager.GetActiveScene().name != "ArenaScene")
             {
-                if (currentArena.IsTransportReady &&
-                    currentArena.Presentation.Snapshot().ControlsEnabled)
-                {
-                    TickArena(currentArena, cancellationToken);
-                }
                 return;
             }
-            if (lobbyRoom.IsInRoom)
+            if (currentArena.IsTransportReady &&
+                currentArena.Presentation.Snapshot().ControlsEnabled)
             {
-                TickRoom(cancellationToken);
-                return;
-            }
-            if (Input.GetKeyDown(KeyCode.C))
-            {
-                Begin(roomCommands.CreateAsync(
-                    "Player Room", 2, cancellationToken));
-            }
-            else if (Input.GetKeyDown(KeyCode.J))
-            {
-                LobbyRoomSummaryView room = lobbyRoom.Lobby.Rooms.FirstOrDefault(
-                    candidate => !candidate.IsFull);
-                if (room != null)
-                {
-                    Begin(roomCommands.JoinAsync(room.RoomId, cancellationToken));
-                }
-            }
-        }
-
-        private void TickRoom(CancellationToken cancellationToken)
-        {
-            if (Input.GetKeyDown(KeyCode.R))
-            {
-                RoomMemberPresentation local = lobbyRoom.Room?.Members.FirstOrDefault(
-                    member => member.IsLocal);
-                if (local != null)
-                {
-                    Begin(roomCommands.SetReadyAsync(!local.Ready, cancellationToken));
-                }
-            }
-            else if (Input.GetKeyDown(KeyCode.S))
-            {
-                Begin(hostStart.StartAsync(cancellationToken));
-            }
-            else if (Input.GetKeyDown(KeyCode.L))
-            {
-                Begin(roomCommands.LeaveAsync(cancellationToken));
+                TickArena(currentArena, cancellationToken);
             }
         }
 
@@ -182,7 +140,8 @@ namespace LootOfLegends.Presentation
                 Begin(roomCommands.LeaveAsync(cancellationToken));
                 return;
             }
-            if (Input.GetKeyDown(KeyCode.Space) && current.Combat.HasMonster)
+            if (Input.GetKeyDown(KeyCode.Space) &&
+                current.Presentation.Snapshot().CanAttack)
             {
                 Begin(current.Input.AttackAsync(
                     current.Combat.MonsterId, cancellationToken));
@@ -190,12 +149,20 @@ namespace LootOfLegends.Presentation
             }
             if (Input.GetKeyDown(KeyCode.E))
             {
-                BattleLootDropView drop = current.Loot.Drops.FirstOrDefault(
-                    candidate => candidate.IsAvailable);
-                if (drop != null)
+                if (current.MovementReadModel.Positions.TryGetValue(
+                        current.LocalSessionId,
+                        out PlayerPosition position))
                 {
-                    Begin(current.Input.ClaimAsync(drop.DropId, cancellationToken));
-                    return;
+                    BattleLootDropView drop = current.Loot.FindNearestAvailable(
+                        position.PositionXMillimeters,
+                        position.PositionYMillimeters);
+                    if (drop != null)
+                    {
+                        Begin(current.Input.ClaimAsync(
+                            drop.DropId,
+                            cancellationToken));
+                        return;
+                    }
                 }
             }
             double now = Time.realtimeSinceStartupAsDouble;

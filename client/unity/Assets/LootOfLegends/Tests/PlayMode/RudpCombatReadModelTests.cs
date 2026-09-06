@@ -19,7 +19,7 @@ namespace LootOfLegends.Tests.PlayMode
             var readModel = new BattleCombatReadModel(7);
             readModel.Apply(new RudpMonsterSpawned(
                 new RudpEventId(1, 1), 7, RudpEventStreamKind.CombatLifecycle,
-                1, 1, 0, 0, 1600, 1));
+                1, 1, 0, 0, 1600, 4));
             var gameObject = new GameObject("Authoritative combat projection");
             var presenter = gameObject.AddComponent<BattleCombatPresenter>();
             var input = new AttackInputFacade(
@@ -36,14 +36,14 @@ namespace LootOfLegends.Tests.PlayMode
             Assert.That(gameObject.GetComponent<TextMesh>().text, Does.Contain("1600/1600"));
 
             readModel.Apply(new RudpAttackTerminalResult(
-                send.Result, 7, RudpAttackResultCode.Ok, 1, 1580, 1,
+                send.Result, 7, RudpAttackResultCode.Ok, 1, 1500, 4,
                 RudpCombatOutcome.None));
             presenter.Render(readModel);
-            Assert.That(gameObject.GetComponent<TextMesh>().text, Does.Contain("1580/1600"));
+            Assert.That(gameObject.GetComponent<TextMesh>().text, Does.Contain("1500/1600"));
 
             readModel.Apply(new RudpCombatTerminalEvent(
                 new RudpEventId(1, 2), 7, RudpEventStreamKind.CombatLifecycle,
-                2, RudpCombatOutcome.MonsterDefeated, 1, 600, 1));
+                2, RudpCombatOutcome.MonsterDefeated, 1, 600, 4));
             presenter.Render(readModel);
             Assert.That(gameObject.GetComponent<TextMesh>().text, Does.Contain("MonsterDefeated"));
 

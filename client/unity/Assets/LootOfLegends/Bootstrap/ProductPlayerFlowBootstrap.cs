@@ -1,16 +1,22 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using LootOfLegends.Battle;
 using LootOfLegends.Collection;
 using LootOfLegends.LobbyRoom;
 using LootOfLegends.Presentation;
+using LootOfLegends.Presentation.Common;
 using LootOfLegends.Presentation.Login;
+using LootOfLegends.Protocol;
 using LootOfLegends.Session;
 using LootOfLegends.Transport;
 using LootOfLegends.Transport.Rudp;
@@ -32,24 +38,35 @@ namespace LootOfLegends.Bootstrap
         private Task startup;
         private Task arenaTick;
         private Task arenaBind;
+        private Task reconnect;
         private PlayerFlowTransportLifetime transportLifetime;
         private RudpReliableOutbound reliableOutbound;
         private PlayerSessionReadModel session;
         private BattleLoadReadModel battleLoad;
+        private BattleResultReadModel battleResult;
         private ArenaClientRuntime arenaRuntime;
         private ArenaInputBinding arenaBinding;
         private TypedServerEventRouter router;
         private ITcpCommandSender tcpSender;
         private RudpInboundPump inbound;
+        private IDisposable arenaRudpSubscription;
+        private GameCredentialHttpApi gameCredentialApi;
+        private IPEndPoint gameDatagramEndpoint;
+        private string gameHost;
+        private int gameTcpPort;
+        private BattleSessionReconnectClient reconnectClient;
         private PlayerFlowPresentationRuntime presentation;
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
         private DevelopmentPlayerFlowDriver evidenceDriver;
+        private bool snapshotAppliedEvidenceReported;
 #endif
         private ulong nextTransportRequestId = 1000000;
         private ulong activeBattleId;
         private bool startupFailureHandled;
         private bool tcpFailureHandled;
         private bool rudpFailureHandled;
+        private bool reconnectAwaitingRudp;
+        private BattleRecoveryResumeProof battleRecoveryProof;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void Install()
@@ -101,10 +118,20 @@ namespace LootOfLegends.Bootstrap
         {
             DrainMainThreadActions();
             ObserveStartup();
+            HandlePortfolioDisconnectShortcut(Input.GetKeyDown(KeyCode.F8));
             ObserveTransport();
+            ObserveReconnect();
             ObserveArenaTasks();
 
-            if (arenaRuntime != null && arenaTick == null)
+            if (reconnectAwaitingRudp && arenaRuntime != null &&
+                arenaRuntime.IsTransportReady)
+            {
+                reconnectAwaitingRudp = false;
+                battleLoad?.SetReconnectLocked(false);
+                HideBlockingFailure();
+            }
+
+            if (arenaRuntime != null && arenaTick == null && reconnect == null)
             {
                 arenaTick = TickArenaAsync(shutdown.Token);
             }
@@ -112,6 +139,15 @@ namespace LootOfLegends.Bootstrap
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
             evidenceDriver?.Tick();
 #endif
+        }
+
+        private void HandlePortfolioDisconnectShortcut(bool requested)
+        {
+            if (!requested || reconnect != null || !CanResumeBattle())
+            {
+                return;
+            }
+            tcp?.Close();
         }
 
         private async Task StartFlowAsync(
@@ -123,28 +159,40 @@ namespace LootOfLegends.Bootstrap
                 Timeout = TimeSpan.FromSeconds(15)
             };
             var metaSession = new MetaSessionState();
-            ISystemBrowser browser = new UnitySystemBrowser();
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
-            if (configuration.IsDevelopmentEvidence)
+            if (configuration.DevelopmentMetaSession != null)
             {
-                browser = new DevelopmentLoopbackBrowser();
+                metaSession.Accept(configuration.DevelopmentMetaSession);
             }
+            else
 #endif
-            var login = new DesktopLoginCoordinator(
-                new DesktopAuthHttpApi(http, configuration.MetaBaseUri),
-                new TcpLoopbackAuthListenerFactory(),
-                browser,
-                metaSession);
-            ShowLogin("브라우저 로그인을 기다리고 있습니다.");
-            await login.SignInAsync(cancellationToken);
+            {
+                ISystemBrowser browser = new UnitySystemBrowser();
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                if (configuration.IsDevelopmentEvidence)
+                {
+                    browser = new DevelopmentLoopbackBrowser();
+                }
+#endif
+                var login = new DesktopLoginCoordinator(
+                    new DesktopAuthHttpApi(http, configuration.MetaBaseUri),
+                    new TcpLoopbackAuthListenerFactory(),
+                    browser,
+                    metaSession);
+                ShowLogin("브라우저 인증 완료를 기다리고 있습니다.");
+                await login.SignInAsync(cancellationToken);
+            }
 
-            IssuedGameCredential credential = await new GameCredentialHttpApi(
+            gameCredentialApi = new GameCredentialHttpApi(
                     http,
                     configuration.MetaBaseUri,
-                    metaSession.Authorize)
+                    metaSession.Authorize);
+            IssuedGameCredential credential = await gameCredentialApi
                 .IssueAsync(cancellationToken);
 
             tcp = new TcpClient(AddressFamily.InterNetwork);
+            gameHost = configuration.GameHost;
+            gameTcpPort = configuration.TcpPort;
             using (cancellationToken.Register(tcp.Close))
             {
                 await tcp.ConnectAsync(
@@ -155,7 +203,7 @@ namespace LootOfLegends.Bootstrap
             session = new PlayerSessionReadModel();
             var lobbyRoom = new LobbyRoomReadModel();
             battleLoad = new BattleLoadReadModel();
-            var battleResult = new BattleResultReadModel();
+            battleResult = new BattleResultReadModel();
             var roomCorrelator = new RoomCommandCorrelator();
             var battleCorrelator = new BattleResponseCorrelator();
             var roomRouter = new LobbyRoomMessageRouter(roomCorrelator, lobbyRoom);
@@ -172,17 +220,11 @@ namespace LootOfLegends.Bootstrap
             subscriptions.Add(router.Subscribe((IBattleRecoveryInboundMessageSink)completion));
 
             NetworkStream stream = tcp.GetStream();
-            tcpSender = new TcpCommandSender(stream);
+            BindTcpSender(new TcpCommandSender(stream));
             transportLifetime = new PlayerFlowTransportLifetime(
                 cancellationToken,
                 this,
-                () =>
-                {
-                    if (session.ConfirmRudpFailure())
-                    {
-                        shutdown.Cancel();
-                    }
-                });
+                HandleConfirmedTransportFailure);
             transportLifetime.StartTcp(new TcpInboundPump(stream, router));
             await new GameSessionAuthenticator(tcpSender, session)
                 .AuthenticateAsync(credential.Credential, cancellationToken);
@@ -190,7 +232,7 @@ namespace LootOfLegends.Bootstrap
             IPAddress gameAddress = await ResolveAddressAsync(
                 configuration.GameHost,
                 cancellationToken);
-            var gameDatagramEndpoint = new IPEndPoint(
+            gameDatagramEndpoint = new IPEndPoint(
                 gameAddress,
                 configuration.UdpPort);
             udp = new UdpClient(AddressFamily.InterNetwork);
@@ -229,8 +271,21 @@ namespace LootOfLegends.Bootstrap
                 collection,
                 () => arenaBinding,
                 cancellationToken);
+            reconnectClient = new BattleSessionReconnectClient(
+                tcpSender,
+                async token => (await gameCredentialApi.IssueAsync(token)
+                    .ConfigureAwait(false)).Credential,
+                new StopwatchReconnectClock(),
+                ApplyResumeSnapshot,
+                this,
+                (requestId, welcome) => session != null &&
+                    session.ApplyResumedWelcome(requestId, welcome));
+            subscriptions.Add(router.Subscribe(
+                (IBattleResumeInboundMessageSink)reconnectClient));
+            subscriptions.Add(router.Subscribe(
+                (ISessionInboundMessageSink)reconnectClient));
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
-            if (configuration.IsDevelopmentEvidence)
+            if (configuration.IsAutomatedEvidence)
             {
                 evidenceDriver = new DevelopmentPlayerFlowDriver(
                     configuration.EvidenceRole,
@@ -242,7 +297,9 @@ namespace LootOfLegends.Bootstrap
                     () => arenaBinding,
                     collectionApi,
                     collection,
-                    cancellationToken);
+                    cancellationToken,
+                    configuration.IsCrashContinuityEvidence,
+                    () => session.SessionGeneration);
             }
 #endif
             ShowLogin("게임 서버 인증이 완료되었습니다.");
@@ -257,8 +314,20 @@ namespace LootOfLegends.Bootstrap
                 return;
             }
 
-            RemoveArenaSubscription();
+            arenaRudpSubscription?.Dispose();
+            arenaRudpSubscription = null;
             activeBattleId = battleLoad.BattleInstanceId;
+            if (battleRecoveryProof == null ||
+                battleRecoveryProof.RoomId != battleLoad.RoomId ||
+                battleRecoveryProof.BattleInstanceId != activeBattleId ||
+                battleRecoveryProof.SessionId != session.SessionId)
+            {
+                battleRecoveryProof = new BattleRecoveryResumeProof(
+                    battleLoad.RoomId,
+                    activeBattleId,
+                    session.SessionId,
+                    session.SessionGeneration);
+            }
             arenaRuntime = new ArenaClientRuntime(
                 tcpSender,
                 reliableOutbound,
@@ -273,9 +342,10 @@ namespace LootOfLegends.Bootstrap
                 arenaRuntime.Combat,
                 arenaRuntime.Loot,
                 arenaRuntime.Presentation,
-                arenaRuntime.Input);
-            subscriptions.Add(router.Subscribe(
-                (IRudpBindCapabilitySink)arenaRuntime.Movement));
+                arenaRuntime.Input,
+                session.SessionId);
+            arenaRudpSubscription = router.Subscribe(
+                (IRudpBindCapabilitySink)arenaRuntime.Movement);
             if (!arenaRuntime.IsTransportReady)
             {
                 arenaBind = arenaRuntime.RequestTransportAsync(
@@ -335,13 +405,20 @@ namespace LootOfLegends.Bootstrap
                 !tcpFailureHandled)
             {
                 tcpFailureHandled = true;
-                session?.Disconnect();
-                ShowLogin("게임 서버 연결이 종료되었습니다.");
+                if (CanResumeBattle())
+                {
+                    BeginReconnect();
+                }
+                else
+                {
+                    session?.Disconnect();
+                    ShowLogin("게임 서버 연결이 종료되었습니다.");
+                }
             }
             Task rudpPump = transportLifetime?.RudpTask;
             if (!shutdown.IsCancellationRequested && !rudpFailureHandled &&
                 ((rudpPump != null && rudpPump.IsCompleted) ||
-                 (reliableOutbound != null &&
+                 (rudpPump != null && reliableOutbound != null &&
                   reliableOutbound.HasConfirmedFailure)))
             {
                 rudpFailureHandled = true;
@@ -355,6 +432,293 @@ namespace LootOfLegends.Bootstrap
             ObserveCompleted(ref arenaBind);
         }
 
+        private void ObserveReconnect()
+        {
+            if (reconnect == null || !reconnect.IsCompleted)
+            {
+                return;
+            }
+            Task completed = reconnect;
+            reconnect = null;
+            if (completed.IsFaulted || completed.IsCanceled)
+            {
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                evidenceDriver?.OnReconnectFailed();
+#endif
+                RetireArenaAfterReconnectFailure();
+                session?.Disconnect();
+                HideBlockingFailure();
+                ShowLogin("재연결에 실패해 로그인 화면으로 돌아갑니다.");
+                return;
+            }
+
+            BattleSessionReconnectResult result =
+                ((Task<BattleSessionReconnectResult>)completed).Result;
+            if (result.Status != BattleSessionReconnectStatus.Resumed ||
+                result.Snapshot == null)
+            {
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                evidenceDriver?.OnReconnectFailed();
+#endif
+                RetireArenaAfterReconnectFailure();
+                session?.Disconnect();
+                HideBlockingFailure();
+                ShowLogin(result.Status == BattleSessionReconnectStatus.GraceExpired
+                    ? "재접속 시간이 만료되었습니다."
+                    : "재연결 인증에 실패했습니다.");
+                return;
+            }
+
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+            evidenceDriver?.OnSnapshotAcknowledged();
+#endif
+
+            if (!result.RequiresRudpRebind)
+            {
+                reconnectAwaitingRudp = false;
+                battleLoad?.SetReconnectLocked(false);
+                HideBlockingFailure();
+                return;
+            }
+            if (!StartResumedArenaTransport(result.Snapshot))
+            {
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                evidenceDriver?.OnReconnectFailed();
+#endif
+                RetireArenaAfterReconnectFailure();
+                session?.Disconnect();
+                HideBlockingFailure();
+                ShowLogin("재연결 인증에 실패했습니다.");
+                return;
+            }
+            reconnectAwaitingRudp = true;
+        }
+
+        private void BeginReconnect()
+        {
+            if (reconnect != null)
+            {
+                return;
+            }
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+            snapshotAppliedEvidenceReported = false;
+#endif
+            battleLoad.SetReconnectLocked(true);
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+            evidenceDriver?.OnReconnectStarted();
+#endif
+            ShowBlockingFailure("재연결 중");
+            reconnect = ResumeBattleAsync();
+        }
+
+        private void HandleConfirmedTransportFailure()
+        {
+            if (CanResumeBattle())
+            {
+                BeginReconnect();
+                return;
+            }
+            if (session != null && session.ConfirmRudpFailure())
+            {
+                shutdown.Cancel();
+            }
+        }
+
+        private bool CanResumeBattle()
+        {
+            return reconnectClient != null && session != null &&
+                session.State == PlayerSessionState.Authenticated &&
+                battleLoad != null &&
+                (battleLoad.IsWaiting || battleLoad.IsGameplayActive ||
+                 battleResultHasFinalResult());
+        }
+
+        private bool ApplyResumeSnapshot(BattleResumeSnapshot snapshot)
+        {
+            if (snapshot == null || battleLoad == null ||
+                battleResult == null || session == null ||
+                session.State != PlayerSessionState.Authenticated)
+            {
+                return false;
+            }
+            if (snapshot.Phase != BattleResumePhase.Result ||
+                arenaRuntime == null ||
+                arenaRuntime.SessionGeneration != session.SessionGeneration)
+            {
+                if (!PrepareResumedArena(snapshot))
+                {
+                    return false;
+                }
+            }
+            bool applied = new BattleSessionResumeApplier(
+                    battleLoad,
+                    battleResult,
+                    arenaRuntime,
+                    session)
+                .Apply(snapshot);
+            if (applied)
+            {
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                if (!snapshotAppliedEvidenceReported)
+                {
+                    snapshotAppliedEvidenceReported = true;
+                    evidenceDriver?.OnSnapshotApplied();
+                }
+#endif
+            }
+            return applied;
+        }
+
+        private bool battleResultHasFinalResult()
+        {
+            return battleResult != null && battleResult.HasFinalResult;
+        }
+
+        private async Task<BattleSessionReconnectResult> ResumeBattleAsync()
+        {
+            return await reconnectClient.ResumeAsync(
+                    session.SessionId,
+                    session.SessionGeneration,
+                    ConnectResumeTcpAsync,
+                    shutdown.Token,
+                    battleRecoveryProof)
+                .ConfigureAwait(false);
+        }
+
+        private async Task<ITcpCommandSender> ConnectResumeTcpAsync(
+            CancellationToken cancellationToken)
+        {
+            PlayerFlowTransportLifetime previous = transportLifetime;
+            if (previous != null)
+            {
+                await previous.StopAsync().ConfigureAwait(false);
+            }
+            udp?.Close();
+            tcp?.Close();
+            tcp = new TcpClient(AddressFamily.InterNetwork);
+            using (cancellationToken.Register(tcp.Close))
+            {
+                await tcp.ConnectAsync(
+                    gameHost,
+                    gameTcpPort);
+            }
+            NetworkStream stream = tcp.GetStream();
+            ITcpCommandSender sender = new TcpCommandSender(stream);
+            var nextLifetime = new PlayerFlowTransportLifetime(
+                shutdown.Token,
+                this,
+                HandleConfirmedTransportFailure);
+            nextLifetime.StartTcp(new TcpInboundPump(stream, router));
+            transportLifetime = nextLifetime;
+            BindTcpSender(sender);
+            tcpFailureHandled = false;
+            rudpFailureHandled = false;
+            return sender;
+        }
+
+        private ITcpCommandSender BindTcpSender(ITcpCommandSender sender)
+        {
+            if (sender == null)
+            {
+                throw new ArgumentNullException(nameof(sender));
+            }
+            if (tcpSender is RebindableTcpCommandSender stable)
+            {
+                stable.Bind(sender);
+                return stable;
+            }
+            tcpSender = new RebindableTcpCommandSender(sender);
+            return tcpSender;
+        }
+
+        private bool PrepareResumedArena(BattleResumeSnapshot snapshot)
+        {
+            if (gameDatagramEndpoint == null || tcpSender == null ||
+                battleLoad == null || session == null)
+            {
+                return false;
+            }
+            arenaRudpSubscription?.Dispose();
+            arenaRudpSubscription = null;
+            uint nextMovementActionSequence = arenaRuntime == null
+                ? 1
+                : arenaRuntime.Movement.NextActionSequence;
+            udp = new UdpClient(AddressFamily.InterNetwork);
+            udp.Connect(gameDatagramEndpoint);
+            inbound = new RudpInboundPump(
+                udp,
+                gameDatagramEndpoint,
+                session.SessionId,
+                session.SessionGeneration);
+            reliableOutbound = new RudpReliableOutbound(
+                new UdpDatagramSender(udp),
+                inbound);
+            arenaRuntime = new ArenaClientRuntime(
+                tcpSender,
+                reliableOutbound,
+                inbound,
+                battleLoad,
+                session.SessionId,
+                session.SessionGeneration,
+                snapshot.BattleInstanceId,
+                nextMovementActionSequence);
+            arenaBinding = new ArenaInputBinding(
+                arenaRuntime.Movement,
+                arenaRuntime.Movement.ReadModel,
+                arenaRuntime.Combat,
+                arenaRuntime.Loot,
+                arenaRuntime.Presentation,
+                arenaRuntime.Input,
+                session.SessionId);
+            arenaRudpSubscription = router.Subscribe(
+                (IRudpBindCapabilitySink)arenaRuntime.Movement);
+            return true;
+        }
+
+        private bool StartResumedArenaTransport(BattleResumeSnapshot snapshot)
+        {
+            if (arenaRuntime == null || inbound == null || transportLifetime == null ||
+                snapshot == null || snapshot.Phase == BattleResumePhase.Result)
+            {
+                return false;
+            }
+            transportLifetime.StartRudp(inbound);
+            arenaBind = arenaRuntime.RequestTransportAsync(
+                ++nextTransportRequestId,
+                shutdown.Token);
+            return true;
+        }
+
+        private void RetireArenaAfterReconnectFailure()
+        {
+            if (transportLifetime != null)
+            {
+                _ = StopTransportSafelyAsync(transportLifetime);
+            }
+            udp?.Close();
+            tcp?.Close();
+            arenaRudpSubscription?.Dispose();
+            arenaRudpSubscription = null;
+            arenaBinding = null;
+            arenaRuntime = null;
+            reconnectAwaitingRudp = false;
+            battleRecoveryProof = null;
+            battleLoad?.ResetForLobby();
+        }
+
+        private static async Task StopTransportSafelyAsync(
+            PlayerFlowTransportLifetime lifetime)
+        {
+            try
+            {
+                await lifetime.StopAsync();
+            }
+            catch (Exception)
+            {
+                Debug.LogWarning("Player transport shutdown failed safely.");
+            }
+        }
+
         private static void ObserveCompleted(ref Task task)
         {
             if (task == null || !task.IsCompleted)
@@ -363,20 +727,42 @@ namespace LootOfLegends.Bootstrap
             }
             if (task.IsFaulted)
             {
+                _ = task.Exception;
                 Debug.LogWarning("Arena transport request failed safely.");
             }
             task = null;
         }
 
-        private void RemoveArenaSubscription()
+        private sealed class RebindableTcpCommandSender : ITcpCommandSender
         {
-            if (subscriptions.Count == 0 || arenaRuntime == null)
+            private ITcpCommandSender target;
+
+            public RebindableTcpCommandSender(ITcpCommandSender target)
             {
-                return;
+                Bind(target);
             }
-            IDisposable subscription = subscriptions[subscriptions.Count - 1];
-            subscriptions.RemoveAt(subscriptions.Count - 1);
-            subscription.Dispose();
+
+            public void Bind(ITcpCommandSender next)
+            {
+                if (next == null)
+                {
+                    throw new ArgumentNullException(nameof(next));
+                }
+                Volatile.Write(ref target, next);
+            }
+
+            public Task SendAsync(
+                byte[] frame,
+                CancellationToken cancellationToken)
+            {
+                ITcpCommandSender current = Volatile.Read(ref target);
+                if (current == null)
+                {
+                    throw new InvalidOperationException(
+                        "TCP command sender is not bound");
+                }
+                return current.SendAsync(frame, cancellationToken);
+            }
         }
 
         private static async Task<IPAddress> ResolveAddressAsync(
@@ -410,6 +796,20 @@ namespace LootOfLegends.Bootstrap
             }
         }
 
+        private static void ShowBlockingFailure(string copy)
+        {
+            SafeFailureTextView view =
+                UnityEngine.Object.FindFirstObjectByType<SafeFailureTextView>();
+            view?.ShowBlockingMessage(copy);
+        }
+
+        private static void HideBlockingFailure()
+        {
+            SafeFailureTextView view =
+                UnityEngine.Object.FindFirstObjectByType<SafeFailureTextView>();
+            view?.HideBlockingMessage();
+        }
+
         private void OnDestroy()
         {
             if (shutdown == null)
@@ -420,13 +820,15 @@ namespace LootOfLegends.Bootstrap
             shutdown.Cancel();
             if (transportLifetime != null)
             {
-                _ = transportLifetime.StopAsync();
+                _ = StopTransportSafelyAsync(transportLifetime);
             }
             if (battleLoad != null)
             {
                 battleLoad.Changed -= EnsureArenaRuntime;
             }
             presentation?.Dispose();
+            arenaRudpSubscription?.Dispose();
+            arenaRudpSubscription = null;
             for (int index = subscriptions.Count - 1; index >= 0; index--)
             {
                 subscriptions[index].Dispose();
@@ -449,12 +851,51 @@ namespace LootOfLegends.Bootstrap
                 int tcpPort,
                 int udpPort,
                 string evidenceRole)
+                : this(
+                    metaBaseUri,
+                    gameHost,
+                    tcpPort,
+                    udpPort,
+                    evidenceRole,
+                    false,
+                    null)
+            {
+            }
+
+            private ProductConfiguration(
+                Uri metaBaseUri,
+                string gameHost,
+                int tcpPort,
+                int udpPort,
+                string evidenceRole,
+                bool crashContinuityEvidence,
+                MetaSessionIssued developmentMetaSession)
             {
                 MetaBaseUri = metaBaseUri;
                 GameHost = gameHost;
                 TcpPort = tcpPort;
                 UdpPort = udpPort;
                 EvidenceRole = evidenceRole;
+                IsCrashContinuityEvidence = crashContinuityEvidence;
+                DevelopmentMetaSession = developmentMetaSession;
+            }
+
+            private ProductConfiguration(
+                Uri metaBaseUri,
+                string gameHost,
+                int tcpPort,
+                int udpPort,
+                string evidenceRole,
+                MetaSessionIssued developmentMetaSession)
+                : this(
+                    metaBaseUri,
+                    gameHost,
+                    tcpPort,
+                    udpPort,
+                    evidenceRole,
+                    false,
+                    developmentMetaSession)
+            {
             }
 
             public Uri MetaBaseUri { get; }
@@ -462,8 +903,12 @@ namespace LootOfLegends.Bootstrap
             public int TcpPort { get; }
             public int UdpPort { get; }
             public string EvidenceRole { get; }
+            public bool IsCrashContinuityEvidence { get; }
+            public MetaSessionIssued DevelopmentMetaSession { get; }
             public bool IsDevelopmentEvidence =>
                 !string.IsNullOrEmpty(EvidenceRole);
+            public bool IsAutomatedEvidence =>
+                EvidenceRole == "host" || EvidenceRole == "join";
 
             public static bool TryRead(
                 IEnumerable<string> arguments,
@@ -474,23 +919,87 @@ namespace LootOfLegends.Bootstrap
                 string tcp = Value(arguments, "--loot-tcp-port=");
                 string udp = Value(arguments, "--loot-udp-port=");
                 string evidence = Value(arguments, "--loot-e2e-role=");
+                const string crashContinuityFlag =
+                    "--loot-crash-continuity-evidence";
+                bool hasCrashContinuityFlag = arguments.Any(candidate =>
+                    candidate == crashContinuityFlag);
+                bool hasMalformedCrashContinuityFlag = arguments.Any(candidate =>
+                    candidate.StartsWith(
+                        crashContinuityFlag,
+                        StringComparison.Ordinal) &&
+                    candidate != crashContinuityFlag);
+                const string sessionFilePrefix = "--loot-meta-session-file=";
+                bool hasSessionFile = arguments.Any(candidate => candidate.StartsWith(
+                    sessionFilePrefix,
+                    StringComparison.Ordinal));
                 if (!Uri.TryCreate(meta, UriKind.Absolute, out Uri metaBaseUri) ||
                     string.IsNullOrWhiteSpace(host) ||
                     !TryPort(tcp, out int tcpPort) ||
                     !TryPort(udp, out int udpPort) ||
                     (!string.IsNullOrEmpty(evidence) &&
+                     evidence != "host" && evidence != "join" &&
+                     evidence != "manual"))
+                {
+                    configuration = null;
+                    return false;
+                }
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                if (hasMalformedCrashContinuityFlag ||
+                    (hasCrashContinuityFlag &&
                      evidence != "host" && evidence != "join"))
                 {
                     configuration = null;
                     return false;
                 }
+#else
+                if (hasCrashContinuityFlag || hasMalformedCrashContinuityFlag)
+                {
+                    configuration = null;
+                    return false;
+                }
+#endif
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                MetaSessionIssued developmentMetaSession = null;
+                if (hasSessionFile &&
+                    (evidence != "host" && evidence != "join" ||
+                     !IsHttpLoopback(metaBaseUri) ||
+                     !DevelopmentMetaSessionFile.TryRead(
+                         Value(arguments, sessionFilePrefix),
+                         out developmentMetaSession)))
+                {
+                    configuration = null;
+                    return false;
+                }
+#else
+                if (hasSessionFile)
+                {
+                    configuration = null;
+                    return false;
+                }
+#endif
                 configuration = new ProductConfiguration(
                     metaBaseUri,
                     host,
                     tcpPort,
                     udpPort,
-                    evidence);
+                    evidence,
+                    hasCrashContinuityFlag,
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+                    developmentMetaSession);
+#else
+                    null);
+#endif
                 return true;
+            }
+
+            private static bool IsHttpLoopback(Uri uri)
+            {
+                return uri != null && uri.IsAbsoluteUri &&
+                    uri.Scheme == Uri.UriSchemeHttp &&
+                    uri.Host == "127.0.0.1" &&
+                    string.IsNullOrEmpty(uri.UserInfo) &&
+                    string.IsNullOrEmpty(uri.Query) &&
+                    string.IsNullOrEmpty(uri.Fragment);
             }
 
             private static string Value(
@@ -510,4 +1019,388 @@ namespace LootOfLegends.Bootstrap
             }
         }
     }
+
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+    internal static class DevelopmentMetaSessionFile
+    {
+        private const int MaximumBytes = 4096;
+        private const uint RegularFileType = 0x8000;
+        private const uint PermissionMask = 0x0fff;
+        private const uint OwnerReadWrite = 0x0180;
+        private static readonly UTF8Encoding StrictUtf8 =
+            new UTF8Encoding(false, true);
+        private static readonly string[] Rfc3339Formats =
+        {
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'",
+            "yyyy-MM-dd'T'HH:mm:sszzz",
+            "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFzzz"
+        };
+
+        public static bool TryRead(string path, out MetaSessionIssued issued)
+        {
+            issued = null;
+            try
+            {
+                if (!Path.IsPathRooted(path) ||
+                    !TryReadFileMetadata(path, out FileMetadata before) ||
+                    !before.IsSecureRegularFile ||
+                    before.Size <= 0 || before.Size > MaximumBytes)
+                {
+                    return false;
+                }
+
+                byte[] bytes = File.ReadAllBytes(path);
+                if (bytes.Length == 0 || bytes.Length > MaximumBytes ||
+                    !TryReadFileMetadata(path, out FileMetadata after) ||
+                    !before.IsSameFile(after) || !after.IsSecureRegularFile)
+                {
+                    return false;
+                }
+
+                string json = StrictUtf8.GetString(bytes);
+                if (!TryParsePayload(
+                        json,
+                        out string metaSession,
+                        out string expiresAt) ||
+                    !DateTimeOffset.TryParseExact(
+                        expiresAt,
+                        Rfc3339Formats,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal |
+                            DateTimeStyles.AdjustToUniversal,
+                        out DateTimeOffset expiration) ||
+                    expiration <= DateTimeOffset.UtcNow)
+                {
+                    return false;
+                }
+
+                issued = new MetaSessionIssued(metaSession, expiration);
+                return true;
+            }
+            catch (Exception)
+            {
+                issued = null;
+                return false;
+            }
+        }
+
+        private struct FileMetadata
+        {
+            public ulong Device;
+            public ulong Inode;
+            public uint Mode;
+            public uint UserId;
+            public long Size;
+
+            public bool IsSecureRegularFile
+            {
+                get
+                {
+                    return (Mode & 0xf000) == RegularFileType &&
+                        (Mode & PermissionMask) == OwnerReadWrite &&
+                        UserId == CurrentUserId;
+                }
+            }
+
+            public bool IsSameFile(FileMetadata other)
+            {
+                return Device == other.Device && Inode == other.Inode;
+            }
+        }
+
+        private static bool TryReadFileMetadata(
+            string path,
+            out FileMetadata metadata)
+        {
+            metadata = default(FileMetadata);
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            return TryReadDarwinFileMetadata(path, out metadata);
+#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+            return TryReadLinuxFileMetadata(path, out metadata);
+#else
+            return false;
+#endif
+        }
+
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+        private static bool TryReadDarwinFileMetadata(
+            string path,
+            out FileMetadata metadata)
+        {
+            metadata = default(FileMetadata);
+            IntPtr status = IntPtr.Zero;
+            try
+            {
+                status = Marshal.AllocHGlobal(256);
+                if (LStat(path, status) != 0)
+                {
+                    return false;
+                }
+                metadata = new FileMetadata
+                {
+                    Device = unchecked((ulong)(uint)Marshal.ReadInt32(status, 0)),
+                    Inode = unchecked((ulong)Marshal.ReadInt64(status, 8)),
+                    Mode = unchecked((uint)(ushort)Marshal.ReadInt16(status, 4)),
+                    UserId = unchecked((uint)Marshal.ReadInt32(status, 16)),
+                    Size = Marshal.ReadInt64(status, 96)
+                };
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                if (status != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(status);
+                }
+            }
+        }
+#elif UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+        private static bool TryReadLinuxFileMetadata(
+            string path,
+            out FileMetadata metadata)
+        {
+            metadata = default(FileMetadata);
+            IntPtr status = IntPtr.Zero;
+            try
+            {
+                status = Marshal.AllocHGlobal(256);
+                if (LStat(path, status) != 0)
+                {
+                    return false;
+                }
+                metadata = new FileMetadata
+                {
+                    Device = unchecked((ulong)Marshal.ReadInt64(status, 0)),
+                    Inode = unchecked((ulong)Marshal.ReadInt64(status, 8)),
+                    Mode = unchecked((uint)Marshal.ReadInt32(status, 24)),
+                    UserId = unchecked((uint)Marshal.ReadInt32(status, 28)),
+                    Size = Marshal.ReadInt64(status, 48)
+                };
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            finally
+            {
+                if (status != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(status);
+                }
+            }
+        }
+#endif
+
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX || UNITY_EDITOR_LINUX || UNITY_STANDALONE_LINUX
+        private static uint CurrentUserId
+        {
+            get { return Geteuid(); }
+        }
+
+        [DllImport("libc", EntryPoint = "lstat", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int LStat(string path, IntPtr status);
+
+        [DllImport("libc", EntryPoint = "geteuid", CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint Geteuid();
+#else
+        private static uint CurrentUserId
+        {
+            get { return uint.MaxValue; }
+        }
+#endif
+
+        private static bool TryParsePayload(
+            string json,
+            out string metaSession,
+            out string expiresAt)
+        {
+            metaSession = null;
+            expiresAt = null;
+            int index = 0;
+            SkipWhitespace(json, ref index);
+            if (index >= json.Length || json[index++] != '{')
+            {
+                return false;
+            }
+
+            bool metaSeen = false;
+            bool expiresSeen = false;
+            while (true)
+            {
+                SkipWhitespace(json, ref index);
+                if (index >= json.Length || json[index] == '}')
+                {
+                    return false;
+                }
+                if (!TryReadJsonString(json, ref index, out string name))
+                {
+                    return false;
+                }
+                SkipWhitespace(json, ref index);
+                if (index >= json.Length || json[index++] != ':' ||
+                    !TryReadJsonString(json, ref index, out string value))
+                {
+                    return false;
+                }
+                if (name == "metaSession")
+                {
+                    if (metaSeen)
+                    {
+                        return false;
+                    }
+                    metaSeen = true;
+                    metaSession = value;
+                }
+                else if (name == "expiresAt")
+                {
+                    if (expiresSeen)
+                    {
+                        return false;
+                    }
+                    expiresSeen = true;
+                    expiresAt = value;
+                }
+                else
+                {
+                    return false;
+                }
+
+                SkipWhitespace(json, ref index);
+                if (index >= json.Length)
+                {
+                    return false;
+                }
+                if (json[index] == '}')
+                {
+                    index++;
+                    break;
+                }
+                if (json[index++] != ',')
+                {
+                    return false;
+                }
+            }
+
+            SkipWhitespace(json, ref index);
+            return index == json.Length && metaSeen && expiresSeen;
+        }
+
+        private static bool TryReadJsonString(
+            string json,
+            ref int index,
+            out string value)
+        {
+            value = null;
+            if (index >= json.Length || json[index++] != '"')
+            {
+                return false;
+            }
+            var builder = new StringBuilder();
+            while (index < json.Length)
+            {
+                char character = json[index++];
+                if (character == '"')
+                {
+                    value = builder.ToString();
+                    return true;
+                }
+                if (character < 0x20)
+                {
+                    return false;
+                }
+                if (character != '\\')
+                {
+                    builder.Append(character);
+                    continue;
+                }
+                if (index >= json.Length)
+                {
+                    return false;
+                }
+                char escaped = json[index++];
+                switch (escaped)
+                {
+                    case '"':
+                    case '\\':
+                    case '/':
+                        builder.Append(escaped);
+                        break;
+                    case 'b':
+                        builder.Append('\b');
+                        break;
+                    case 'f':
+                        builder.Append('\f');
+                        break;
+                    case 'n':
+                        builder.Append('\n');
+                        break;
+                    case 'r':
+                        builder.Append('\r');
+                        break;
+                    case 't':
+                        builder.Append('\t');
+                        break;
+                    case 'u':
+                        if (index + 4 > json.Length ||
+                            !TryReadHexCharacter(json, ref index, out int code))
+                        {
+                            return false;
+                        }
+                        builder.Append((char)code);
+                        break;
+                    default:
+                        return false;
+                }
+            }
+            return false;
+        }
+
+        private static bool TryReadHexCharacter(
+            string json,
+            ref int index,
+            out int value)
+        {
+            value = 0;
+            for (int offset = 0; offset < 4; offset++)
+            {
+                char character = json[index++];
+                int digit;
+                if (character >= '0' && character <= '9')
+                {
+                    digit = character - '0';
+                }
+                else if (character >= 'a' && character <= 'f')
+                {
+                    digit = character - 'a' + 10;
+                }
+                else if (character >= 'A' && character <= 'F')
+                {
+                    digit = character - 'A' + 10;
+                }
+                else
+                {
+                    return false;
+                }
+                value = (value << 4) | digit;
+            }
+            return true;
+        }
+
+        private static void SkipWhitespace(string json, ref int index)
+        {
+            while (index < json.Length &&
+                   (json[index] == ' ' || json[index] == '\t' ||
+                    json[index] == '\r' || json[index] == '\n'))
+            {
+                index++;
+            }
+        }
+    }
+#endif
 }
