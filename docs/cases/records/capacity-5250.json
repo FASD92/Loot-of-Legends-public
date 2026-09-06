@@ -1,0 +1,60 @@
+{
+  "recordType": "PUBLIC_REPORT_SELECTION",
+  "publishedAt": "2026-09-06",
+  "origin": {
+    "reportName": "official-capacity-v2-5250.md",
+    "reportBlobSha": "0eab2ab1fc188f4f11c50427959e61b98933297e",
+    "reportRevision": "17c6d7fc0996e389fdf025de8a926974f9186b79"
+  },
+  "runId": "candidate-5250p-20260828t092224z-3e703cf",
+  "source": {
+    "game": "3e703cf7b0258804bdf110432db7449b9547a17c",
+    "meta": "65d1e286e63523fa0463da8e7a029a502755d017",
+    "loadgen": "ee5ec95f485ee8c4e8071439047a0581153cbf59",
+    "sourceDirty": false
+  },
+  "profile": {
+    "name": "soak-5250p-3600s@1.0.0",
+    "sha256": "fa2d3d19423a5800d65ece1c96e111258863475a4eb3c497f593977a6206f693",
+    "participantCount": 5250,
+    "roomCount": 525,
+    "participantsPerRoom": 10,
+    "warmupSeconds": 60,
+    "requestedMeasurementSeconds": 3600,
+    "admissionPerSecond": 50,
+    "impairment": false,
+    "capacityClaimEligible": false
+  },
+  "measurement": {
+    "durationSeconds": 3600.02,
+    "completedRooms": 525,
+    "failedRooms": 0,
+    "metricsCoverage": 1.0,
+    "gameCpuMaxRatio": 0.7738,
+    "gameCpuP95Ratio": 0.7574,
+    "roomQueueSampleP99Ms": 5.08,
+    "schedulerSlipP99Ms": 24,
+    "late30MinuteRssSlopeKBPerSecond": 0.14
+  },
+  "originalReceipt": {
+    "evaluationStatus": "INVALID",
+    "packageStatus": "INCOMPLETE",
+    "reasonCodes": [
+      "ATTEMPT_NOT_COMPLETED"
+    ]
+  },
+  "postHocReview": {
+    "policy": "ADR-0016",
+    "evaluationStatus": "PASS",
+    "packageStatus": "COMPLETE"
+  },
+  "scope": {
+    "singleRun": true,
+    "runtimeRetestedForPublication": false,
+    "publicRootCapacityClaim": false,
+    "recoveryEnabledCapacityTest": false,
+    "dbSettlementLoadInclusion": "UNKNOWN",
+    "fullOperationalArchivePublished": false
+  },
+  "samplingNote": "Room queue p99 uses periodically scraped latestQueueDelay samples, not all command latencies."
+}

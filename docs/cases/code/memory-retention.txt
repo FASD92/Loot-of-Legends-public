@@ -1,0 +1,19 @@
+Source file: game-server/modules/game-flow/src/execution/RoomExecutionCell.cpp
+Source revision: 3e703cf7b0258804bdf110432db7449b9547a17c
+Parent revision: 863849d4626b182d34da2e8bea505813ac0cc751
+Scope: exact function and insertion-site statements; surrounding comments omitted.
+The two excerpts are not a standalone translation unit.
+
+[Pruning function]
+void RoomExecutionCell::pruneExpiredRetainedLootLocked(
+    std::chrono::steady_clock::time_point now) {
+  std::erase_if(retainedLootResults_,
+                [now](const battle::RetainedLootResults &retained) {
+                  return retained.expired(now);
+                });
+}
+
+[Before adding the retained result]
+                pruneExpiredRetainedLootLocked(occurredAt);
+                retainedLootResults_.push_back(
+                    std::move(*result.retainedLootResults));

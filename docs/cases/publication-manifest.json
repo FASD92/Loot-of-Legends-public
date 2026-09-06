@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "publishedAt": "2026-09-06",
+  "publicBaseRevision": "f3593396ecf496665b0daa6e360e642f5c44ed19",
+  "scope": "Historical case reports and reviewed excerpts; no product runtime replacement.",
+  "files": [
+    {
+      "path": "docs/cases/README.md",
+      "sha256": "8a4c87109768d06d0daf2a7157948d8f41a50b6591cdc0390f88ac2c44929055"
+    },
+    {
+      "path": "docs/cases/battle-recovery.md",
+      "sha256": "c9ec8eacb4374e24d40ad466eddf51510e3fc8e06fe669f5cf1995a9aa7755c5"
+    },
+    {
+      "path": "docs/cases/capacity-5250.md",
+      "sha256": "b6de83da2de9142c8b6783def10283838b21faba11f6a1823e7af0c099eb42c0"
+    },
+    {
+      "path": "docs/cases/code/memory-retention-test.txt",
+      "sha256": "7abae6f125f28af78576bd9d6d401fe82b8ce92c309fbdb13e85c37623e07924"
+    },
+    {
+      "path": "docs/cases/code/memory-retention.txt",
+      "sha256": "a086cb32c427c80a4f2e8072390b6039d5aaa520d3676b2295916102fd3ff914"
+    },
+    {
+      "path": "docs/cases/code/receive-budget.txt",
+      "sha256": "cceea62234490e1115a21845be2a5f021944baf4bb08a05426836fdf89286369"
+    },
+    {
+      "path": "docs/cases/memory-retention.md",
+      "sha256": "8804279be32a1b7b0c0d6ccb87b507f294dfdecc4b315df57731e7ce7f348dc7"
+    },
+    {
+      "path": "docs/cases/receive-budget.md",
+      "sha256": "831566565c3f87187878d0ed53797fa03b357823c8a25f0c51c4c05e354763b6"
+    },
+    {
+      "path": "docs/cases/records/capacity-5250.json",
+      "sha256": "837a042d6765363f847d5feb85b831baac131758dc71e722c1c9aa0525e12a0c"
+    },
+    {
+      "path": "docs/cases/records/receive-comparison.json",
+      "sha256": "343c742afba9506a7c32423d7c25f44b0c1a3f997a86c07b222a2e4ae1896251"
+    },
+    {
+      "path": "docs/cases/records/recovery-db.json",
+      "sha256": "d4d111ddca1bd0d9eb2dcee988231314676cfe29ad1601277067d4fa28ae86b4"
+    }
+  ]
+}

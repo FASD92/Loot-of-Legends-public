@@ -1,85 +1,73 @@
-# Loot of Legends — Evidence-first Game Server Portfolio
+# Loot of Legends
 
-> C++20 server-authoritative multiplayer game server: non-blocking TCP/UDP,
-> Linux `epoll`, per-room single-writer concurrency, Custom RUDP, durable
-> settlement, and a reproducible load-validation harness.
+C++ 게임 서버가 전투와 루팅을 판정하는 멀티플레이 게임입니다. Spring 메타 서버는 정산을 받아 MySQL 자산에 반영합니다. 1인 개발 프로젝트이며 AI 에이전트가 구현에 참여했습니다.
 
-이 저장소는 채용 검토용으로 선별한 public evidence mirror다. 검증 기준은 이 저장소의
-Git-tracked tree이며, 운영 설정·raw evidence·secret은 포함하지 않는다.
+[플레이 시연](https://www.youtube.com/watch?v=rjpUEDnBJJg)
 
-## Problem
+## 개발 사례
 
-- 같은 Room 상태는 한 번에 한 worker만 변경해야 하지만, 서로 다른 Room은 병렬 실행되어야 한다.
-- UDP gameplay에서 movement snapshot과 terminal combat/loot 결과는 서로 다른 신뢰성 정책이 필요하다.
-- 패킷·명령·정산 재시도는 허용하되 damage·loot owner·asset을 중복 적용하면 안 된다.
+| 문제와 검증 | 확인한 결과 | 자료 |
+| --- | --- | --- |
+| 5,000세션 수신 병목 | 수신 상한 변경 후 실패 Room 240개에서 0개 | [변경 코드와 전후 기록](docs/cases/receive-budget.md) |
+| 반복 전투의 메모리 누적 | 결과 삽입 전에 만료 정리를 호출 | [정리 코드와 회귀 테스트](docs/cases/memory-retention.md) |
+| 5,250세션 60분 실행 | 525개 Room 완주와 실패 0개 | [실행 조건과 판정 기록](docs/cases/capacity-5250.md) |
+| 프로세스 강제 종료 | 클라이언트 2개가 전투에 복귀한 뒤 자산 대조 | [복구 관측과 DB 조회](docs/cases/battle-recovery.md) |
 
-## Architecture
+각 수치는 문서에 표시한 당시 실행 버전의 결과입니다. 5,250세션 부하와 전투 복구는 서로 다른 버전과 환경에서 확인했습니다.
+
+**공개 상태:** 후속 사례의 선별 기록과 코드 발췌를 추가했습니다. 루트의 실행 코드는 2026-08-13 공개 기준을 유지합니다. 최신 제품 코드 전체의 공개 동기화는 아직 완료하지 않았습니다. [공개 파일 목록과 범위](docs/cases/README.md)를 함께 확인해 주세요.
+
+## 서버 구조
 
 ```text
 Unity Client
-        ↓
-non-blocking TCP/UDP sockets → Linux EpollReactor
-├─ TCP control → authentication / lobby / battle load / final result
-└─ UDP datagram → RUDP binding / ACK bitmap / bounded retransmission
-                         ↓
-                movement / combat / loot
-                         ↓
-        RoomCommandGateway → RoomExecutionCell → BattleInstance
-                               single writer       server authority
-                         ↓
-        durable journal → publisher → Spring/MySQL inbox → assets
+    |
+TCP/UDP 수신
+    |
+RoomCommandGateway
+    |
+RoomExecutionCell ---- 같은 Room의 상태는 한 worker만 변경
+    |
+BattleInstance ------- 이동과 전투 및 루팅 판정
+    |
+정산 기록 -> publisher -> Spring/MySQL inbox -> 자산 반영
 ```
 
-## What I built
+서로 다른 Room은 병렬로 실행합니다. RUDP 전송 확인과 게임 명령의 중복 처리 방지는 별도로 다룹니다. [구조 설명](docs/architecture.md)
 
-- C++20 non-blocking TCP/UDP composition root와 Linux `epoll` event reactor
-- sequence, `ack`, `ackBits`, CRC, bounded retry/expiry를 갖춘 Custom RUDP
-- 같은 Room은 직렬화하고 다른 Room은 병렬 실행하는 `RoomExecutionCell`
-- 이동·공격·루팅 결과를 서버에서 결정하는 authoritative battle domain
-- 실행 판정과 evidence package 완결성을 독립 상태로 남기는 load validation harness
-- 동일 settlement ID 재전송과 payload hash conflict를 구분하는 Spring/MySQL inbox
+## 실행 가능한 공개 코드
 
-## Evidence — 직접 해결한 어려운 문제
-
-| 문제 | 구현 근거 | 회귀 근거 |
+| 역할 | 코드 | 테스트 |
 | --- | --- | --- |
-| C++20에서 TCP/UDP를 non-blocking event loop로 연결 | [`CMakeLists.txt`](CMakeLists.txt), [`ConfiguredGameServer.cpp`](game-server/app/composition-root/ConfiguredGameServer.cpp), [`EpollReactor.cpp`](game-server/platform/runtime-linux/src/EpollReactor.cpp) | [`TcpTransportTests.cpp`](tests/integration/session/TcpTransportTests.cpp), [`RuntimeLinuxReadinessTests.cpp`](tests/runtime-linux/RuntimeLinuxReadinessTests.cpp), [`ServerEntryTests.cpp`](tests/integration/server-entry/ServerEntryTests.cpp) |
-| 같은 Room은 single-writer, 다른 Room은 병렬 | [`RoomExecutionCell.cpp`](game-server/modules/game-flow/src/execution/RoomExecutionCell.cpp), [`WorkerPool.cpp`](game-server/platform/runtime/src/WorkerPool.cpp) | [`RoomExecutionCellTests.cpp`](game-server/modules/game-flow/tests/RoomExecutionCellTests.cpp), [`RoomGatewayRaceTests.cpp`](tests/integration/lobby-room/RoomGatewayRaceTests.cpp) |
-| UDP 손실·중복과 gameplay 중복 적용을 분리 | [`RudpHeader.cpp`](game-server/platform/transport-rudp/src/RudpHeader.cpp), [`ReliableQueue.cpp`](game-server/platform/transport-rudp/src/ReliableQueue.cpp), [`AttackResultStore.cpp`](game-server/modules/battle/src/application/AttackResultStore.cpp) | [`RudpDeliveryTests.cpp`](tests/transport-rudp/RudpDeliveryTests.cpp), [`CombatFlowTests.cpp`](tests/integration/combat/CombatFlowTests.cpp) |
-| client intent만 받고 위치·damage·loot owner는 서버가 결정 | [`BattleInstance.cpp`](game-server/modules/battle/src/domain/BattleInstance.cpp), [`LootHandler.cpp`](game-server/modules/battle/src/application/LootHandler.cpp) | [`MovementTests.cpp`](tests/integration/movement/MovementTests.cpp), [`CombatOutcomeTests.cpp`](tests/integration/combat/CombatOutcomeTests.cpp), [`LootClaimTests.cpp`](game-server/modules/battle/tests/LootClaimTests.cpp) |
-| 응답 유실·재시도에도 asset을 한 번만 반영 | [`SettlementApplication.java`](meta-server/src/main/java/com/fasd92/lootoflegends/meta/settlement/application/SettlementApplication.java), [`JdbcSettlementInbox.java`](meta-server/src/main/java/com/fasd92/lootoflegends/meta/platform/mysql/JdbcSettlementInbox.java) | [`SettlementPublisherTests.cpp`](tests/integration/settlement/SettlementPublisherTests.cpp), [`SettlementAcceptanceTest.java`](meta-server/src/test/java/com/fasd92/lootoflegends/meta/settlement/SettlementAcceptanceTest.java) |
-| 실행 결과와 evidence package 완결성을 한 상태로 뭉개지 않기 | [`runtime.py`](tools/load/loot_load/runner/runtime.py), [`classifier.py`](tools/load/loot_load/closeout/classifier.py), [`package.py`](tools/load/loot_load/evidence/package.py) | [`test_runner_runtime.py`](tools/load/tests/test_runner_runtime.py), [`test_closeout_classifier.py`](tools/load/tests/test_closeout_classifier.py), [`test_package_closeout.py`](tools/load/tests/test_package_closeout.py) |
+| TCP/UDP 런타임 | [ConfiguredGameServer](game-server/app/composition-root/ConfiguredGameServer.cpp) | [서버 진입 경로](tests/integration/server-entry/ServerEntryTests.cpp) |
+| Room별 상태 변경 | [RoomExecutionCell](game-server/modules/game-flow/src/execution/RoomExecutionCell.cpp) | [Room 테스트](game-server/modules/game-flow/tests/RoomExecutionCellTests.cpp) |
+| RUDP 재전송 | [ReliableQueue](game-server/platform/transport-rudp/src/ReliableQueue.cpp) | [전송 테스트](tests/transport-rudp/RudpDeliveryTests.cpp) |
+| 전투와 루팅 | [BattleInstance](game-server/modules/battle/src/domain/BattleInstance.cpp) | [루팅 테스트](game-server/modules/battle/tests/LootClaimTests.cpp) |
+| 정산 수락 | [JdbcSettlementInbox](meta-server/src/main/java/com/fasd92/lootoflegends/meta/platform/mysql/JdbcSettlementInbox.java) | [정산 테스트](meta-server/src/test/java/com/fasd92/lootoflegends/meta/settlement/SettlementAcceptanceTest.java) |
 
-Custom RUDP의 transport ACK와 application `CommandId` 멱등성은 별도 계층이다.
-Movement는 newest-only이고, attack/loot은 재정렬된 고유 command를 허용한다.
-**ordered delivery나 exactly-once network delivery를 주장하지 않는다.**
+## 기존 공개 코드의 검증
 
-## Measured results
-
-2026-08-13에 이 public branch에서 다시 실행한 결과다.
+아래는 2026-08-13에 기록한 결과입니다. 후속 사례의 실험이나 이번 공개 업데이트에서 새로 실행한 결과와 구분합니다.
 
 <!-- portfolio-test-count: ctest=46 load-unittest=47 -->
 
-| 검증 | 결과 | 의미 |
-| --- | --- | --- |
-| Architecture contract | **PASS** | CMake target graph와 module include policy, 0 findings |
-| C++ configure/build + CTest | **46/46 PASS** | tracked CTest 등록 전체의 local 실행 |
-| Linux public CI | **PASS** | Ubuntu CMake/build/CTest에서 Linux `epoll` 경로 검증 |
-| Load harness unit/contract | **47/47 PASS** | runner, workload, classifier, sanitizer, package 검증 |
-| Local boundary fixture | **COMPLETE** | 실제 game-server에 10명·1 Room·2 loot cycle; `NOT_CLASSIFIED` |
-| Meta locked Gradle check | **BUILD SUCCESSFUL** | Java 21 + MySQL/Redis Testcontainers |
-| Official capacity | **NOT PROVEN** | qualifying 공개 run이 없어 동시접속·TPS·p95/p99 수치를 주장하지 않음 |
+| 검증 | 당시 결과 |
+| --- | --- |
+| C++ CTest | 46/46 PASS |
+| Load 도구 단위 테스트 | 47/47 PASS |
+| Linux 공개 CI | PASS |
+| Meta Gradle check | BUILD SUCCESSFUL |
+| 실제 서버를 사용한 10-player fixture | COMPLETE / NOT_CLASSIFIED |
 
-실행 환경과 미실행 항목은 [verification report](docs/verification.md), 공개 근거의 한계는
-[public evidence limitations](docs/public-evidence-limitations.md)에 분리했다.
+[검증 환경과 명령](docs/verification.md)에서 원래 기록을 확인할 수 있습니다. 공개 루트의 동시접속 수용량은 별도로 입증하지 않았습니다. [후속 5,250세션 실행](docs/cases/capacity-5250.md)은 당시 진단본의 결과입니다.
 
-## How to verify
+## 직접 검사하기
 
-필수 도구: CMake 3.28+, Ninja, C++20 compiler, libcurl/OpenSSL, Python 3.12+.
-Meta 검증에는 Java 21과 실행 중인 Docker가 추가로 필요하다.
+CMake 3.28 이상과 Ninja 및 C++20 컴파일러가 필요합니다. Python은 3.12 이상을 사용합니다. C++ 빌드에는 libcurl과 OpenSSL이 필요합니다. Meta 검증에는 Java 21과 Docker가 추가로 필요합니다.
 
 ```bash
 python3 -m unittest scripts/public/test_verify_portfolio_claims.py -v
+python3 -m unittest scripts/public/test_case_records.py -v
 python3 scripts/public/verify_portfolio_claims.py
 
 cmake --preset dev-debug
@@ -92,11 +80,4 @@ cd meta-server
 ./gradlew --no-daemon --dependency-verification strict clean check
 ```
 
-실제 game-server TCP/UDP/RUDP 경계를 통과하는 비정량 10-player fixture는
-[`tools/load/README.md`](tools/load/README.md)에 있다. `fixtureOnly=true`인 기능 검증이며
-capacity claim에는 사용할 수 없다.
-
-더 읽기: [architecture](docs/architecture.md) ·
-[adversarial recruiter audit](docs/recruiter-audit.md) ·
-[verification](docs/verification.md) ·
-[limitations](docs/public-evidence-limitations.md)
+공개 사례 검사는 파일 해시와 기록의 일관성을 확인합니다. 과거 부하나 Unity 복구를 재실행하지 않습니다. [공개 범위와 남은 검증](docs/public-evidence-limitations.md)

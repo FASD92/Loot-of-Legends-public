@@ -1,0 +1,104 @@
+{
+  "recordType": "PUBLIC_SANITIZED_DB_SELECTION",
+  "publishedAt": "2026-09-06",
+  "origin": {
+    "recordName": "slice-13-external-db-readback-ee4654d.json",
+    "recordBlobSha": "f6cb1b6ace08cb8d52090c55a01b756987a26e28",
+    "recordRevision": "17c6d7fc0996e389fdf025de8a926974f9186b79",
+    "originalRecordSha256": "ce3ae95d73d0bc6f600c53d27d8ec7ff58412008fdafcdcac1d2517b70096aac"
+  },
+  "run": {
+    "runId": "continuity-formal-ee4654d-20260902-r4",
+    "sourceRevision": "ee4654daf5611b93b7a80b62d16d3f06018da97e",
+    "sourceDirty": false,
+    "serverSha256": "57f661e569ed35b51d194f296a3bf29b02ac3457d2ec4a3e22ba6ea3523749d2",
+    "playerSha256": "649368bb1d9d6eea5fa4e2be6d2f7f7ecf59f07c62fdb2058e0243cd8e5c79ef",
+    "serverConfigSha256": "536bc4cd9de50f5cc66eb6397b96cb41416e2b07e511508d49b28cb865f32b3c",
+    "metaServerSha256": "bbc0f1eff5a513c5bcbdebedff6ff741b3ada6572f8d130bcce27fa6de64074f"
+  },
+  "database": {
+    "engine": "MySQL 8.4",
+    "migrationVersion": "v002"
+  },
+  "observations": [
+    {
+      "phase": "AFTER_COLLECTION_APPLIED",
+      "settlement": {
+        "total": 2,
+        "applied": 2,
+        "pending": 0
+      },
+      "inventory": {
+        "rows": 2,
+        "quantity": 2
+      },
+      "wallet": {
+        "rows": 2,
+        "balance": 400
+      }
+    },
+    {
+      "phase": "AFTER_TERMINAL_RESTART_EPOCH_3",
+      "settlement": {
+        "total": 2,
+        "applied": 2,
+        "pending": 0
+      },
+      "inventory": {
+        "rows": 2,
+        "quantity": 2
+      },
+      "wallet": {
+        "rows": 2,
+        "balance": 400
+      }
+    },
+    {
+      "phase": "BEFORE_TERMINAL_RESTART_EPOCH_4",
+      "settlement": {
+        "total": 2,
+        "applied": 2,
+        "pending": 0
+      },
+      "inventory": {
+        "rows": 2,
+        "quantity": 2
+      },
+      "wallet": {
+        "rows": 2,
+        "balance": 400
+      }
+    },
+    {
+      "phase": "AFTER_TERMINAL_RESTART_EPOCH_4_AND_5S_PUBLISH_WINDOW",
+      "settlement": {
+        "total": 2,
+        "applied": 2,
+        "pending": 0
+      },
+      "inventory": {
+        "rows": 2,
+        "quantity": 2
+      },
+      "wallet": {
+        "rows": 2,
+        "balance": 400
+      }
+    }
+  ],
+  "deltaAfterTerminalRestarts": {
+    "settlementTotal": 0,
+    "settlementApplied": 0,
+    "inventoryRows": 0,
+    "inventoryQuantity": 0,
+    "walletRows": 0,
+    "walletBalance": 0
+  },
+  "scope": {
+    "sameHost": true,
+    "actualClientCount": 2,
+    "retestedForPublication": false,
+    "runtimeIntegratedInPublicRoot": false
+  },
+  "selectionNote": "Copied aggregate observations and source identifiers. Original operational logs, endpoint addresses, credentials and player identifiers are not included."
+}

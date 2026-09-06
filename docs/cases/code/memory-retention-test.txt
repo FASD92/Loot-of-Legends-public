@@ -1,0 +1,84 @@
+Source file: game-server/modules/game-flow/tests/RoomExecutionCellTests.cpp
+Source revision: 3e703cf7b0258804bdf110432db7449b9547a17c
+Function: retainedLootStaysBoundedAcrossBattles
+Scope: complete function copied from the commit patch, excluding surrounding prose.
+Not a standalone test executable. Its fixtures are not part of this excerpt.
+
+bool retainedLootStaysBoundedAcrossBattles() {
+  ManualDeadlineScheduler deadlines;
+  WorkerPool pool{WorkerPoolConfig{.threadCount = 1, .queueCapacity = 64}};
+  AlwaysReadyReadiness readiness;
+  SettlementCapacityGate gate;
+  markStorageHealthy(gate);
+  ManualSettlementStorage storage;
+  OutcomeCollector collector;
+  auto cell = makeDurableCell(pool, deadlines, readiness, gate, storage,
+                              makeRoomWithMember(206, true), collector);
+  if (!cell || !startGameplay(*cell, collector, 206)) {
+    return false;
+  }
+
+  const auto firstCompletedAt =
+      std::chrono::steady_clock::time_point{std::chrono::hours{5}};
+  const auto completeBattle = [&](std::uint64_t battleId,
+                                  std::chrono::steady_clock::time_point at) {
+    if (!isAccepted(cell->enqueueControl(RoomControlEnvelope{
+            .command = RoomControlCommand{lol::battle::CombatDeadlineCommand{
+                BattleInstanceId{battleId}}},
+            .occurredAt = at,
+        })) ||
+        !cell->waitUntilIdle(2s)) {
+      return false;
+    }
+    collector.take();
+    const auto batch = cell->settlementBatch();
+    if (!batch.has_value() || batch->battleId() != BattleInstanceId{battleId}) {
+      return false;
+    }
+    if (!isAccepted(cell->enqueueControl(RoomControlEnvelope{
+            .command = RoomControlCommand{DurableAppendCompleted{
+                .batchId = batch->id(),
+                .roomId = RoomId{206},
+                .battleId = BattleInstanceId{battleId},
+                .commitSequence = 3u,
+            }},
+            .occurredAt = at + 1ms,
+        })) ||
+        !cell->waitUntilIdle(2s)) {
+      return false;
+    }
+    const auto completed = collector.take();
+    return completed.size() == 1u && completed.front().settlementDurable &&
+           cell->lifecycle() == RoomLifecycle::Open;
+  };
+
+  if (!completeBattle(1u, firstCompletedAt) ||
+      cell->metrics().retainedLootResultDepth != 1u) {
+    return false;
+  }
+
+  // Reopening clears ready, so the next battle has to be armed again. The second
+  // battle is the next ordinal, and its load completion has to name it.
+  if (!isAccepted(cell->enqueue(ready(20, 206, true))) ||
+      !isAccepted(cell->enqueue(ready(21, 207, true))) ||
+      !isAccepted(cell->enqueue(hostStart(22, 206))) ||
+      !cell->waitUntilIdle(2s) ||
+      !isAccepted(cell->enqueue(loadComplete(23, 206, 206, 2u))) ||
+      !isAccepted(cell->enqueue(loadComplete(24, 207, 206, 2u))) ||
+      !cell->waitUntilIdle(2s)) {
+    return false;
+  }
+  const auto rearmed = collector.take();
+  if (rearmed.empty() || !rearmed.back().gameplayStartCommitted ||
+      cell->lifecycle() != RoomLifecycle::InProgress) {
+    return false;
+  }
+
+  // One millisecond past the first entry's window. Its retention has lapsed, so
+  // adding the second must leave the depth where it was.
+  const auto secondCompletedAt =
+      firstCompletedAt +
+      lol::battle::LootResultStore::retentionAfterBattleCompleted;
+  return completeBattle(2u, secondCompletedAt) &&
+         cell->metrics().retainedLootResultDepth == 1u;
+}

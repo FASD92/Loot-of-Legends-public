@@ -1,0 +1,13 @@
+Source file: game-server/app/composition-root/ConfiguredGameServer.cpp
+Before source: ec1846c0157075b0212a634c55df33c48b3d737f
+After source: 0ecf1cd10e5aa42ecd175b3ddb6535d29d5585f7
+Scope: exact changed declarations; surrounding comments omitted.
+Not a standalone translation unit or a patch for the current public tree.
+
+Before:
+constexpr std::size_t kMaximumDatagramsPerTurn = 1024u;
+constexpr auto kIngressReceiveBudget = 2ms;
+
+After:
+constexpr std::size_t kMaximumDatagramsPerTurn = 4096u;
+constexpr auto kIngressReceiveBudget = 8ms;
