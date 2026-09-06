@@ -33,21 +33,11 @@ C++ 게임 서버가 이동과 전투 및 루팅을 판정하는 멀티플레이
 
 ## 서버 구조
 
-```text
-Unity Client
-    |
-TCP/UDP 수신
-    |
-RoomCommandGateway
-    |
-RoomExecutionCell ---- 같은 Room의 상태는 한 worker만 변경
-    |
-BattleInstance ------- 이동과 전투 및 루팅 판정
-    |
-전투 기록 -> 복구 -> 정산 기록 -> Spring/MySQL 자산 반영
-```
+![Loot of Legends 서버 아키텍처](docs/diagrams/server-architecture.png)
 
 서로 다른 Room은 병렬로 실행합니다. RUDP 전송 확인과 게임 명령의 중복 처리는 별도 계층입니다. [구조 설명](docs/architecture.md)
+
+그림에는 공개 코드로 확인되는 명령 처리, 같은 host 전투 복구, Spring/MySQL 정산 경로만 담았습니다. 저장소를 내려받은 뒤 [탐색형 HTML](docs/diagrams/server-architecture.html)을 브라우저에서 열면 세 경로를 분리해서 보고 각 노드의 근거 코드로 이동할 수 있습니다.
 
 ## 공개본 검증
 
