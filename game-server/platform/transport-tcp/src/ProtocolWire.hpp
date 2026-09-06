@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -27,6 +28,10 @@ public:
     uint8(static_cast<std::uint8_t>((value >> 16U) & 0xffU));
     uint8(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
     uint8(static_cast<std::uint8_t>(value & 0xffU));
+  }
+
+  void int32(std::int32_t value) {
+    uint32(std::bit_cast<std::uint32_t>(value));
   }
 
   void uint64(std::uint64_t value) {
@@ -85,6 +90,13 @@ public:
       value = (value << 8U) | *byte;
     }
     return value;
+  }
+
+  [[nodiscard]] std::optional<std::int32_t> int32() noexcept {
+    const auto value = uint32();
+    return value.has_value()
+               ? std::optional{std::bit_cast<std::int32_t>(*value)}
+               : std::nullopt;
   }
 
   [[nodiscard]] std::optional<std::uint64_t> uint64() noexcept {

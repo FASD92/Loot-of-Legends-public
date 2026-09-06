@@ -92,7 +92,7 @@ toWire(const lobby_room::RoomDetailProjection &detail) {
 }
 
 std::optional<transport::tcp::FinalResult>
-toWire(const battle::BattleFinalResult &result) {
+toWireFinalResult(const battle::BattleFinalResult &result) {
   transport::tcp::FinalResultOutcome outcome;
   switch (result.outcome) {
   case battle::BattleOutcome::MonsterDefeated:
@@ -239,7 +239,7 @@ LobbyRoomFlow::encode(const game_flow::LobbyRoomOutboundIntent &intent) {
   }
   if (const auto *result =
           std::get_if<battle::BattleFinalResult>(&intent.message)) {
-    const auto wire = toWire(*result);
+    const auto wire = toWireFinalResult(*result);
     if (!wire.has_value()) {
       return std::nullopt;
     }
@@ -266,6 +266,11 @@ LobbyRoomFlow::encode(const game_flow::LobbyRoomOutboundIntent &intent) {
       .audience = intent.audience,
       .frame = std::move(*frame),
   };
+}
+
+std::optional<transport::tcp::FinalResult>
+LobbyRoomFlow::encodeFinalResult(const battle::BattleFinalResult &result) {
+  return toWireFinalResult(result);
 }
 
 } // namespace lol::app

@@ -1,0 +1,146 @@
+{
+  "contractId": "LOL-V2-BATTLE-RESUME-V1",
+  "status": "Accepted",
+  "contractVersion": "1.0.0",
+  "syntheticOnly": true,
+  "protocolMajor": 1,
+  "byteOrder": "big-endian",
+  "tcpWire": {
+    "frame": {
+      "lengthPrefixType": "uint32",
+      "lengthValue": "payload-bytes"
+    },
+    "envelope": [
+      { "name": "protocolMajor", "type": "uint8", "value": 1 },
+      { "name": "messageId", "type": "uint32" }
+    ],
+    "messages": {
+      "BattleResumeSnapshot": {
+        "messageId": 39,
+        "direction": "SERVER_TO_CLIENT",
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "snapshotId", "type": "uint64", "minimum": 1 },
+          { "name": "roomId", "type": "uint64", "minimum": 1 },
+          { "name": "battleInstanceId", "type": "uint64", "minimum": 1 },
+          { "name": "playerSessionId", "type": "uint64", "minimum": 1 },
+          { "name": "sessionGeneration", "type": "uint64", "minimum": 1 },
+          { "name": "phase", "type": "uint8", "allowed": [1, 2, 3] },
+          { "name": "remainingMillis", "type": "uint32" },
+          { "name": "serverTick", "type": "uint32" },
+          { "name": "playerCount", "type": "uint16", "minimum": 2, "maximum": 10 },
+          {
+            "name": "players",
+            "type": "array",
+            "countFrom": "playerCount",
+            "itemFields": [
+              { "name": "sessionId", "type": "uint64", "minimum": 1 },
+              { "name": "positionXMillimeters", "type": "int32" },
+              { "name": "positionYMillimeters", "type": "int32" },
+              { "name": "healthKnown", "type": "uint8", "allowed": [0, 1] },
+              { "name": "hitPoints", "type": "uint32" },
+              { "name": "maximumHitPoints", "type": "uint32" },
+              { "name": "alive", "type": "uint8", "allowed": [0, 1] }
+            ]
+          },
+          { "name": "hasMonster", "type": "uint8", "allowed": [0, 1] },
+          { "name": "monster", "type": "object", "presentWhen": "hasMonster=1" },
+          { "name": "dropCount", "type": "uint16", "maximum": 10 },
+          { "name": "drops", "type": "array", "countFrom": "dropCount" },
+          { "name": "score", "type": "uint64" },
+          { "name": "resultPresent", "type": "uint8", "allowed": [0, 1] },
+          { "name": "result", "type": "object", "presentWhen": "resultPresent=1" }
+        ],
+        "phaseCodes": {
+          "COMBAT": 1,
+          "LOOT": 2,
+          "RESULT": 3
+        },
+        "lootStateCodes": {
+          "UNCLAIMED": 0,
+          "CLAIMED": 1,
+          "EXPIRED": 2
+        }
+      },
+      "ResumeBattleSession": {
+        "messageId": 40,
+        "direction": "CLIENT_TO_SERVER",
+        "preAuth": true,
+        "fields": [
+          { "name": "requestId", "type": "uint64", "minimum": 1 },
+          { "name": "previousSessionId", "type": "uint64", "minimum": 1 },
+          { "name": "previousSessionGeneration", "type": "uint64", "minimum": 1 },
+          { "name": "credentialLength", "type": "uint16", "value": 43 },
+          {
+            "name": "credential",
+            "type": "ascii",
+            "lengthFrom": "credentialLength",
+            "encoding": "base64url-without-padding",
+            "redactedInLogs": true
+          }
+        ],
+        "identityRule": "credential-proven-account-only; previous session fields are lookup hints, not authority"
+      },
+      "BattleResumeSnapshotApplied": {
+        "messageId": 41,
+        "direction": "CLIENT_TO_SERVER",
+        "fields": [
+          { "name": "snapshotId", "type": "uint64", "minimum": 1 }
+        ]
+      }
+    }
+  },
+  "authenticationRejectedReasonCodes": {
+    "RESUME_UNAVAILABLE": 7
+  },
+  "tcpGoldenVectors": [
+    {
+      "name": "resume-request-1",
+      "semanticName": "ResumeBattleSession",
+      "values": {
+        "protocolMajor": 1,
+        "requestId": 7,
+        "previousSessionId": 2,
+        "previousSessionGeneration": 3,
+        "credential": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "frameHex": "0000004a0100000028000000000000000700000000000000020000000000000003002b41414141414141414141414141414141414141414141414141414141414141414141414141414141414141"
+    },
+    {
+      "name": "resume-snapshot-running-1",
+      "semanticName": "BattleResumeSnapshot",
+      "values": {
+        "protocolMajor": 1,
+        "requestId": 7,
+        "snapshotId": 11,
+        "roomId": 5,
+        "battleInstanceId": 9,
+        "playerSessionId": 2,
+        "sessionGeneration": 3,
+        "phase": "COMBAT",
+        "remainingMillis": 12345,
+        "serverTick": 99,
+        "players": [
+          { "sessionId": 2, "position": { "x": -100, "y": 200 }, "healthKnown": 0, "alive": 1 },
+          { "sessionId": 4, "position": { "x": 300, "y": -400 }, "healthKnown": 0, "alive": 1 }
+        ],
+        "monster": { "monsterId": 1, "position": { "x": 0, "y": 0 }, "hitPoints": 1200, "maximumHitPoints": 1600, "state": 0 },
+        "drops": [
+          { "dropId": 1, "itemId": 2, "quantity": 1, "position": { "x": 10, "y": 20 }, "state": "UNCLAIMED", "ownerSessionId": 0 }
+        ],
+        "score": 0,
+        "resultPresent": 0
+      },
+      "frameHex": "000000c201000000270000000000000007000000000000000b000000000000000500000000000000090000000000000002000000000000000301000030390000006300020000000000000002ffffff9c000000c80000000000000000000100000000000000040000012cfffffe70000000000000000000010100000000000000010000000000000000000004b0000006400000010000000000000001000000000000000200000000000000010000000a00000014000000000000000000000000000000000000"
+    },
+    {
+      "name": "resume-snapshot-applied-1",
+      "semanticName": "BattleResumeSnapshotApplied",
+      "values": {
+        "protocolMajor": 1,
+        "snapshotId": 11
+      },
+      "frameHex": "0000000d0100000029000000000000000b"
+    }
+  ]
+}

@@ -51,4 +51,10 @@ if(BUILD_TESTING)
   target_link_libraries(battle_final_result_tests PRIVATE lol_battle)
   loot_apply_compile_policy(battle_final_result_tests)
   add_test(NAME battle_final_result COMMAND battle_final_result_tests)
+
+  add_executable(battle_deterministic_state_tests
+    tests/BattleDeterministicStateTests.cpp)
+  target_link_libraries(battle_deterministic_state_tests PRIVATE lol_battle)
+  loot_apply_compile_policy(battle_deterministic_state_tests)
+  add_test(NAME battle_deterministic_state COMMAND battle_deterministic_state_tests)
 endif()

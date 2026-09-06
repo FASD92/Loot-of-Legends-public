@@ -2,7 +2,7 @@
   "schema_version": 1,
   "contract_id": "ARCH-TARGET-GRAPH-001",
   "status": "Accepted",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "first_party_target_prefix": "lol_",
   "activation_policy": "A planned target may exist in CMake only after it has first-party source and a real consumer or composition role.",
   "toolchain": {
@@ -19,6 +19,9 @@
     "lol_session",
     "lol_lobby_room",
     "lol_battle",
+    "lol_battle_continuity",
+    "lol_battle_continuity_storage",
+    "lol_battle_replay",
     "lol_settlement",
     "lol_game_flow",
     "lol_runtime",
@@ -41,6 +44,20 @@
     "lol_battle": [
       "lol_shared_kernel"
     ],
+    "lol_battle_continuity": [
+      "lol_shared_kernel",
+      "lol_battle"
+    ],
+    "lol_battle_continuity_storage": [
+      "lol_battle_continuity",
+      "lol_battle",
+      "lol_shared_kernel"
+    ],
+    "lol_battle_replay": [
+      "lol_battle",
+      "lol_battle_continuity",
+      "lol_shared_kernel"
+    ],
     "lol_settlement": [
       "lol_shared_kernel"
     ],
@@ -49,6 +66,7 @@
       "lol_session",
       "lol_lobby_room",
       "lol_battle",
+      "lol_battle_continuity",
       "lol_settlement",
       "lol_runtime"
     ],
@@ -80,6 +98,7 @@
       "lol_session",
       "lol_lobby_room",
       "lol_battle",
+      "lol_battle_continuity",
       "lol_settlement",
       "lol_game_flow",
       "lol_runtime"
@@ -89,6 +108,8 @@
       "lol_session",
       "lol_lobby_room",
       "lol_battle",
+      "lol_battle_continuity",
+      "lol_battle_continuity_storage",
       "lol_settlement",
       "lol_game_flow",
       "lol_runtime",

@@ -13,7 +13,7 @@
 | architecture | 문서상 queue → dispatcher → actor였지만 기존 dispatcher가 per-room queue를 소유했고, 현재 runtime과도 다른 세대 | Misleading | composition root → gateway → Cell → battle → settlement 실제 연결로 교체 |
 | RUDP | “순서 보장” 표현 | Unproven for current tree | ACK bitmap/제한 재전송과 application replay/conflict만 주장; ordered delivery를 명시적으로 제외 |
 | 테스트 수 | C++ 659 + Meta 221 + Unity 388 = 1,268 | Stale/incorrect | 기존 tracked tree의 Meta 선언은 199, 합계는 1,246이었다. 현재 tree와 무관한 합계는 폐기 |
-| 부하 표현 | `100-session` harness가 실행 artifact처럼 읽힘 | Unverifiable result | harness 구현과 실행 결과를 분리하고 official capacity를 `NOT PROVEN`으로 표시 |
+| 부하 표현 | `100-session` harness가 실행 artifact처럼 읽힘 | Unverifiable result | harness 구현과 과거 5,250세션 진단 결과 및 현재 공개 build의 미측정을 분리 |
 | Quick start | compiler/library, CMake 3.28/Ninja, Java 21, Docker/Testcontainers 조건 누락 | Not reproducible enough | preset 기반 C++ 명령과 prerequisites, Meta Docker 조건을 문서화 |
 | local links | 주요 local 경로는 당시 tree에 존재했지만 현행 구현을 가리키지 않음 | Semantically stale | 새 evidence 링크를 현재 source/test에 직접 연결하고 tracked-tree verifier로 존재 검사 |
 | 중복 | README, architecture, protocol, RoomActor, test matrix가 같은 설명/숫자를 반복 | Drift risk | README는 recruiter path, architecture는 semantics, verification은 실행 결과, limitations는 비주장만 소유 |
@@ -27,7 +27,7 @@
 | 기술 키워드와 큰 테스트 합계 중심 | 어려운 문제 6개를 구현 파일과 회귀 파일에 직접 연결 |
 | RUDP transport와 gameplay idempotency가 혼재 | ACK/retry, movement newest-only, `CommandId` replay/conflict를 분리 |
 | `RoomActor` foundation 설명 | 실제 `RoomExecutionCell` single-writer와 multi-cell parallelism |
-| load harness 존재가 capacity 결과처럼 보일 수 있음 | 실행 상태와 `NOT PROVEN` capacity를 명시 |
+| load harness 존재가 capacity 결과처럼 보일 수 있음 | 과거 진단 실행과 현재 공개 build를 분리 |
 | 수동 문서 점검 | `git ls-files` 기반 claim/link/count/privacy verifier + CI |
 
 ## Private/public boundary applied

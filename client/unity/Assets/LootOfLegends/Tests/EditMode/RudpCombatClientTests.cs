@@ -17,7 +17,7 @@ namespace LootOfLegends.Tests.EditMode
     public sealed class RudpCombatClientTests
     {
         [Test]
-        public void CodecMatchesFrozenCombatGoldenVectors()
+        public void CodecMatchesCombatV4GoldenVectors()
         {
             var header = new RudpHeader(
                 RudpFlag.Reliable, 1, 2, 3, 4, 3, 3, 27);
@@ -41,6 +41,21 @@ namespace LootOfLegends.Tests.EditMode
             Assert.That(
                 RudpProtocolCodec.DecodeInbound(GoldenBytes("MonsterStateSnapshot")).Message,
                 Is.TypeOf<RudpMonsterStateSnapshot>());
+            Assert.That(
+                RudpProtocolCodec.DecodeInbound(GoldenBytes("AttackApplied")).Message,
+                Is.TypeOf<RudpAttackApplied>());
+        }
+
+        [Test]
+        public void AppliedAttackProjectionAcceptsEachServerEventOnce()
+        {
+            var readModel = new BattleCombatReadModel(7);
+            var applied = (RudpAttackApplied)RudpProtocolCodec.DecodeInbound(
+                GoldenBytes("AttackApplied")).Message;
+
+            Assert.That(readModel.Apply(applied), Is.True);
+            Assert.That(readModel.LastAppliedAttack, Is.SameAs(applied));
+            Assert.That(readModel.Apply(applied), Is.False);
         }
 
         [Test]
@@ -68,14 +83,14 @@ namespace LootOfLegends.Tests.EditMode
                     RudpProtocolCodec.DecodeInbound(
                         GoldenBytes("AttackTerminalResult")).Message),
                 Is.True);
-            Assert.That(readModel.HitPoints, Is.EqualTo(1580));
+            Assert.That(readModel.HitPoints, Is.EqualTo(1500));
             Assert.That(readModel.LastAttackResult, Is.EqualTo(RudpAttackResultCode.Ok));
             Assert.That(readModel.LastAttackCommandId.High, Is.EqualTo(0x0102030405060708));
             Assert.That(readModel.LastAttackCommandId.Low, Is.EqualTo(0x1112131415161718));
             readModel.Apply(new RudpAttackTerminalResult(
-                new RudpCommandId(1, 2), 7, RudpAttackResultCode.Ok, 1, 1600, 1,
+                new RudpCommandId(1, 2), 7, RudpAttackResultCode.Ok, 1, 1600, 4,
                 RudpCombatOutcome.None));
-            Assert.That(readModel.HitPoints, Is.EqualTo(1580));
+            Assert.That(readModel.HitPoints, Is.EqualTo(1500));
         }
 
         [Test]
@@ -151,7 +166,7 @@ namespace LootOfLegends.Tests.EditMode
 
             Assert.That(
                 readModel.Apply(new RudpMonsterStateSnapshot(
-                    7, 10, 20, 1, 1580, RudpMonsterState.Alive)),
+                    7, 10, 20, 1, 1500, RudpMonsterState.Alive)),
                 Is.True);
             Assert.That(
                 readModel.Apply(new RudpMonsterStateSnapshot(
@@ -159,9 +174,9 @@ namespace LootOfLegends.Tests.EditMode
                 Is.False);
             Assert.That(
                 readModel.Apply(new RudpMonsterStateSnapshot(
-                    7, 11, 21, 1, 1560, RudpMonsterState.Alive)),
+                    7, 11, 21, 1, 1400, RudpMonsterState.Alive)),
                 Is.True);
-            Assert.That(readModel.HitPoints, Is.EqualTo(1560));
+            Assert.That(readModel.HitPoints, Is.EqualTo(1400));
             Assert.That(readModel.SnapshotSequence, Is.EqualTo(11));
         }
 
@@ -171,25 +186,25 @@ namespace LootOfLegends.Tests.EditMode
             var readModel = new BattleCombatReadModel(7);
             readModel.Apply(new RudpMonsterSpawned(
                 new RudpEventId(1, 1), 7, RudpEventStreamKind.CombatLifecycle,
-                1, 1, 0, 0, 1600, 1));
+                1, 1, 0, 0, 1600, 4));
             readModel.Apply(new RudpMonsterStateSnapshot(
-                7, 1, 20, 1, 1580, RudpMonsterState.Alive));
+                7, 1, 20, 1, 1500, RudpMonsterState.Alive));
 
             Assert.That(
                 readModel.Apply(new RudpCombatTerminalEvent(
                     new RudpEventId(1, 2), 7, RudpEventStreamKind.CombatLifecycle,
-                    2, RudpCombatOutcome.CombatTimeout, 1, 600, 1)),
+                    2, RudpCombatOutcome.CombatTimeout, 1, 600, 4)),
                 Is.True);
 
             Assert.That(readModel.Outcome, Is.EqualTo(RudpCombatOutcome.CombatTimeout));
-            Assert.That(readModel.HitPoints, Is.EqualTo(1580));
+            Assert.That(readModel.HitPoints, Is.EqualTo(1500));
             Assert.That(readModel.MonsterState, Is.EqualTo(RudpMonsterState.TimedOut));
             Assert.That(readModel.MonsterState, Is.Not.EqualTo(RudpMonsterState.Dead));
             Assert.That(
                 readModel.Apply(new RudpMonsterStateSnapshot(
-                    7, 2, 21, 1, 1560, RudpMonsterState.Alive)),
+                    7, 2, 21, 1, 1400, RudpMonsterState.Alive)),
                 Is.False);
-            Assert.That(readModel.HitPoints, Is.EqualTo(1580));
+            Assert.That(readModel.HitPoints, Is.EqualTo(1500));
             Assert.That(readModel.MonsterState, Is.EqualTo(RudpMonsterState.TimedOut));
         }
 
@@ -225,6 +240,25 @@ namespace LootOfLegends.Tests.EditMode
                     .Select(method => method.Name),
                 Has.None.Matches<string>(name =>
                     name.IndexOf("Receive", StringComparison.OrdinalIgnoreCase) >= 0));
+        }
+
+        [Test]
+        public void TenParticipantSpawnRetainsServerProvidedMaximumHitPoints()
+        {
+            var readModel = new BattleCombatReadModel(7);
+
+            Assert.That(
+                readModel.Apply(new RudpMonsterSpawned(
+                    new RudpEventId(1, 1), 7, RudpEventStreamKind.CombatLifecycle,
+                    1, 1, 0, 0, 8000, 4)),
+                Is.True);
+            Assert.That(
+                readModel.Apply(new RudpMonsterStateSnapshot(
+                    7, 1, 20, 1, 7900, RudpMonsterState.Alive)),
+                Is.True);
+
+            Assert.That(readModel.MaximumHitPoints, Is.EqualTo(8000));
+            Assert.That(readModel.HitPoints, Is.EqualTo(7900));
         }
 
         [Test]
@@ -309,7 +343,7 @@ namespace LootOfLegends.Tests.EditMode
         {
             string path = Path.GetFullPath(Path.Combine(
                 Application.dataPath,
-                "../../../contracts/protocol/golden/combat-v1.json"));
+                "../../../contracts/protocol/golden/combat-v4.json"));
             string contract = File.ReadAllText(path);
             string semanticMarker = $"\"semanticName\": \"{semanticName}\"";
             int semanticOffset = contract.IndexOf(semanticMarker, StringComparison.Ordinal);

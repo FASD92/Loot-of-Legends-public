@@ -1,0 +1,17 @@
+{
+  "name": "LootOfLegends.Tests.Capture",
+  "rootNamespace": "LootOfLegends.Tests.Capture",
+  "references": [
+    "LootOfLegends.Protocol",
+    "LootOfLegends.Transport",
+    "LootOfLegends.Battle",
+    "LootOfLegends.LobbyRoom",
+    "LootOfLegends.Collection",
+    "LootOfLegends.Session",
+    "LootOfLegends.Presentation",
+    "UnityEngine.UI"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

@@ -5,6 +5,7 @@
     "LootOfLegends.Battle",
     "LootOfLegends.Session",
     "LootOfLegends.LobbyRoom",
-    "LootOfLegends.Collection"
+    "LootOfLegends.Collection",
+    "UnityEngine.UI"
   ]
 }

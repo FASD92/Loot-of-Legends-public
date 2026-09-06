@@ -35,6 +35,7 @@ using lol::battle::ClaimLootResultCode;
 using lol::battle::CombatDeadlineCommand;
 using lol::battle::CombatDeadlineResultCode;
 using lol::battle::CombatOutcome;
+using lol::battle::CombatRuleset;
 using lol::battle::CommandId;
 using lol::battle::DirectionIntent;
 using lol::battle::DropId;
@@ -77,6 +78,7 @@ using lol::shared::SessionGeneration;
 using lol::shared::SessionId;
 
 constexpr auto kStart = std::chrono::steady_clock::time_point{};
+constexpr auto kMovementSetupEnd = kStart + 500ms;
 
 AccountId account(std::uint64_t suffix) {
   AccountId::Bytes bytes{};
@@ -133,9 +135,9 @@ AttackCommand attack(std::uint64_t commandId, std::uint64_t sessionId,
   };
 }
 
-bool reduceToTwentyHitPoints(BattleInstance &battle,
-                             std::uint64_t &nextCommandId) {
-  for (std::uint32_t round = 0; round < 26; ++round) {
+bool reduceToOneAttackHitPoints(BattleInstance &battle,
+                                std::uint64_t &nextCommandId) {
+  for (std::uint32_t round = 0; round < 7; ++round) {
     for (std::uint64_t session = 1; session <= 3; ++session) {
       const auto result = battle.attack(attack(nextCommandId++, session),
                                         kStart + round * 750ms);
@@ -145,12 +147,16 @@ bool reduceToTwentyHitPoints(BattleInstance &battle,
       }
     }
   }
+  const auto first =
+      battle.attack(attack(nextCommandId++, 1), kStart + 15 * 750ms);
   const auto result =
-      battle.attack(attack(nextCommandId++, 1), kStart + 26 * 750ms);
+      battle.attack(attack(nextCommandId++, 2), kStart + 15 * 750ms);
   const auto projection = battle.combatProjection();
-  return result.code == AttackResultCode::Ok &&
-         result.remainingHitPoints == 20 && projection.has_value() &&
-         projection->hitPoints == 20 &&
+  return first.code == AttackResultCode::Ok &&
+         result.code == AttackResultCode::Ok &&
+         result.remainingHitPoints == CombatRuleset::attackDamage &&
+         projection.has_value() &&
+         projection->hitPoints == CombatRuleset::attackDamage &&
          projection->monsterState == MonsterState::Alive;
 }
 
@@ -162,8 +168,12 @@ bool nonlethalReplayAndExitedParticipantAreStable() {
   const auto conflict = battle.attack(attack(1, 1, 2), kStart + 2ms);
   if (accepted.code != AttackResultCode::Ok || accepted != replay ||
       conflict.code != AttackResultCode::CommandConflict ||
-      accepted.remainingHitPoints != 1580 ||
-      battle.combatProjection()->hitPoints != 1580) {
+      accepted.remainingHitPoints !=
+          CombatRuleset::monsterHitPointsForParticipants(2) -
+              CombatRuleset::attackDamage ||
+      battle.combatProjection()->hitPoints !=
+          CombatRuleset::monsterHitPointsForParticipants(2) -
+              CombatRuleset::attackDamage) {
     return false;
   }
 
@@ -178,8 +188,33 @@ bool nonlethalReplayAndExitedParticipantAreStable() {
   const auto rejected = battle.attack(attack(2, 2), kStart);
   const auto projection = battle.combatProjection();
   return rejected.code == AttackResultCode::NotEligible &&
-         rejected.remainingHitPoints == 1580 && projection.has_value() &&
-         projection->hitPoints == 1580 && !projection->terminal.has_value();
+         rejected.remainingHitPoints ==
+             CombatRuleset::monsterHitPointsForParticipants(2) -
+                 CombatRuleset::attackDamage &&
+         projection.has_value() &&
+         projection->hitPoints ==
+             CombatRuleset::monsterHitPointsForParticipants(2) -
+                 CombatRuleset::attackDamage &&
+         !projection->terminal.has_value();
+}
+
+bool acceptedAttackEmitsOneAppliedEventAndReplayEmitsNone() {
+  auto battle = committedBattle(2);
+  const auto command = attack(1, 2);
+  const auto accepted = battle.attackWithApplied(command, kStart);
+  const auto replay = battle.attackWithApplied(command, kStart + 1ms);
+  return accepted.result.code == AttackResultCode::Ok &&
+         accepted.applied.has_value() &&
+         accepted.applied->attackerSessionId == SessionId{2} &&
+         accepted.applied->battleId == BattleInstanceId{1} &&
+         accepted.applied->eventSequence == 1 &&
+         accepted.applied->monsterId == 1 &&
+         accepted.applied->actualDamage == CombatRuleset::attackDamage &&
+         accepted.applied->remainingHitPoints ==
+             CombatRuleset::monsterHitPointsForParticipants(2) -
+                 CombatRuleset::attackDamage &&
+         accepted.applied->outcome == CombatOutcome::None &&
+         replay.result == accepted.result && !replay.applied.has_value();
 }
 
 bool validationAndCapacityPrecedeDamage() {
@@ -199,7 +234,9 @@ bool validationAndCapacityPrecedeDamage() {
   if (cooldown.attack(attack(1, 1), kStart).code != AttackResultCode::Ok ||
       cooldown.attack(attack(2, 1), kStart + 1ms).code !=
           AttackResultCode::Cooldown ||
-      cooldown.combatProjection()->hitPoints != 1580) {
+      cooldown.combatProjection()->hitPoints !=
+          CombatRuleset::monsterHitPointsForParticipants(2) -
+              CombatRuleset::attackDamage) {
     return false;
   }
 
@@ -223,14 +260,14 @@ bool validationAndCapacityPrecedeDamage() {
               .generation = SessionGeneration{1},
               .battleId = BattleInstanceId{1},
               .actionSequence = 1,
-              .direction = DirectionIntent{.desiredX = 32767,
-                                           .desiredY = 0,
+              .direction = DirectionIntent{.desiredX = -32767,
+                                           .desiredY = 32767,
                                            .inputFlags = 0},
           },
           kStart) != MovementResultCode::Ok) {
     return false;
   }
-  for (std::uint32_t tick = 1; tick <= 13; ++tick) {
+  for (std::uint32_t tick = 1; tick <= 43; ++tick) {
     if (outOfRange.integrateMovement(MovementTickCommand{
             .battleId = BattleInstanceId{1}, .serverTick = tick}) !=
         MovementResultCode::Ok) {
@@ -259,14 +296,18 @@ bool validationAndCapacityPrecedeDamage() {
 bool twoAndTenParticipantsCompleteDeterministically() {
   for (const std::size_t participantCount : {std::size_t{2}, std::size_t{10}}) {
     auto battle = committedBattle(participantCount);
-    for (std::uint64_t hit = 0; hit < 80; ++hit) {
+    const auto totalHits = CombatRuleset::monsterHitPointsForParticipants(
+                               static_cast<std::uint32_t>(participantCount)) /
+                           CombatRuleset::attackDamage;
+    for (std::uint64_t hit = 0; hit < totalHits; ++hit) {
       const auto sessionId = (hit % participantCount) + 1;
       const auto round = hit / participantCount;
       const auto result =
           battle.attack(attack(hit + 1, sessionId), kStart + round * 750ms);
       if (result.code != AttackResultCode::Ok ||
-          (hit < 79 && result.outcome != CombatOutcome::None) ||
-          (hit == 79 && result.outcome != CombatOutcome::MonsterDefeated)) {
+          (hit + 1 < totalHits && result.outcome != CombatOutcome::None) ||
+          (hit + 1 == totalHits &&
+           result.outcome != CombatOutcome::MonsterDefeated)) {
         return false;
       }
     }
@@ -286,11 +327,11 @@ bool twoAndTenParticipantsCompleteDeterministically() {
 bool lethalAndDeadlineKeepOneStableTerminal() {
   auto defeated = committedBattle(3);
   std::uint64_t commandId = 1;
-  if (!reduceToTwentyHitPoints(defeated, commandId)) {
+  if (!reduceToOneAttackHitPoints(defeated, commandId)) {
     return false;
   }
   const auto lethal =
-      defeated.attack(attack(commandId++, 2), kStart + 26 * 750ms);
+      defeated.attack(attack(commandId++, 3), kStart + 15 * 750ms);
   const auto afterLethal = defeated.combatProjection();
   if (lethal.code != AttackResultCode::Ok ||
       lethal.outcome != CombatOutcome::MonsterDefeated ||
@@ -521,8 +562,70 @@ public:
       return false;
     }
     const auto outcomes = outcomes_.take();
-    return outcomes.size() == participantCount &&
-           outcomes.back().gameplayStartCommitted;
+    if (outcomes.size() != participantCount ||
+        !outcomes.back().gameplayStartCommitted) {
+      return false;
+    }
+    if (participantCount != 2) {
+      return true;
+    }
+
+    for (std::uint64_t sessionId = 1; sessionId <= 2; ++sessionId) {
+      if (cell_->enqueue(RoomCommandEnvelope{
+              .requestId = std::nullopt,
+              .command = RoomCellCommand{MoveCommand{
+                  .sessionId = SessionId{sessionId},
+                  .generation = SessionGeneration{1},
+                  .battleId = BattleInstanceId{1},
+                  .actionSequence = 1,
+                  .direction = DirectionIntent{
+                      .desiredX = static_cast<std::int16_t>(
+                          sessionId == 1 ? -1 : 1),
+                      .desiredY = 0,
+                      .inputFlags = 0,
+                  },
+              }},
+              .receivedAt = kStart,
+          }) != RoomCommandAdmission::Accepted) {
+        return false;
+      }
+    }
+    if (!cell_->waitUntilIdle(2s)) {
+      return false;
+    }
+    outcomes_.take();
+    for (std::uint32_t tick = 1; tick <= 10; ++tick) {
+      if (cell_->enqueueControl(RoomControlEnvelope{
+              .command = RoomControlCommand{MovementTickCommand{
+                  .battleId = BattleInstanceId{1}, .serverTick = tick}},
+          }) != RoomCommandAdmission::Accepted) {
+        return false;
+      }
+    }
+    if (!cell_->waitUntilIdle(2s)) {
+      return false;
+    }
+    outcomes_.take();
+    for (std::uint64_t sessionId = 1; sessionId <= 2; ++sessionId) {
+      if (cell_->enqueue(RoomCommandEnvelope{
+              .requestId = std::nullopt,
+              .command = RoomCellCommand{MoveCommand{
+                  .sessionId = SessionId{sessionId},
+                  .generation = SessionGeneration{1},
+                  .battleId = BattleInstanceId{1},
+                  .actionSequence = 2,
+                  .direction = DirectionIntent{},
+              }},
+              .receivedAt = kMovementSetupEnd,
+          }) != RoomCommandAdmission::Accepted) {
+        return false;
+      }
+    }
+    if (!cell_->waitUntilIdle(2s)) {
+      return false;
+    }
+    outcomes_.take();
+    return true;
   }
 
   bool submitAttack(std::uint64_t commandId, std::uint64_t sessionId,
@@ -589,7 +692,7 @@ bool cellSerializesLethalAndDeadlineOrders() {
     return false;
   }
   std::uint64_t commandId = 1;
-  for (std::uint32_t round = 0; round < 26; ++round) {
+  for (std::uint32_t round = 0; round < 8; ++round) {
     for (std::uint64_t session = 1; session <= 3; ++session) {
       if (!defeated.submitAttack(commandId++, session,
                                  kStart + round * 750ms)) {
@@ -597,20 +700,20 @@ bool cellSerializesLethalAndDeadlineOrders() {
       }
     }
   }
-  if (!defeated.submitAttack(commandId++, 1, kStart + 26 * 750ms) ||
-      !defeated.submitAttack(commandId++, 2, kStart + 26 * 750ms) ||
-      !defeated.submitAttack(commandId, 3, kStart + 26 * 750ms) ||
+  if (!defeated.submitAttack(commandId++, 1, kStart + 8 * 750ms) ||
+      !defeated.submitAttack(commandId++, 2, kStart + 8 * 750ms) ||
+      !defeated.submitAttack(commandId, 3, kStart + 8 * 750ms) ||
       !defeated.wait()) {
     return false;
   }
   const auto attacks = defeated.take();
-  if (attacks.size() != 81 || !attacks[79].attackResult.has_value() ||
-      !attacks[80].attackResult.has_value() ||
-      !attacks[79].combat.has_value() || !attacks[80].combat.has_value() ||
-      attacks[79].attackResult->outcome != CombatOutcome::MonsterDefeated ||
-      attacks[80].attackResult->code !=
+  if (attacks.size() != 27 || !attacks[23].attackResult.has_value() ||
+      !attacks[24].attackResult.has_value() ||
+      !attacks[23].combat.has_value() || !attacks[24].combat.has_value() ||
+      attacks[23].attackResult->outcome != CombatOutcome::MonsterDefeated ||
+      attacks[24].attackResult->code !=
           AttackResultCode::TerminalAlreadyDecided ||
-      attacks[79].combat->terminal != attacks[80].combat->terminal) {
+      attacks[23].combat->terminal != attacks[24].combat->terminal) {
     return false;
   }
   defeated.advance(30s);
@@ -661,14 +764,15 @@ bool cellSerializesLethalAndDeadlineOrders() {
          lateAttack.front().combat->outcome == CombatOutcome::CombatTimeout;
 }
 
-// 80 fixed 20-damage hits (two participants alternating every 750 ms) empty
-// the fixed 1600 HP monster through the Cell; the last hit is lethal and the
-// resulting outcome is MonsterDefeated.
+// After the movement setup advances Battle time by 500 ms, 16 fixed
+// 100-damage hits (two participants alternating every 750 ms) empty the
+// participant-scaled 1600 HP monster through the Cell; the last hit is lethal
+// and the resulting outcome is MonsterDefeated.
 bool killMonsterThroughCell(CellScenario &scenario, std::uint64_t &commandId) {
-  for (std::uint32_t round = 0; round < 40; ++round) {
+  for (std::uint32_t round = 0; round < 8; ++round) {
     for (std::uint64_t session = 1; session <= 2; ++session) {
       if (!scenario.submitAttack(commandId++, session,
-                                 kStart + round * 750ms)) {
+                                 kMovementSetupEnd + round * 750ms)) {
         return false;
       }
     }
@@ -677,7 +781,7 @@ bool killMonsterThroughCell(CellScenario &scenario, std::uint64_t &commandId) {
     return false;
   }
   const auto attacks = scenario.take();
-  return attacks.size() == 80 && attacks.back().attackResult.has_value() &&
+  return attacks.size() == 16 && attacks.back().attackResult.has_value() &&
          attacks.back().attackResult->outcome == CombatOutcome::MonsterDefeated;
 }
 
@@ -701,29 +805,31 @@ findOutcomeFor(const std::vector<RoomCommandOutcome> &outcomes,
   return found == outcomes.end() ? nullptr : &*found;
 }
 
-// 79 fixed 20-damage hits (two participants alternating every 750 ms) reduce
-// the fixed 1600 HP monster to exactly 20 HP without a terminal: the 80th hit
-// would be lethal.
-bool reduceToTwentyHitPointsThroughCell(CellScenario &scenario,
-                                        std::uint64_t &commandId) {
-  for (std::uint32_t round = 0; round < 39; ++round) {
+// After the movement setup, 15 fixed 100-damage hits (two participants
+// alternating every 750 ms) reduce the participant-scaled 1600 HP monster to
+// exactly 100 HP without a terminal: the 16th hit would be lethal.
+bool reduceToOneAttackHitPointsThroughCell(CellScenario &scenario,
+                                           std::uint64_t &commandId) {
+  for (std::uint32_t round = 0; round < 7; ++round) {
     for (std::uint64_t session = 1; session <= 2; ++session) {
       if (!scenario.submitAttack(commandId++, session,
-                                 kStart + round * 750ms)) {
+                                 kMovementSetupEnd + round * 750ms)) {
         return false;
       }
     }
   }
-  if (!scenario.submitAttack(commandId++, 1, kStart + 39 * 750ms) ||
+  if (!scenario.submitAttack(commandId++, 1,
+                             kMovementSetupEnd + 7 * 750ms) ||
       !scenario.wait()) {
     return false;
   }
   const auto attacks = scenario.take();
-  return attacks.size() == 79 && attacks.back().attackResult.has_value() &&
+  return attacks.size() == 15 && attacks.back().attackResult.has_value() &&
          attacks.back().attackResult->code == AttackResultCode::Ok &&
-         attacks.back().attackResult->remainingHitPoints == 20 &&
+         attacks.back().attackResult->remainingHitPoints ==
+             CombatRuleset::attackDamage &&
          attacks.back().combat.has_value() &&
-         attacks.back().combat->hitPoints == 20 &&
+         attacks.back().combat->hitPoints == CombatRuleset::attackDamage &&
          attacks.back().combat->monsterState == MonsterState::Alive &&
          !attacks.back().combat->terminal.has_value();
 }
@@ -1145,7 +1251,7 @@ bool lastLeaveBeforeLethalAttackCancelsWithoutTerminal() {
     return false;
   }
   std::uint64_t commandId = 1;
-  if (!reduceToTwentyHitPointsThroughCell(scenario, commandId)) {
+  if (!reduceToOneAttackHitPointsThroughCell(scenario, commandId)) {
     return false;
   }
   if (!scenario.submitLeave(1) || !scenario.submitLeave(2) ||
@@ -1180,10 +1286,11 @@ bool lastLeaveBeforeLethalAttackCancelsWithoutTerminal() {
     return false;
   }
   // The queued otherwise-lethal Attack is explicitly NotEligible and the
-  // combat history stays non-terminal at 20 HP.
+  // combat history stays non-terminal at one attack of HP.
   if (!lateAttack->attackResult.has_value() ||
       lateAttack->attackResult->code != AttackResultCode::NotEligible ||
-      !lateAttack->combat.has_value() || lateAttack->combat->hitPoints != 20 ||
+      !lateAttack->combat.has_value() ||
+      lateAttack->combat->hitPoints != CombatRuleset::attackDamage ||
       lateAttack->combat->monsterState != MonsterState::Alive ||
       lateAttack->combat->outcome != CombatOutcome::None ||
       lateAttack->combat->terminal.has_value()) {
@@ -1492,7 +1599,8 @@ bool exitsAfterCommittedResultAreNoMutation() {
 } // namespace
 
 int main() {
-  return nonlethalReplayAndExitedParticipantAreStable() &&
+  return acceptedAttackEmitsOneAppliedEventAndReplayEmitsNone() &&
+                 nonlethalReplayAndExitedParticipantAreStable() &&
                  validationAndCapacityPrecedeDamage() &&
                  twoAndTenParticipantsCompleteDeterministically() &&
                  lethalAndDeadlineKeepOneStableTerminal() &&

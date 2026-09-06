@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +22,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
 namespace LootOfLegends.Tests.EditMode
 {
@@ -56,6 +58,271 @@ namespace LootOfLegends.Tests.EditMode
             }
             finally
             {
+                EditorSceneManager.CloseScene(login, true);
+            }
+        }
+
+        [Test]
+        public void ManualEvidenceRoleUsesFixtureAuthWithoutAutomation()
+        {
+            Type configurationType = typeof(ProductPlayerFlowBootstrap).GetNestedType(
+                "ProductConfiguration",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo tryRead = configurationType.GetMethod(
+                "TryRead",
+                BindingFlags.Static | BindingFlags.Public);
+            object[] arguments =
+            {
+                new[]
+                {
+                    "--loot-meta-base=http://127.0.0.1:8080",
+                    "--loot-game-host=127.0.0.1",
+                    "--loot-tcp-port=40000",
+                    "--loot-udp-port=40000",
+                    "--loot-e2e-role=manual"
+                },
+                null
+            };
+
+            bool accepted = (bool)tryRead.Invoke(null, arguments);
+            PropertyInfo automated = configurationType.GetProperty(
+                "IsAutomatedEvidence",
+                BindingFlags.Instance | BindingFlags.Public);
+
+            Assert.That(accepted, Is.True);
+            Assert.That(automated, Is.Not.Null);
+            Assert.That(
+                automated.GetValue(arguments[1]),
+                Is.EqualTo(false));
+        }
+
+        [Test]
+        public void CrashContinuityFlagEnablesCrashEvidenceForHost()
+        {
+            object configuration;
+            Assert.That(
+                TryReadConfiguration(
+                    new[]
+                    {
+                        "--loot-meta-base=http://127.0.0.1:8080",
+                        "--loot-game-host=127.0.0.1",
+                        "--loot-tcp-port=40000",
+                        "--loot-udp-port=40000",
+                        "--loot-e2e-role=host",
+                        "--loot-crash-continuity-evidence"
+                    },
+                    out configuration),
+                Is.True);
+            PropertyInfo crashEvidence = configuration.GetType().GetProperty(
+                "IsCrashContinuityEvidence",
+                BindingFlags.Instance | BindingFlags.Public);
+            Assert.That(crashEvidence, Is.Not.Null);
+            Assert.That(crashEvidence.GetValue(configuration), Is.EqualTo(true));
+        }
+
+        [Test]
+        public void CrashContinuityFlagRejectsManualEvidenceRole()
+        {
+            object configuration;
+            Assert.That(
+                TryReadConfiguration(
+                    new[]
+                    {
+                        "--loot-meta-base=http://127.0.0.1:8080",
+                        "--loot-game-host=127.0.0.1",
+                        "--loot-tcp-port=40000",
+                        "--loot-udp-port=40000",
+                        "--loot-e2e-role=manual",
+                        "--loot-crash-continuity-evidence"
+                    },
+                    out configuration),
+                Is.False);
+        }
+
+        [Test]
+        public void CrashContinuityFlagRejectsValueSuffix()
+        {
+            object configuration;
+            Assert.That(
+                TryReadConfiguration(
+                    new[]
+                    {
+                        "--loot-meta-base=http://127.0.0.1:8080",
+                        "--loot-game-host=127.0.0.1",
+                        "--loot-tcp-port=40000",
+                        "--loot-udp-port=40000",
+                        "--loot-e2e-role=host",
+                        "--loot-crash-continuity-evidence=true"
+                    },
+                    out configuration),
+                Is.False);
+        }
+
+        [Test]
+        public void DevelopmentMetaSessionFileAcceptsSecureLoopbackHost()
+        {
+            using (var file = new TemporaryMetaSessionFile(
+                       "{\"metaSession\":\"" + MetaSession +
+                       "\",\"expiresAt\":\"2099-01-01T00:00:00Z\"}"))
+            {
+                object configuration;
+                Assert.That(
+                    TryReadConfiguration(
+                        new[]
+                        {
+                            "--loot-meta-base=http://127.0.0.1:8080",
+                            "--loot-game-host=127.0.0.1",
+                            "--loot-tcp-port=40000",
+                            "--loot-udp-port=40000",
+                            "--loot-e2e-role=host",
+                            "--loot-meta-session-file=" + file.Path
+                        },
+                        out configuration),
+                    Is.True);
+                PropertyInfo issuedProperty = configuration.GetType().GetProperty(
+                    "DevelopmentMetaSession",
+                    BindingFlags.Instance | BindingFlags.Public);
+                Assert.That(issuedProperty, Is.Not.Null);
+                var issued = (MetaSessionIssued)issuedProperty.GetValue(configuration);
+                Assert.That(issued, Is.Not.Null);
+                Assert.That(issued.MetaSession, Is.EqualTo(MetaSession));
+            }
+        }
+
+        [Test]
+        public void DevelopmentMetaSessionFileRejectsNonLoopbackBase()
+        {
+            using (var file = new TemporaryMetaSessionFile(ValidMetaSessionJson()))
+            {
+                object configuration;
+                Assert.That(
+                    TryReadConfiguration(
+                        SessionFileArguments("https://meta.example", file.Path),
+                        out configuration),
+                    Is.False);
+            }
+        }
+
+        [Test]
+        public void DevelopmentMetaSessionFileRejectsRelativePath()
+        {
+            object configuration;
+            Assert.That(
+                TryReadConfiguration(
+                    SessionFileArguments(
+                        "http://127.0.0.1:8080",
+                        "relative-session.json"),
+                    out configuration),
+                Is.False);
+        }
+
+        [Test]
+        public void DevelopmentMetaSessionFileRejectsPermissiveMode()
+        {
+            using (var file = new TemporaryMetaSessionFile(ValidMetaSessionJson()))
+            {
+                file.SetMode(Convert.ToUInt32("0644", 8));
+                object configuration;
+                Assert.That(
+                    TryReadConfiguration(
+                        SessionFileArguments(
+                            "http://127.0.0.1:8080",
+                            file.Path),
+                        out configuration),
+                    Is.False);
+            }
+        }
+
+        [Test]
+        public void DevelopmentMetaSessionFileRejectsExpiredValue()
+        {
+            using (var file = new TemporaryMetaSessionFile(
+                       "{\"metaSession\":\"" + MetaSession +
+                       "\",\"expiresAt\":\"2000-01-01T00:00:00Z\"}"))
+            {
+                object configuration;
+                Assert.That(
+                    TryReadConfiguration(
+                        SessionFileArguments(
+                            "http://127.0.0.1:8080",
+                            file.Path),
+                        out configuration),
+                    Is.False);
+            }
+        }
+
+        [Test]
+        public void DevelopmentMetaSessionFileRejectsExtraField()
+        {
+            using (var file = new TemporaryMetaSessionFile(
+                       "{\"metaSession\":\"" + MetaSession +
+                       "\",\"expiresAt\":\"2099-01-01T00:00:00Z\"," +
+                       "\"extra\":\"rejected\"}"))
+            {
+                object configuration;
+                Assert.That(
+                    TryReadConfiguration(
+                        SessionFileArguments(
+                            "http://127.0.0.1:8080",
+                            file.Path),
+                        out configuration),
+                    Is.False);
+            }
+        }
+
+        [Test]
+        public async Task BootstrapBrowserAuthenticationWaitingCopyReachesLoginStatusView()
+        {
+            const string expected = "브라우저 인증 완료를 기다리고 있습니다.";
+
+            Scene login = EditorSceneManager.OpenScene(
+                "Assets/Scenes/LoginScene.unity", OpenSceneMode.Additive);
+            var root = new GameObject("Bootstrap browser authentication copy test");
+            try
+            {
+                var bootstrap = root.AddComponent<ProductPlayerFlowBootstrap>();
+                Type configurationType = typeof(ProductPlayerFlowBootstrap).GetNestedType(
+                    "ProductConfiguration",
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                Assert.That(configurationType, Is.Not.Null);
+                object configuration = Activator.CreateInstance(
+                    configurationType,
+                    BindingFlags.Instance | BindingFlags.NonPublic,
+                    null,
+                    new object[]
+                    {
+                        new Uri("https://meta.invalid/"),
+                        "127.0.0.1",
+                        40000,
+                        40000,
+                        string.Empty
+                    },
+                    null);
+                MethodInfo startFlow = typeof(ProductPlayerFlowBootstrap).GetMethod(
+                    "StartFlowAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(startFlow, Is.Not.Null);
+
+                Task startup;
+                using (var cancellation = new CancellationTokenSource())
+                {
+                    cancellation.Cancel();
+                    startup = (Task)startFlow.Invoke(
+                        bootstrap,
+                        new object[] { configuration, cancellation.Token });
+
+                    LoginStatusTextView view =
+                        UnityEngine.Object.FindFirstObjectByType<LoginStatusTextView>();
+                    Assert.That(view, Is.Not.Null);
+                    Text label = (Text)GetField(view, "label");
+                    Assert.That(label.text, Is.EqualTo(expected));
+                    Assert.CatchAsync<OperationCanceledException>(async () =>
+                        await startup);
+                }
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(root);
                 EditorSceneManager.CloseScene(login, true);
             }
         }
@@ -146,6 +413,7 @@ namespace LootOfLegends.Tests.EditMode
                 SetField(bootstrap, "session", session);
                 SetField(bootstrap, "transportLifetime", lifetime);
                 SetField(bootstrap, "reliableOutbound", reliable);
+                lifetime.StartRudp(pump);
 
                 await reliable.SendBindHelloAsync(
                     Enumerable.Range(1, 32).Select(value => (byte)value).ToArray(),
@@ -164,6 +432,61 @@ namespace LootOfLegends.Tests.EditMode
 
             await lifetime.StopAsync();
             UnityEngine.Object.DestroyImmediate(root);
+        }
+
+        [Test]
+        public async Task PortfolioF8ClosesOnlyTheActiveBattleTcpConnection()
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var root = new GameObject("Portfolio F8 disconnect test");
+            TcpClient server = null;
+            try
+            {
+                var bootstrap = root.AddComponent<ProductPlayerFlowBootstrap>();
+                var client = new TcpClient(AddressFamily.InterNetwork);
+                Task<TcpClient> accept = listener.AcceptTcpClientAsync();
+                await client.ConnectAsync(
+                    IPAddress.Loopback,
+                    ((IPEndPoint)listener.LocalEndpoint).Port);
+                server = await accept;
+                NetworkStream stream = client.GetStream();
+
+                var session = new PlayerSessionReadModel();
+                session.BeginAuthentication();
+                session.Apply(new WelcomeSession(1, 2, 3, 0, "player-one"));
+                var load = new BattleLoadReadModel();
+                var reconnectClient = new BattleSessionReconnectClient(
+                    new CallbackSender(() => { }),
+                    _ => Task.FromResult(GameCredential),
+                    new StopwatchReconnectClock(),
+                    _ => true,
+                    bootstrap);
+                SetField(bootstrap, "tcp", client);
+                SetField(bootstrap, "session", session);
+                SetField(bootstrap, "battleLoad", load);
+                SetField(bootstrap, "reconnectClient", reconnectClient);
+
+                Invoke(bootstrap, "HandlePortfolioDisconnectShortcut", true);
+                Assert.DoesNotThrow(() => stream.WriteByte(1));
+
+                Assert.That(load.Apply(new ArenaLoadEntry(7, 9)), Is.True);
+                Assert.That(load.Apply(new ArenaGameplayStart(
+                    7,
+                    9,
+                    new[] { new BattleParticipant(1, 2, "player-one") })), Is.True);
+                Invoke(bootstrap, "HandlePortfolioDisconnectShortcut", true);
+
+                Assert.That(() => stream.WriteByte(2), Throws.Exception);
+                Assert.That(session.State, Is.EqualTo(PlayerSessionState.Authenticated));
+                Assert.That(load.IsGameplayActive, Is.True);
+            }
+            finally
+            {
+                server?.Close();
+                listener.Stop();
+                UnityEngine.Object.DestroyImmediate(root);
+            }
         }
 
         [Test]
@@ -293,6 +616,48 @@ namespace LootOfLegends.Tests.EditMode
         }
 
         [Test]
+        public void KeyboardDoesNotSubmitAttackAfterCombatTerminal()
+        {
+            string path = Path.Combine(
+                Application.dataPath,
+                "LootOfLegends/Presentation/PlayerFlowControls.cs");
+            string source = File.ReadAllText(path);
+
+            StringAssert.Contains(
+                "current.Presentation.Snapshot().CanAttack",
+                source);
+        }
+
+        [Test]
+        public void KeyboardInputOwnsOnlyArenaRoomMutationCommands()
+        {
+            string path = Path.Combine(
+                Application.dataPath,
+                "LootOfLegends/Presentation/PlayerFlowControls.cs");
+            string source = File.ReadAllText(path);
+            int keyboardStart = source.IndexOf(
+                "public sealed class PlayerFlowKeyboardInput",
+                StringComparison.Ordinal);
+            Assert.That(keyboardStart, Is.GreaterThanOrEqualTo(0));
+            string keyboard = source.Substring(keyboardStart);
+
+            StringAssert.Contains(
+                "currentArena == null ||\n                SceneManager.GetActiveScene().name != \"ArenaScene\"",
+                keyboard);
+            StringAssert.DoesNotContain("TickRoom(", keyboard);
+            StringAssert.DoesNotContain("Input.GetKeyDown(KeyCode.C)", keyboard);
+            StringAssert.DoesNotContain("Input.GetKeyDown(KeyCode.J)", keyboard);
+            StringAssert.DoesNotContain("Input.GetKeyDown(KeyCode.R)", keyboard);
+            StringAssert.DoesNotContain("Input.GetKeyDown(KeyCode.S)", keyboard);
+            StringAssert.DoesNotContain("roomCommands.CreateAsync", keyboard);
+            StringAssert.DoesNotContain("roomCommands.JoinAsync", keyboard);
+            StringAssert.DoesNotContain("roomCommands.SetReadyAsync", keyboard);
+            StringAssert.DoesNotContain("hostStart.StartAsync", keyboard);
+            StringAssert.DoesNotContain("private readonly LobbyRoomReadModel", keyboard);
+            StringAssert.DoesNotContain("private readonly IRoomHostStartAction", keyboard);
+        }
+
+        [Test]
         public void TwoClientEvidenceDriverIsDevelopmentOnlyAndUsesCapabilityState()
         {
             Assert.That(typeof(DevelopmentPlayerFlowDriver), Is.Not.Null);
@@ -335,6 +700,91 @@ namespace LootOfLegends.Tests.EditMode
                     Content = new StringContent(response, Encoding.UTF8, "application/json")
                 });
             }
+        }
+
+        private static string ValidMetaSessionJson()
+        {
+            return "{\"metaSession\":\"" + MetaSession +
+                "\",\"expiresAt\":\"2099-01-01T00:00:00Z\"}";
+        }
+
+        private static string[] SessionFileArguments(string metaBase, string path)
+        {
+            return new[]
+            {
+                "--loot-meta-base=" + metaBase,
+                "--loot-game-host=127.0.0.1",
+                "--loot-tcp-port=40000",
+                "--loot-udp-port=40000",
+                "--loot-e2e-role=host",
+                "--loot-meta-session-file=" + path
+            };
+        }
+
+        private static bool TryReadConfiguration(
+            string[] arguments,
+            out object configuration)
+        {
+            Type configurationType = typeof(ProductPlayerFlowBootstrap).GetNestedType(
+                "ProductConfiguration",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo tryRead = configurationType.GetMethod(
+                "TryRead",
+                BindingFlags.Static | BindingFlags.Public);
+            object[] values = { arguments, null };
+            bool accepted = (bool)tryRead.Invoke(null, values);
+            configuration = values[1];
+            return accepted;
+        }
+
+        private sealed class TemporaryMetaSessionFile : IDisposable
+        {
+            public TemporaryMetaSessionFile(string contents)
+            {
+                Path = System.IO.Path.Combine(
+                    System.IO.Path.GetTempPath(),
+                    "lol-meta-session-" + Guid.NewGuid().ToString("N") + ".json");
+                File.WriteAllText(Path, contents, new UTF8Encoding(false));
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
+                if (chmod(Path, Convert.ToUInt32("0600", 8)) != 0)
+                {
+                    throw new InvalidOperationException(
+                        "Unable to create a 0600 Meta session file");
+                }
+#else
+                throw new InvalidOperationException(
+                    "Secure Meta session file tests require Unix file modes");
+#endif
+            }
+
+            public string Path { get; }
+
+            public void SetMode(uint mode)
+            {
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
+                if (chmod(Path, mode) != 0)
+                {
+                    throw new InvalidOperationException(
+                        "Unable to set Meta session file mode");
+                }
+#else
+                throw new InvalidOperationException(
+                    "Secure Meta session file tests require Unix file modes");
+#endif
+            }
+
+            public void Dispose()
+            {
+                if (File.Exists(Path))
+                {
+                    File.Delete(Path);
+                }
+            }
+
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
+            [DllImport("libc", EntryPoint = "chmod", SetLastError = true)]
+            private static extern int chmod(string path, uint mode);
+#endif
         }
 
         private sealed class CallbackSender : LootOfLegends.Transport.ITcpCommandSender
@@ -381,6 +831,15 @@ namespace LootOfLegends.Tests.EditMode
                 BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.That(method, Is.Not.Null);
             method.Invoke(target, Array.Empty<object>());
+        }
+
+        private static void Invoke(object target, string name, bool argument)
+        {
+            MethodInfo method = target.GetType().GetMethod(
+                name,
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            method.Invoke(target, new object[] { argument });
         }
 
         private sealed class RecordingRudpSender : IRudpDatagramSender

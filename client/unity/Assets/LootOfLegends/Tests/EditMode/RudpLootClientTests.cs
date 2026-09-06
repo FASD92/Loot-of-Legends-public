@@ -182,6 +182,72 @@ namespace LootOfLegends.Tests.EditMode
             Assert.That(readModel.Drops.Single().State, Is.EqualTo(RudpLootDropState.Available));
         }
 
+        [Test]
+        public void ReadModelSelectsNearestAvailableDropFromServerPositions()
+        {
+            var readModel = new BattleLootReadModel(7);
+            Assert.That(
+                readModel.Apply(new RudpDropStateSnapshot(
+                    7,
+                    1,
+                    RudpLootResolutionState.Open,
+                    new[]
+                    {
+                        new RudpLootDropProjection(
+                            1, 1, 1, 5000, 0,
+                            RudpLootDropState.Available, 0),
+                        new RudpLootDropProjection(
+                            2, 2, 1, 1000, 0,
+                            RudpLootDropState.Available, 0),
+                        new RudpLootDropProjection(
+                            3, 2, 1, 0, 0,
+                            RudpLootDropState.Claimed, 9)
+                    })),
+                Is.True);
+
+            Assert.That(
+                readModel.FindNearestAvailable(0, 0).DropId,
+                Is.EqualTo(2));
+        }
+
+        [Test]
+        public void ReadModelBreaksEqualDistanceByDropIdAndReturnsNullWithoutAvailableDrop()
+        {
+            var readModel = new BattleLootReadModel(7);
+            Assert.That(
+                readModel.Apply(new RudpDropStateSnapshot(
+                    7,
+                    1,
+                    RudpLootResolutionState.Open,
+                    new[]
+                    {
+                        new RudpLootDropProjection(
+                            9, 1, 1, 1000, 0,
+                            RudpLootDropState.Available, 0),
+                        new RudpLootDropProjection(
+                            3, 2, 1, -1000, 0,
+                            RudpLootDropState.Available, 0)
+                    })),
+                Is.True);
+            Assert.That(
+                readModel.FindNearestAvailable(0, 0).DropId,
+                Is.EqualTo(3));
+
+            Assert.That(
+                readModel.Apply(new RudpDropStateSnapshot(
+                    7,
+                    2,
+                    RudpLootResolutionState.Resolved,
+                    new[]
+                    {
+                        new RudpLootDropProjection(
+                            3, 2, 1, -1000, 0,
+                            RudpLootDropState.Claimed, 9)
+                    })),
+                Is.True);
+            Assert.That(readModel.FindNearestAvailable(0, 0), Is.Null);
+        }
+
         private static byte[] GoldenBytes(string semanticName)
         {
             string path = Path.GetFullPath(Path.Combine(

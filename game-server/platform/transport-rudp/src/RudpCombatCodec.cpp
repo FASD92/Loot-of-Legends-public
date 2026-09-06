@@ -11,15 +11,23 @@ constexpr std::uint16_t kAttackTerminalResultMessageId = 28;
 constexpr std::uint16_t kMonsterSpawnedMessageId = 29;
 constexpr std::uint16_t kCombatTerminalEventMessageId = 30;
 constexpr std::uint16_t kMonsterStateSnapshotMessageId = 31;
+constexpr std::uint16_t kAttackAppliedMessageId = 38;
 constexpr std::size_t kAttackIntentPayloadBytes = 32;
 constexpr std::size_t kAttackTerminalResultPayloadBytes = 41;
 constexpr std::size_t kMonsterSpawnedPayloadBytes = 51;
 constexpr std::size_t kCombatTerminalEventPayloadBytes = 44;
 constexpr std::size_t kMonsterStateSnapshotPayloadBytes = 29;
+constexpr std::size_t kAttackAppliedPayloadBytes = 58;
 constexpr std::uint64_t kMonsterId = 1;
-constexpr std::uint32_t kMaximumHitPoints = 1600;
-constexpr std::uint32_t kAttackDamage = 20;
-constexpr std::uint16_t kRulesetVersion = 1;
+constexpr std::uint32_t kMinimumParticipants = 2;
+constexpr std::uint32_t kMaximumParticipants = 10;
+constexpr std::uint32_t kMonsterHitPointsPerParticipant = 800;
+constexpr std::uint32_t kMinimumHitPoints =
+    kMinimumParticipants * kMonsterHitPointsPerParticipant;
+constexpr std::uint32_t kMaximumHitPoints =
+    kMaximumParticipants * kMonsterHitPointsPerParticipant;
+constexpr std::uint32_t kAttackDamage = 100;
+constexpr std::uint16_t kRulesetVersion = 4;
 
 template <typename Integer>
 void appendUnsigned(std::vector<std::byte> &bytes, Integer value) {
@@ -72,6 +80,11 @@ bool validHitPoints(std::uint32_t hitPoints) noexcept {
   return hitPoints <= kMaximumHitPoints && hitPoints % kAttackDamage == 0;
 }
 
+bool validMaximumHitPoints(std::uint32_t hitPoints) noexcept {
+  return hitPoints >= kMinimumHitPoints && hitPoints <= kMaximumHitPoints &&
+         hitPoints % kMonsterHitPointsPerParticipant == 0;
+}
+
 bool valid(const RudpAttackIntent &message) noexcept {
   return nonzero(message.commandId) && message.battleInstanceId != 0 &&
          message.targetHint != 0;
@@ -88,12 +101,24 @@ bool valid(const RudpAttackTerminalResult &message) noexcept {
           message.remainingHitPoints == 0);
 }
 
+bool valid(const RudpAttackApplied &message) noexcept {
+  return nonzero(message.eventId) && message.battleInstanceId != 0 &&
+         message.eventStreamKind == RudpEventStreamKind::CombatAction &&
+         message.eventSequence != 0 && message.attackerSessionId != 0 &&
+         message.monsterId == kMonsterId &&
+         message.actualDamage == kAttackDamage &&
+         validHitPoints(message.remainingHitPoints) &&
+         validCombatOutcome(message.combatOutcome) &&
+         (message.combatOutcome != RudpCombatOutcome::MonsterDefeated ||
+          message.remainingHitPoints == 0);
+}
+
 bool valid(const RudpMonsterSpawned &message) noexcept {
   return nonzero(message.eventId) && message.battleInstanceId != 0 &&
          message.eventStreamKind == RudpEventStreamKind::CombatLifecycle &&
          message.eventSequence == 1 && message.monsterId == kMonsterId &&
          message.posXMillimeter == 0 && message.posYMillimeter == 0 &&
-         message.maximumHitPoints == kMaximumHitPoints &&
+         validMaximumHitPoints(message.maximumHitPoints) &&
          message.rulesetVersion == kRulesetVersion;
 }
 
@@ -165,6 +190,26 @@ RudpCombatCodec::encode(const RudpHeader &header,
           appendUnsigned(payload, value.monsterId);
           appendUnsigned(payload, value.remainingHitPoints);
           appendUnsigned(payload, value.rulesetVersion);
+          appendUnsigned(payload,
+                         static_cast<std::uint8_t>(value.combatOutcome));
+        } else if constexpr (std::is_same_v<Message, RudpAttackApplied>) {
+          if (!validHeader(header, RudpFlag::Reliable,
+                           kAttackAppliedMessageId) ||
+              !valid(value)) {
+            return false;
+          }
+          payload.reserve(kAttackAppliedPayloadBytes);
+          appendUnsigned(payload, value.eventId.high);
+          appendUnsigned(payload, value.eventId.low);
+          appendUnsigned(payload, value.battleInstanceId);
+          appendUnsigned(payload,
+                         static_cast<std::uint8_t>(value.eventStreamKind));
+          appendUnsigned(payload, value.eventSequence);
+          appendUnsigned(payload, value.attackerSessionId);
+          appendUnsigned(payload, value.monsterId);
+          appendUnsigned(payload, value.actualDamage);
+          appendUnsigned(payload, value.remainingHitPoints);
+          appendUnsigned(payload, value.serverTick);
           appendUnsigned(payload,
                          static_cast<std::uint8_t>(value.combatOutcome));
         } else if constexpr (std::is_same_v<Message, RudpMonsterSpawned>) {
@@ -274,6 +319,35 @@ DecodedRudpCombat RudpCombatCodec::decode(std::span<const std::byte> datagram) {
         .rulesetVersion = readUnsigned<std::uint16_t>(decoded.payload, 38),
         .combatOutcome = static_cast<RudpCombatOutcome>(
             readUnsigned<std::uint8_t>(decoded.payload, 40)),
+    };
+    return valid(message)
+               ? DecodedRudpCombat{.error = RudpCombatCodecError::None,
+                                   .header = header,
+                                   .message = message}
+               : malformed(header);
+  }
+  if (header.messageId == kAttackAppliedMessageId) {
+    if (!validHeader(header, RudpFlag::Reliable, kAttackAppliedMessageId) ||
+        decoded.payload.size() != kAttackAppliedPayloadBytes) {
+      return malformed(header);
+    }
+    const RudpAttackApplied message{
+        .eventId =
+            RudpEventId{
+                .high = readUnsigned<std::uint64_t>(decoded.payload, 0),
+                .low = readUnsigned<std::uint64_t>(decoded.payload, 8),
+            },
+        .battleInstanceId = readUnsigned<std::uint64_t>(decoded.payload, 16),
+        .eventStreamKind = static_cast<RudpEventStreamKind>(
+            readUnsigned<std::uint8_t>(decoded.payload, 24)),
+        .eventSequence = readUnsigned<std::uint32_t>(decoded.payload, 25),
+        .attackerSessionId = readUnsigned<std::uint64_t>(decoded.payload, 29),
+        .monsterId = readUnsigned<std::uint64_t>(decoded.payload, 37),
+        .actualDamage = readUnsigned<std::uint32_t>(decoded.payload, 45),
+        .remainingHitPoints = readUnsigned<std::uint32_t>(decoded.payload, 49),
+        .serverTick = readUnsigned<std::uint32_t>(decoded.payload, 53),
+        .combatOutcome = static_cast<RudpCombatOutcome>(
+            readUnsigned<std::uint8_t>(decoded.payload, 57)),
     };
     return valid(message)
                ? DecodedRudpCombat{.error = RudpCombatCodecError::None,

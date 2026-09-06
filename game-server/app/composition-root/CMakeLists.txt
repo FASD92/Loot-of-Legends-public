@@ -15,6 +15,7 @@ loot_configure_build_identity(
 target_include_directories(lol_game_server PRIVATE
   "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(lol_game_server PRIVATE
+  lol_battle_continuity_storage
   lol_game_flow
   lol_meta_adapter
   lol_observability
@@ -34,7 +35,7 @@ if(BUILD_TESTING)
   add_test(NAME game_server_version COMMAND lol_game_server --version)
   set_tests_properties(game_server_version PROPERTIES
     PASS_REGULAR_EXPRESSION
-      "\"product\":\"loot-of-legends-v2-game-server\".*\"productVersion\":\"0.0.0-public\".*\"sourceRevision\":\"[0-9a-f]+\".*\"sourceDirty\":(true|false).*\"cxxStandard\":20")
+      "\"product\":\"loot-of-legends-v2-game-server\".*\"productVersion\":\"0.0.0-slice0\".*\"sourceRevision\":\"[0-9a-f]+\".*\"sourceDirty\":(true|false).*\"cxxStandard\":20")
 
   add_test(NAME game_server_smoke COMMAND lol_game_server --smoke-run)
   set_tests_properties(game_server_smoke PROPERTIES

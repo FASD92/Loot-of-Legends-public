@@ -43,7 +43,7 @@ ClaimLootTerminalResult reject(const ClaimLootCommand &command,
 
 ClaimLootTerminalResult
 BattleInstance::claimLoot(const ClaimLootCommand &command,
-                          std::chrono::steady_clock::time_point receivedAt) {
+                          BattleTime receivedAt) {
   if (command.battleId != battleId_) {
     return reject(command, ClaimLootResultCode::StaleBattle);
   }
@@ -57,7 +57,6 @@ BattleInstance::claimLoot(const ClaimLootCommand &command,
   if (participant->generation != command.generation) {
     return reject(command, ClaimLootResultCode::StaleSession);
   }
-
   const auto inspection = participant->lootResults.inspect(command);
   if (inspection.decision == LootResultStoreDecision::Replay) {
     return *inspection.result;
@@ -71,6 +70,7 @@ BattleInstance::claimLoot(const ClaimLootCommand &command,
   if (inspection.decision != LootResultStoreDecision::Available) {
     std::terminate();
   }
+  observeBattleTime(receivedAt);
   const auto retain = [participant, &command](ClaimLootResultCode code) {
     auto result = reject(command, code);
     if (!participant->lootResults.retain(command, result)) {
@@ -78,21 +78,18 @@ BattleInstance::claimLoot(const ClaimLootCommand &command,
     }
     return result;
   };
-  if (!participant->lastClaimRateUpdate.has_value()) {
-    participant->lastClaimRateUpdate = receivedAt;
-  } else if (receivedAt > *participant->lastClaimRateUpdate) {
-    const auto elapsed = std::min(
-        receivedAt - *participant->lastClaimRateUpdate,
-        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            fullClaimRateRefill));
-    const auto elapsedNanoseconds =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+  if (!participant->lastClaimRateUpdateNanos.has_value()) {
+    participant->lastClaimRateUpdateNanos = receivedAt.battleElapsedNanos;
+  } else if (receivedAt.battleElapsedNanos >
+             *participant->lastClaimRateUpdateNanos) {
+    const auto elapsedNanoseconds = std::min(
+        receivedAt.battleElapsedNanos - *participant->lastClaimRateUpdateNanos,
+        static_cast<std::uint64_t>(fullClaimRateRefill.count()));
     participant->claimRateCreditUnits =
         std::min(claimRateCapacityUnits,
                  participant->claimRateCreditUnits +
-                     static_cast<std::uint64_t>(elapsedNanoseconds) *
-                         claimRateUnitsPerNanosecond);
-    participant->lastClaimRateUpdate = receivedAt;
+                     elapsedNanoseconds * claimRateUnitsPerNanosecond);
+    participant->lastClaimRateUpdateNanos = receivedAt.battleElapsedNanos;
   }
   if (participant->claimRateCreditUnits < claimRateTokenUnits) {
     return retain(ClaimLootResultCode::Overloaded);
@@ -102,6 +99,11 @@ BattleInstance::claimLoot(const ClaimLootCommand &command,
   if (!participant->gameplayEligible) {
     return retain(ClaimLootResultCode::NotEligible);
   }
+  if (!participant->inputEnabled &&
+      resultState_ == BattleResultState::NotReady) {
+    return retain(ClaimLootResultCode::NotEligible);
+  }
+
   if (!combatTerminal_.has_value() ||
       combatTerminal_->outcome != CombatOutcome::MonsterDefeated) {
     return retain(ClaimLootResultCode::NotEligible);
@@ -163,11 +165,23 @@ BattleInstance::claimLoot(const ClaimLootCommand &command,
       });
   if (!anyAvailable) {
     lootResolution_ = LootResolutionState::Resolved;
+    lootDeadlineTick_.reset();
     // The final Available Drop became Claimed: commit exactly once. Replayed
     // or later commands cannot rebuild or mutate the committed result.
     commitResultIfReady(receivedAt);
   }
   return retain(ClaimLootResultCode::Ok);
+}
+
+ClaimLootTerminalResult
+BattleInstance::claimLoot(const ClaimLootCommand &command,
+                          std::chrono::steady_clock::time_point receivedAt) {
+  return claimLoot(command, battleTimeFromLiveClock(receivedAt));
+}
+
+ClaimLootTerminalResult
+BattleInstance::claimLoot(const ClaimLootCommand &command) {
+  return claimLoot(command, battleTime_);
 }
 
 LootProjection BattleInstance::lootProjection() const {

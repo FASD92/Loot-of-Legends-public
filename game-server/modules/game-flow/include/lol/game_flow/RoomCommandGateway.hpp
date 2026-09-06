@@ -2,12 +2,16 @@
 
 #include <lol/battle/BattleLoadApi.hpp>
 #include <lol/battle/CombatApi.hpp>
+#include <lol/battle_continuity/Durability.hpp>
+#include <lol/battle_continuity/FlightRecorder.hpp>
 #include <lol/game_flow/BattleRecovery.hpp>
 #include <lol/game_flow/GameplayTransportReadinessPort.hpp>
+#include <lol/lobby_room/RoomApi.hpp>
 #include <lol/lobby_room/RoomProjections.hpp>
 #include <lol/runtime/DeadlineScheduler.hpp>
 #include <lol/runtime/WorkerPool.hpp>
 #include <lol/settlement/SettlementCapacityGate.hpp>
+#include <lol/settlement/SettlementIntent.hpp>
 #include <lol/settlement/SettlementPublication.hpp>
 #include <lol/shared/Identifiers.hpp>
 
@@ -197,6 +201,13 @@ struct CombatAttackResultOutbound final {
   bool operator==(const CombatAttackResultOutbound &) const = default;
 };
 
+struct CombatAttackAppliedOutbound final {
+  battle::AttackAppliedRecord applied;
+  std::vector<BattleParticipantProjection> participants;
+
+  bool operator==(const CombatAttackAppliedOutbound &) const = default;
+};
+
 struct CombatTerminalEventOutbound final {
   battle::CombatTerminalRecord terminal;
   std::vector<BattleParticipantProjection> participants;
@@ -240,11 +251,18 @@ struct CombatBattleRetiredOutbound final {
   bool operator==(const CombatBattleRetiredOutbound &) const = default;
 };
 
+struct CombatBattleResumeOutbound final {
+  battle::BattleResumeProjection projection;
+
+  bool operator==(const CombatBattleResumeOutbound &) const = default;
+};
+
 using CombatOutboundMessage =
     std::variant<CombatMonsterSpawnedOutbound, CombatAttackResultOutbound,
-                 CombatTerminalEventOutbound, CombatMonsterStateOutbound,
-                 LootDropsSpawnedOutbound, LootClaimResultOutbound,
-                 LootStateOutbound, CombatBattleRetiredOutbound>;
+                 CombatAttackAppliedOutbound, CombatTerminalEventOutbound,
+                 CombatMonsterStateOutbound, LootDropsSpawnedOutbound,
+                 LootClaimResultOutbound, LootStateOutbound,
+                 CombatBattleRetiredOutbound, CombatBattleResumeOutbound>;
 
 struct CombatOutboundIntent final {
   std::optional<shared::SessionId> actorSessionId;
@@ -269,12 +287,24 @@ struct RoomExecutionObservation final {
   std::optional<std::chrono::nanoseconds> latestCriticalTerminalLatency;
 };
 
+struct RecoveredBattleInstall final {
+  lobby_room::Room room;
+  battle::BattleInstance battle;
+  battle_continuity::BattleRecording recording;
+  std::optional<std::uint64_t> nextBattleOrdinal;
+  std::optional<settlement::SettlementIntentBatch> settlementBatch;
+  bool settlementAlreadyDurable{};
+};
+
 class RoomCommandGateway final {
 public:
   using OutboundSink = std::function<void(LobbyRoomOutboundIntent)>;
   using MovementSnapshotSink =
       std::function<void(battle::StateSnapshotProjection)>;
   using CombatOutboundSink = std::function<void(CombatOutboundIntent)>;
+
+  [[nodiscard]] static std::optional<shared::RoomId>
+  firstRoomIdForSettlementHistory(std::uint64_t lastJournalSequence) noexcept;
 
   RoomCommandGateway(runtime::WorkerPool &workers, OutboundSink outboundSink);
   RoomCommandGateway(runtime::WorkerPool &workers,
@@ -313,7 +343,18 @@ public:
                      CombatOutboundSink combatOutboundSink,
                      runtime::DeadlineScheduler &deadlines,
                      settlement::SettlementCapacityGate &capacityGate,
-                     settlement::SettlementStoragePort &storage);
+                     settlement::SettlementStoragePort &storage,
+                     shared::RoomId firstRoomId = shared::RoomId{1});
+  RoomCommandGateway(runtime::WorkerPool &workers,
+                     const GameplayTransportReadinessPort &readiness,
+                     OutboundSink outboundSink,
+                     MovementSnapshotSink movementSnapshotSink,
+                     CombatOutboundSink combatOutboundSink,
+                     runtime::DeadlineScheduler &deadlines,
+                     settlement::SettlementCapacityGate &capacityGate,
+                     settlement::SettlementStoragePort &storage,
+                     battle_continuity::DurableTickWritePort &continuityStorage,
+                     shared::RoomId firstRoomId);
   ~RoomCommandGateway();
 
   RoomCommandGateway(const RoomCommandGateway &) = delete;
@@ -335,7 +376,17 @@ public:
                      std::uint32_t serverTick);
   [[nodiscard]] bool disconnect(shared::SessionId sessionId,
                                 shared::SessionGeneration generation);
+  [[nodiscard]] RoomSubmitResult
+  suspendBattleInput(shared::SessionId sessionId,
+                     shared::SessionGeneration generation);
+  [[nodiscard]] RoomSubmitResult
+  resumeBattleInput(shared::SessionId sessionId,
+                    shared::SessionGeneration generation);
   [[nodiscard]] RoomExecutionObservation observation() const;
+  [[nodiscard]] std::optional<std::vector<std::uint8_t>>
+  battleJournal(shared::RoomId roomId) const;
+  [[nodiscard]] bool installRecoveredBattle(RecoveredBattleInstall recovered);
+  [[nodiscard]] bool activateRecoveredBattles();
 
 private:
   class Impl;

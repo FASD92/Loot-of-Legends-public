@@ -73,7 +73,7 @@ private:
   Gate *release_;
 };
 
-// Quiescence contract: after waitUntilIdle() returns true, every
+// PLAN-060 quiescence contract: after waitUntilIdle() returns true, every
 // completed worker-local Task callable has been destroyed and its captures
 // released. The sentinel weak_ptr must be expired immediately after return.
 bool testQuiescenceReleasesCompletedCaptures() {

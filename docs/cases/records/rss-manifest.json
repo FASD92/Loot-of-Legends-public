@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "recordType": "BYTE_IDENTICAL_RSS_SOURCE_COPIES",
+  "sourceRevision": "17c6d7fc0996e389fdf025de8a926974f9186b79",
+  "samplingSeconds": 15,
+  "columns": [
+    "epoch",
+    "vmrss_kb",
+    "vmsize_kb",
+    "rssanon_kb",
+    "heap_virt_kb",
+    "heap_rss_kb",
+    "threads",
+    "est_tcp"
+  ],
+  "records": [
+    {
+      "runId": "candidate-3000p-20260826t105618z-863849d",
+      "participantCount": 3000,
+      "gameSourceSha": "863849d4626b182d34da2e8bea505813ac0cc751",
+      "publicPath": "docs/cases/records/rss-pre-fix-3000p.tsv",
+      "originPath": "deploy/evidence/aws/capacity/observability/evidence/heap-profile-20260826/rss-jeprof.tsv",
+      "originBlobSha": "5e2ae0c07bdbc3d9fb6506464b37924df74a0302",
+      "sha256": "1fc60e26196a40cc4c10f4c5c023a5e8cd838f74aa113e744fe81be9f5a9339e",
+      "peakRssDecimalMB": 546.770944,
+      "slopeWindowAfterFullConnectionSeconds": {
+        "lowerExclusive": 0,
+        "upperInclusive": 1500
+      },
+      "rssSlopeKBPerSecond": 246.28105589726567
+    },
+    {
+      "runId": "candidate-3000p-20260826t144345z-3e703cf",
+      "participantCount": 3000,
+      "gameSourceSha": "3e703cf7b0258804bdf110432db7449b9547a17c",
+      "publicPath": "docs/cases/records/rss-post-fix-3000p.tsv",
+      "originPath": "deploy/evidence/aws/capacity/observability/evidence/heap-profile-20260826/after-fix/rss-lootfix.tsv",
+      "originBlobSha": "8883acfbda4888ad8cecb6ef55545c1989af537a",
+      "sha256": "a0703faafca1a9bec7b754fb864851b9c77696d73bf41494118f35112585e4cd",
+      "peakRssDecimalMB": 85.045248,
+      "slopeWindowAfterFullConnectionSeconds": {
+        "lowerExclusive": 0,
+        "upperInclusive": 1500
+      },
+      "rssSlopeKBPerSecond": -0.23970107054733333
+    },
+    {
+      "runId": "candidate-5250p-20260828t092224z-3e703cf",
+      "participantCount": 5250,
+      "gameSourceSha": "3e703cf7b0258804bdf110432db7449b9547a17c",
+      "publicPath": "docs/cases/records/rss-capacity-5250-60m.tsv",
+      "originPath": "deploy/evidence/aws/capacity/observability/evidence/heap-profile-20260826/soak-5250-1h/rss-soak5250.tsv",
+      "originBlobSha": "cfa22a70b6c7415bec79092fab83e471c89bc623",
+      "sha256": "2116d7755b1371bb6eba0d2c66c9d8789dd4fb174e7a6ae2665de936611d4164",
+      "peakRssDecimalMB": 132.009984,
+      "slopeWindowAfterFullConnectionSeconds": {
+        "lowerExclusive": 100,
+        "upperInclusive": 3400
+      },
+      "rssSlopeKBPerSecond": 0.021483932233491397
+    }
+  ]
+}

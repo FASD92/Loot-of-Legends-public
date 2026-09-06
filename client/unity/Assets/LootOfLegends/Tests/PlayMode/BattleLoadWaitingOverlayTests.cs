@@ -36,5 +36,26 @@ namespace LootOfLegends.Tests.PlayMode
             Assert.That(canvas.blocksRaycasts, Is.False);
             Object.Destroy(gameObject);
         }
+
+        [UnityTest]
+        public IEnumerator SnapshotVisibilityTogglesPresentationModal()
+        {
+            var gameObject = new GameObject("Arena waiting overlay");
+            CanvasGroup canvas = gameObject.AddComponent<CanvasGroup>();
+            BattleLoadWaitingOverlay overlay = gameObject.AddComponent<BattleLoadWaitingOverlay>();
+
+            overlay.Render(true);
+            yield return null;
+            Assert.That(canvas.alpha, Is.EqualTo(1f));
+            Assert.That(canvas.interactable, Is.True);
+            Assert.That(canvas.blocksRaycasts, Is.True);
+
+            overlay.Render(false);
+            yield return null;
+            Assert.That(canvas.alpha, Is.EqualTo(0f));
+            Assert.That(canvas.interactable, Is.False);
+            Assert.That(canvas.blocksRaycasts, Is.False);
+            Object.Destroy(gameObject);
+        }
     }
 }

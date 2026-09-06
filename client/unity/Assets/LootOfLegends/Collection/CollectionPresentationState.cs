@@ -56,11 +56,11 @@ namespace LootOfLegends.Collection
             switch (state)
             {
                 case CollectionPresentationState.Loading:
-                    return "Collection을 불러오는 중입니다.";
+                    return "컬렉션을 불러오는 중입니다.";
                 case CollectionPresentationState.Stale:
-                    return "최근 확인된 Collection입니다. 다시 시도해 주세요.";
+                    return "최근 확인된 컬렉션입니다. 다시 시도해 주세요.";
                 case CollectionPresentationState.Error:
-                    return "Collection을 불러오지 못했습니다. 다시 시도해 주세요.";
+                    return "컬렉션을 불러오지 못했습니다. 다시 시도해 주세요.";
                 default:
                     return string.Empty;
             }

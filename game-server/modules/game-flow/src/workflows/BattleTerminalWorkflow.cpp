@@ -38,9 +38,9 @@ toSettlementExitStatus(battle::ParticipantExitStatus status) noexcept {
 } // namespace
 
 std::optional<settlement::SettlementIntentBatch>
-holdTerminalForSettlementDurability(lobby_room::Room &room,
-                                    const battle::BattleInstance &battle,
-                                    settlement::ResultCommittedAt committedAt) {
+createSettlementIntentBatchForTerminal(
+    const battle::BattleInstance &battle,
+    settlement::ResultCommittedAt committedAt) {
   const auto resultProjection = battle.resultProjection();
   if (resultProjection.state != battle::BattleResultState::Committed ||
       !resultProjection.result.has_value()) {
@@ -97,6 +97,14 @@ holdTerminalForSettlementDurability(lobby_room::Room &room,
           .committedAt = committedAt,
           .participants = std::move(participants),
       });
+  return batch;
+}
+
+std::optional<settlement::SettlementIntentBatch>
+holdTerminalForSettlementDurability(lobby_room::Room &room,
+                                    const battle::BattleInstance &battle,
+                                    settlement::ResultCommittedAt committedAt) {
+  auto batch = createSettlementIntentBatchForTerminal(battle, committedAt);
   if (!batch.has_value() || room.commitAwaitingSettlementDurability() !=
                                 lobby_room::RoomResultCode::Ok) {
     return std::nullopt;

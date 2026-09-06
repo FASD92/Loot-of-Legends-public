@@ -15,7 +15,7 @@
 
 namespace lol::app {
 
-enum class AppliedClaimKind { Accepted, Rejected, Stale };
+enum class AppliedClaimKind { Accepted, Rejected, ResumeRejected, Stale };
 
 enum class RudpPeerFailureReason : std::uint8_t {
   RoomAdmissionRejected,
@@ -40,6 +40,7 @@ struct AppliedClaim final {
   std::optional<session::AuthenticateSessionResult> authenticated;
   std::optional<std::uint64_t> replacedConnectionEpoch;
   std::string nickname;
+  bool resumed{false};
 };
 
 struct RudpSessionClosure final {
@@ -55,8 +56,14 @@ public:
       session::SessionRegistry &sessions,
       transport::rudp::RudpBindingRegistry &rudpBindings) noexcept;
 
-  [[nodiscard]] bool beginClaim(std::uint64_t connectionEpoch,
-                                shared::RequestId requestId);
+  [[nodiscard]] bool beginClaim(
+      std::uint64_t connectionEpoch, shared::RequestId requestId,
+      std::optional<session::ReplacedSession> resumeTarget = std::nullopt);
+  [[nodiscard]] bool
+  detachConnection(std::uint64_t connectionEpoch,
+                   std::chrono::steady_clock::time_point expiresAt);
+  [[nodiscard]] bool expireDetached(shared::SessionId sessionId,
+                                    shared::SessionGeneration generation);
   [[nodiscard]] bool closeConnection(std::uint64_t connectionEpoch);
   [[nodiscard]] std::optional<RudpSessionClosure>
   closeRudpPeer(const RudpPeerFailure &failure);
@@ -66,7 +73,9 @@ public:
                           std::chrono::steady_clock::time_point now);
   [[nodiscard]] std::vector<RudpSessionClosure>
   expireTimedOutRudpPeers(std::chrono::steady_clock::time_point now);
-  [[nodiscard]] AppliedClaim apply(const meta::ClaimCompletion &completion);
+  [[nodiscard]] AppliedClaim apply(const meta::ClaimCompletion &completion,
+                                   std::chrono::steady_clock::time_point now =
+                                       std::chrono::steady_clock::now());
   [[nodiscard]] std::size_t pendingClaimCount() const noexcept;
 
 private:
@@ -75,9 +84,14 @@ private:
     shared::SessionGeneration generation;
   };
 
+  struct PendingClaim final {
+    shared::RequestId requestId;
+    std::optional<session::ReplacedSession> resumeTarget;
+  };
+
   session::SessionRegistry &sessions_;
   transport::rudp::RudpBindingRegistry *rudpBindings_{nullptr};
-  std::map<std::uint64_t, shared::RequestId> pendingByConnectionEpoch_;
+  std::map<std::uint64_t, PendingClaim> pendingByConnectionEpoch_;
   std::map<std::uint64_t, ActiveRoute> sessionByConnectionEpoch_;
   std::map<shared::SessionId, std::uint64_t> connectionEpochBySession_;
 };

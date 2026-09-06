@@ -155,6 +155,37 @@ bool writesGoldenBatchAndCompletesAfterOneSync() {
          readFile(journalPath) == readHex("outbox-journal-valid.hex");
 }
 
+bool idempotentAppendReturnsOriginalCommitWithoutWriting() {
+  TempDirectory directory;
+  const auto journalPath = directory.path() / "segment-1.journal";
+  SegmentJournal journal{journalPath};
+  if (journal.append(goldenBatch()).status !=
+      AppendResultStatus::DurablyQueued) {
+    return false;
+  }
+  const auto before = readFile(journalPath);
+  const auto duplicate = journal.append(goldenBatch());
+  return duplicate.status == AppendResultStatus::DurablyQueued &&
+         duplicate.commitSequence == 3u && readFile(journalPath) == before;
+}
+
+bool conflictingDuplicateBatchIsRejectedWithoutWriting() {
+  TempDirectory directory;
+  const auto journalPath = directory.path() / "segment-1.journal";
+  SegmentJournal journal{journalPath};
+  if (journal.append(goldenBatch()).status !=
+      AppendResultStatus::DurablyQueued) {
+    return false;
+  }
+  const auto before = readFile(journalPath);
+  auto conflicting = goldenBatch();
+  conflicting.canonicalIntents.front().back() ^= 0x01u;
+  const auto duplicate = journal.append(conflicting);
+  return duplicate.status == AppendResultStatus::InvalidBatch &&
+         !duplicate.commitSequence.has_value() &&
+         readFile(journalPath) == before;
+}
+
 bool neverCompletesAtInjectedRecordFailures() {
   constexpr std::array stages = {AppendStage::BeforeRecordWrite,
                                  AppendStage::AfterRecordWrite};
@@ -245,6 +276,8 @@ bool quarantinesCorruptTailAndKeepsCommittedPrefix() {
 
 int main() {
   return writesGoldenBatchAndCompletesAfterOneSync() &&
+                 idempotentAppendReturnsOriginalCommitWithoutWriting() &&
+                 conflictingDuplicateBatchIsRejectedWithoutWriting() &&
                  neverCompletesAtInjectedRecordFailures() &&
                  neverCompletesAtInjectedSyncFailures() &&
                  quarantinesAndTruncatesIncompleteTail() &&

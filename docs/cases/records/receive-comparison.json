@@ -1,0 +1,109 @@
+{
+  "recordType": "PUBLIC_FIELD_SELECTION",
+  "publishedAt": "2026-09-06",
+  "origin": {
+    "baselineBlobSha": "e535b32c3984168498ceb4c0c275a243b2746e65",
+    "candidateBlobSha": "132bd69226c7a5231478c118aaf69596cf4b64e1",
+    "recordReadAtSource": "3e703cf7b0258804bdf110432db7449b9547a17c"
+  },
+  "selectedFields": [
+    "runId",
+    "sourceSha",
+    "profile",
+    "evaluationStatus",
+    "reasonCodes",
+    "disconnectCorrelation.totalReceiveBufferDrops",
+    "disconnectCorrelation.totalReliableExpiries",
+    "disconnectCorrelation.totalPeerCloses",
+    "receiveQueueDepth",
+    "roomFailures.count",
+    "roomFailures.expectedRooms",
+    "tickBudget.p99Ms",
+    "measuredMaxima.process_cpu_busy_ratio",
+    "measuredPercentiles.durable_append_latency_p99_ms",
+    "instances"
+  ],
+  "excludedFields": [
+    "account",
+    "archive.path",
+    "region",
+    "roomFailures.samples",
+    "interpretation",
+    "other diagnostics"
+  ],
+  "publicRuntimeRetested": false,
+  "baseline": {
+    "runId": "candidate-5000p-20260823t112154z-ec1846c",
+    "sourceSha": "ec1846c0157075b0212a634c55df33c48b3d737f",
+    "profile": {
+      "measurementSeconds": 300,
+      "participantCount": 5000,
+      "participantsPerRoom": 10,
+      "roomCount": 500,
+      "warmupSeconds": 60
+    },
+    "evaluationStatus": "INVALID",
+    "reasonCodes": [
+      "ROOM_TOPOLOGY_MISMATCH",
+      "COMMAND_RESULT_TIMEOUT"
+    ],
+    "disconnectCorrelation": {
+      "totalReceiveBufferDrops": 424690.0,
+      "totalReliableExpiries": 1161.0,
+      "totalPeerCloses": 1161.0
+    },
+    "receiveQueueDepth": {
+      "windowSeconds": 100,
+      "samples": 9675,
+      "maximumBytes": 64140480,
+      "socketReceiveBufferBytes": 67108864,
+      "maximumUtilizationRatio": 0.9557676315307617
+    },
+    "roomFailures": {
+      "count": 240,
+      "expectedRooms": 500
+    },
+    "tickBudget": {
+      "p99Ms": 8.0
+    },
+    "measuredMaxima": {
+      "process_cpu_busy_ratio": 0.7940218402895721
+    },
+    "measuredPercentiles": {
+      "durable_append_latency_p99_ms": 43.747868
+    },
+    "instances": null
+  },
+  "candidate": {
+    "runId": "candidate-5000p-20260823t115417z-0ecf1cd",
+    "sourceSha": "0ecf1cd10e5aa42ecd175b3ddb6535d29d5585f7",
+    "profile": {
+      "measurementSeconds": 300,
+      "participantCount": 5000,
+      "participantsPerRoom": 10,
+      "roomCount": 500,
+      "warmupSeconds": 60
+    },
+    "evaluationStatus": "PASS",
+    "reasonCodes": [],
+    "disconnectCorrelation": {
+      "totalReceiveBufferDrops": 0.0,
+      "totalReliableExpiries": 0.0,
+      "totalPeerCloses": 0.0
+    },
+    "roomFailures": {
+      "count": 0,
+      "expectedRooms": 500
+    },
+    "tickBudget": {
+      "p99Ms": 16.0
+    },
+    "measuredMaxima": {
+      "process_cpu_busy_ratio": 0.7953085717842886
+    },
+    "measuredPercentiles": {
+      "durable_append_latency_p99_ms": 66.885888
+    },
+    "instances": null
+  }
+}

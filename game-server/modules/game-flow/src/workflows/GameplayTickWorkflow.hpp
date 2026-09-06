@@ -13,6 +13,7 @@ struct GameplayTickWorkflowResult final {
 
 [[nodiscard]] GameplayTickWorkflowResult
 advanceGameplayTick(std::optional<battle::BattleInstance> &battle,
-                    const battle::MovementTickCommand &command);
+                    const battle::MovementTickCommand &command,
+                    battle::BattleTime at);
 
 } // namespace lol::game_flow::workflows

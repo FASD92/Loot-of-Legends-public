@@ -39,7 +39,10 @@ namespace LootOfLegends.Presentation
         private ArenaPresenter arenaPresenter;
         private FinalResultPresenter resultPresenter;
         private CollectionPresenter collectionPresenter;
+        private CollectionScreenView collectionView;
         private Task collectionRefresh;
+        private bool collectionRefreshQueued;
+        private bool kickNoticePending;
         private Task loadCompletion;
         private ulong requestedLoadBattleId;
         private string configuredScene = string.Empty;
@@ -74,17 +77,17 @@ namespace LootOfLegends.Presentation
             this.arena = arena ?? throw new ArgumentNullException(nameof(arena));
             this.cancellationToken = cancellationToken;
 
-            var hostStart = new BattleHostStartAction(battleCommands);
             keyboard = new PlayerFlowKeyboardInput(
-                lobbyRoom,
                 roomCommands,
-                hostStart,
                 arena,
                 ShowStatus);
 
-            var overlay = new GameObject("PlayerFlowSafeFailure");
-            UnityEngine.Object.DontDestroyOnLoad(overlay);
-            safeView = overlay.AddComponent<SafeFailureTextView>();
+            safeView = UnityEngine.Object.FindFirstObjectByType<SafeFailureTextView>();
+            if (safeView == null)
+            {
+                throw new InvalidOperationException(
+                    "The active Scene must provide SafeFailureTextView");
+            }
             safeView.HideBlockingMessage();
             safeFailure = new SafeFailurePresenter(
                 session,
@@ -101,6 +104,7 @@ namespace LootOfLegends.Presentation
 
             safeFailure.Begin();
             loadFailure.Begin();
+            lobbyRoom.Kicked += OnKicked;
             SceneManager.sceneLoaded += OnSceneLoaded;
             Configure(SceneManager.GetActiveScene().name);
         }
@@ -111,12 +115,12 @@ namespace LootOfLegends.Presentation
             {
                 return;
             }
-            Observe(ref collectionRefresh, "collection");
+            ObserveCollectionRefresh();
             Observe(ref loadCompletion, "arena_load");
             recovery.Render();
 
-            string desired = DesiredScene();
             string active = SceneManager.GetActiveScene().name;
+            string desired = DesiredScene(active);
             if (!string.IsNullOrEmpty(desired) && active != desired)
             {
                 SceneManager.LoadScene(desired);
@@ -142,24 +146,22 @@ namespace LootOfLegends.Presentation
             }
             disposed = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
+            lobbyRoom.Kicked -= OnKicked;
             lobbyPresenter?.Dispose();
             roomPresenter?.Dispose();
             safeFailure.Dispose();
             loadFailure.Dispose();
-            if (safeView != null)
-            {
-                UnityEngine.Object.Destroy(safeView.gameObject);
-            }
         }
 
-        private string DesiredScene()
+        private string DesiredScene(string activeScene)
         {
             if (session.State != PlayerSessionState.Authenticated)
             {
                 return "LoginScene";
             }
             if (battleLoad.IsWaiting || battleLoad.IsGameplayActive ||
-                (battleResult.HasFinalResult && !battleResult.IsReadyForRematch))
+                (battleResult.HasFinalResult && activeScene == "ArenaScene" &&
+                    lobbyRoom.IsInRoom))
             {
                 return "ArenaScene";
             }
@@ -180,31 +182,44 @@ namespace LootOfLegends.Presentation
             arenaPresenter = null;
             resultPresenter = null;
             collectionPresenter = null;
+            collectionView = null;
+            if (sceneName != "LobbyScene")
+            {
+                collectionRefreshQueued = false;
+            }
             configuredScene = sceneName;
 
             if (sceneName == "LobbyScene")
             {
-                LobbyTextView lobbyView =
-                    UnityEngine.Object.FindFirstObjectByType<LobbyTextView>();
+                LobbyScreenView lobbyView =
+                    UnityEngine.Object.FindFirstObjectByType<LobbyScreenView>();
                 if (lobbyView != null)
                 {
                     lobbyPresenter = new LobbyPresenter(
                         lobbyRoom, roomCommands, lobbyView);
+                    lobbyView.Bind(lobbyPresenter, cancellationToken);
                     lobbyPresenter.Begin();
+                    if (kickNoticePending)
+                    {
+                        lobbyView.ShowKickedNotice();
+                        kickNoticePending = false;
+                    }
                 }
-                CollectionTextView collectionView =
-                    UnityEngine.Object.FindFirstObjectByType<CollectionTextView>();
+                collectionView =
+                    UnityEngine.Object.FindFirstObjectByType<CollectionScreenView>();
                 if (collectionView != null)
                 {
                     collectionPresenter = new CollectionPresenter(
                         collection, collectionApi, collectionView);
-                    collectionRefresh = collectionPresenter.RefreshAsync(cancellationToken);
+                    collectionView.Bind(RequestCollectionRefresh);
+                    collectionPresenter.Render();
+                    RequestCollectionRefresh();
                 }
             }
             else if (sceneName == "RoomScene")
             {
-                RoomTextView roomView =
-                    UnityEngine.Object.FindFirstObjectByType<RoomTextView>();
+                RoomScreenView roomView =
+                    UnityEngine.Object.FindFirstObjectByType<RoomScreenView>();
                 if (roomView != null)
                 {
                     roomPresenter = new RoomPresenter(
@@ -212,31 +227,88 @@ namespace LootOfLegends.Presentation
                         roomCommands,
                         new BattleHostStartAction(battleCommands),
                         roomView);
+                    roomView.Bind(roomPresenter, cancellationToken);
                     roomPresenter.Begin();
                 }
             }
             else if (sceneName == "ArenaScene")
             {
+                ulong hostSessionId = 0;
+                RoomPresentationSnapshot room = lobbyRoom.Room;
+                if (room != null)
+                {
+                    foreach (RoomMemberPresentation member in room.Members)
+                    {
+                        if (member.IsHost)
+                        {
+                            hostSessionId = member.SessionId;
+                            break;
+                        }
+                    }
+                }
                 ArenaInputBinding binding = arena();
-                ArenaTextView arenaView =
-                    UnityEngine.Object.FindFirstObjectByType<ArenaTextView>();
+                ArenaScreenView arenaView =
+                    UnityEngine.Object.FindFirstObjectByType<ArenaScreenView>();
                 if (binding != null && arenaView != null)
                 {
+                    arenaView.SetPlayerContext(session.SessionId, hostSessionId);
                     arenaPresenter = new ArenaPresenter(
                         binding.Presentation,
                         binding.Input,
                         arenaView);
+                    arenaView.Bind(arenaPresenter, cancellationToken);
                 }
-                FinalResultTextView resultView =
-                    UnityEngine.Object.FindFirstObjectByType<FinalResultTextView>();
+                FinalResultScreenView resultView =
+                    UnityEngine.Object.FindFirstObjectByType<FinalResultScreenView>();
                 if (resultView != null)
                 {
+                    resultView.SetPlayerContext(session.SessionId, hostSessionId);
                     resultPresenter = new FinalResultPresenter(
                         battleResult,
                         resultView,
-                        new UnityRoomReturnNavigation());
+                        new UnityRoomReturnNavigation(),
+                        roomCommands.LeaveAsync);
+                    resultView.Bind(
+                        resultPresenter,
+                        cancellationToken);
                 }
             }
+        }
+
+        private void RequestCollectionRefresh()
+        {
+            if (collectionPresenter == null || collectionView == null)
+            {
+                return;
+            }
+            if (collectionRefresh != null)
+            {
+                collectionRefreshQueued = true;
+                return;
+            }
+            collectionRefreshQueued = false;
+            collectionRefresh = collectionPresenter.RefreshAsync(cancellationToken);
+        }
+
+        private void OnKicked()
+        {
+            kickNoticePending = true;
+        }
+
+        private void ObserveCollectionRefresh()
+        {
+            if (collectionRefresh == null || !collectionRefresh.IsCompleted)
+            {
+                return;
+            }
+            Observe(ref collectionRefresh, "collection");
+            if (!collectionRefreshQueued || configuredScene != "LobbyScene" ||
+                collectionPresenter == null || collectionView == null)
+            {
+                return;
+            }
+            collectionPresenter.Render();
+            RequestCollectionRefresh();
         }
 
         private void BeginArenaLoadCompletion(string sceneName)
@@ -265,7 +337,7 @@ namespace LootOfLegends.Presentation
                     cancellationToken);
             if (outcome != BattleCommandOutcome.Ok)
             {
-                ShowStatus("Arena 진입 요청을 완료하지 못했습니다.");
+                ShowStatus("아레나 진입 요청을 완료하지 못했습니다.");
                 Debug.LogWarning(
                     "Player flow arena load request was rejected safely: " + outcome);
             }

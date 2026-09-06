@@ -93,8 +93,8 @@ SettlementPublisher::step(std::chrono::steady_clock::time_point now) {
   if (phase_ == IntentPhase::Publish) {
     switch (meta_.publish(intent)) {
     case MetaPublishOutcome::Applied:
-      return advanceIntent();
     case MetaPublishOutcome::AcceptedPending:
+      return advanceIntent();
     case MetaPublishOutcome::ResponseLost:
       phase_ = IntentPhase::ReconcileStatus;
       retryAttempt_ = 0u;
@@ -110,8 +110,8 @@ SettlementPublisher::step(std::chrono::steady_clock::time_point now) {
 
   switch (meta_.status(intent)) {
   case MetaStatusOutcome::Applied:
-    return advanceIntent();
   case MetaStatusOutcome::AcceptedPending:
+    return advanceIntent();
   case MetaStatusOutcome::Retryable:
     return scheduleRetry(now);
   case MetaStatusOutcome::NotFound:

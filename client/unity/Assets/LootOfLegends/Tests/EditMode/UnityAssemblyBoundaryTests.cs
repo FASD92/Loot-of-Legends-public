@@ -60,9 +60,11 @@ namespace LootOfLegends.Tests.EditMode
             var violations = new List<string>();
             AddPresentationSourceViolation(
                 violations,
-                "using System.Net.Sockets; BattleLoadProtocolCodec.DecodeServerFrame(frame);");
+                "using System.Net.Sockets; " +
+                "BattleLoadProtocolCodec.DecodeServerFrame(frame); " +
+                "const string path = \"Assets/ThirdParty/PresentationPack/player.png\";");
 
-            Assert.That(violations, Has.Count.EqualTo(2));
+            Assert.That(violations, Has.Count.EqualTo(3));
         }
 
         [Test]
@@ -127,7 +129,7 @@ namespace LootOfLegends.Tests.EditMode
             }
         }
 
-        private static void AddPresentationSourceViolation(
+        internal static void AddPresentationSourceViolation(
             ICollection<string> violations,
             string source)
         {
@@ -140,6 +142,12 @@ namespace LootOfLegends.Tests.EditMode
             if (source.Contains("ProtocolCodec"))
             {
                 violations.Add("Presentation must not call a protocol codec");
+            }
+            if (source.Contains("Assets/ThirdParty/") ||
+                source.Contains("ThirdParty/PresentationPack") ||
+                source.Contains("NinjaAdventure"))
+            {
+                violations.Add("Product code must not reference a vendor asset path");
             }
         }
 

@@ -9,7 +9,8 @@
     "LootOfLegends.Collection",
     "LootOfLegends.Session",
     "LootOfLegends.Bootstrap",
-    "LootOfLegends.Presentation"
+    "LootOfLegends.Presentation",
+    "UnityEngine.UI"
   ],
   "includePlatforms": [
     "Editor"

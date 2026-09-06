@@ -1,15 +1,39 @@
 using System.Collections;
+using System.Reflection;
 using LootOfLegends.Battle;
 using LootOfLegends.Presentation.Common;
 using LootOfLegends.Protocol;
 using LootOfLegends.Session;
 using NUnit.Framework;
+using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.TestTools;
+using UnityEngine.UI;
 
 namespace LootOfLegends.Tests.PlayMode
 {
     public sealed class SafeFailurePresentationTests
     {
+        [UnityTest]
+        public IEnumerator SceneOverlayShowsAndHidesBlockingCopy()
+        {
+            SceneManager.LoadScene("LoginScene");
+            yield return null;
+            SafeFailureTextView view =
+                Object.FindFirstObjectByType<SafeFailureTextView>();
+            Assert.That(view, Is.Not.Null);
+            var panel = (GameObject)GetField(view, "panel");
+            var label = (Text)GetField(view, "label");
+
+            view.ShowBlockingMessage("안전 복구 안내");
+            Assert.That(panel.activeSelf, Is.True);
+            Assert.That(label.text, Is.EqualTo("안전 복구 안내"));
+
+            view.HideBlockingMessage();
+            Assert.That(panel.activeSelf, Is.False);
+            Assert.That(label.text, Is.Empty);
+        }
+
         [UnityTest]
         public IEnumerator SessionReplacedShowsBoundedCopyAndReturnsLoginOnce()
         {
@@ -89,6 +113,13 @@ namespace LootOfLegends.Tests.PlayMode
                 Calls++;
                 Copy = copy;
             }
+        }
+
+        private static object GetField(SafeFailureTextView view, string name)
+        {
+            return typeof(SafeFailureTextView).GetField(
+                name,
+                BindingFlags.Instance | BindingFlags.NonPublic).GetValue(view);
         }
 
         private sealed class RecordingLoginNavigation : ILoginNavigation

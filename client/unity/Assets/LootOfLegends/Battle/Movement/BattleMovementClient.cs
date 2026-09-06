@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Threading;
 using System.Threading.Tasks;
+using LootOfLegends.Protocol;
 using LootOfLegends.Transport;
 using LootOfLegends.Transport.Rudp;
 
@@ -75,6 +76,33 @@ namespace LootOfLegends.Battle.Movement
             hasSnapshot = true;
             return true;
         }
+
+        public bool ApplyResumeSnapshot(BattleResumeSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+            if (snapshot.BattleInstanceId != battleInstanceId)
+            {
+                return false;
+            }
+            positions.Clear();
+            foreach (BattleResumePlayerState player in snapshot.Players)
+            {
+                positions.Add(
+                    player.SessionId,
+                    new PlayerPosition(
+                        player.PositionXMillimeters,
+                        player.PositionYMillimeters));
+            }
+            // TCP snapshotId and the fresh-generation RUDP sequence are
+            // independent ordering domains.
+            SnapshotSequence = 0;
+            ServerTick = snapshot.ServerTick;
+            hasSnapshot = false;
+            return true;
+        }
     }
 
     public sealed class BattleMovementClient : IRudpBindCapabilitySink
@@ -115,7 +143,8 @@ namespace LootOfLegends.Battle.Movement
             RudpInboundPump inboundPump,
             ulong sessionId,
             ulong sessionGeneration,
-            ulong battleInstanceId)
+            ulong battleInstanceId,
+            uint nextActionSequence = 1)
         {
             this.tcpSender = tcpSender ?? throw new ArgumentNullException(nameof(tcpSender));
             this.reliableOutbound = reliableOutbound ??
@@ -128,12 +157,18 @@ namespace LootOfLegends.Battle.Movement
             this.sessionId = sessionId;
             this.sessionGeneration = sessionGeneration;
             this.battleInstanceId = battleInstanceId;
+            if (nextActionSequence == 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(nextActionSequence));
+            }
+            this.nextActionSequence = nextActionSequence;
             ReadModel = new BattleMovementReadModel(battleInstanceId);
         }
 
         public bool IsBound => reliableOutbound.TransportEpoch != 0;
         public uint TransportEpoch => reliableOutbound.TransportEpoch;
         public BattleMovementReadModel ReadModel { get; }
+        public uint NextActionSequence => nextActionSequence;
 
         public async Task RequestBindCapabilityAsync(
             ulong requestId,

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <lol/battle/BattleLoadApi.hpp>
+#include <lol/battle_continuity/Durability.hpp>
+#include <lol/battle_continuity/FlightRecorder.hpp>
 #include <lol/game_flow/BattleRecovery.hpp>
 #include <lol/game_flow/GameplayTransportReadinessPort.hpp>
 #include <lol/lobby_room/RoomApi.hpp>
@@ -43,12 +45,13 @@ struct ConfirmedDisconnectCommand final {
   shared::SessionGeneration generation;
 };
 
-using RoomControlCommand =
-    std::variant<ConfirmedDisconnectCommand, battle::LoadBarrierDeadlineCommand,
-                 battle::MovementTickCommand, battle::CombatDeadlineCommand,
-                 battle::LootDeadlineCommand,
-                 settlement::DurableAppendCompleted,
-                 settlement::DurableAppendFailed>;
+using RoomControlCommand = std::variant<
+    ConfirmedDisconnectCommand, battle::SuspendBattleInputCommand,
+    battle::ResumeBattleInputCommand, battle::LoadBarrierDeadlineCommand,
+    battle::MovementTickCommand, battle::CombatDeadlineCommand,
+    battle::LootDeadlineCommand, settlement::DurableAppendCompleted,
+    settlement::DurableAppendFailed, battle_continuity::DurableTickCommitted,
+    battle_continuity::DurableTickWriteFailed>;
 
 struct RoomControlEnvelope final {
   RoomControlCommand command;
@@ -79,12 +82,16 @@ enum class RoomCommandKind : std::uint8_t {
   Attack,
   ClaimLoot,
   ConfirmedDisconnect,
+  SuspendBattleInput,
+  ResumeBattleInput,
   LoadBarrierDeadline,
   MovementTick,
   CombatDeadline,
   LootDeadline,
   DurableAppendCompleted,
   DurableAppendFailed,
+  ContinuityTickCommitted,
+  ContinuityTickFailed,
 };
 
 struct RoomCommandOutcome final {
@@ -99,8 +106,10 @@ struct RoomCommandOutcome final {
   std::optional<shared::SessionGeneration> targetGeneration;
   lobby_room::RoomResultCode code;
   std::optional<battle::BattleLoadResultCode> battleCode;
+  std::optional<battle::BattleInputResultCode> inputControlCode;
   std::optional<battle::MovementResultCode> movementCode;
   std::optional<battle::AttackTerminalResult> attackResult;
+  std::optional<battle::AttackAppliedRecord> attackApplied;
   std::optional<battle::CombatDeadlineResultCode> combatDeadlineCode;
   std::optional<battle::ClaimLootTerminalResult> lootClaimResult;
   std::optional<battle::LootDeadlineResultCode> lootDeadlineCode;
@@ -109,6 +118,7 @@ struct RoomCommandOutcome final {
   std::optional<lobby_room::RoomDetailProjection> detail;
   std::optional<lobby_room::BattleAdmissionSnapshot> admission;
   std::optional<battle::BattleLoadProjection> battle;
+  std::optional<battle::BattleResumeProjection> resumeProjection;
   std::optional<battle::StateSnapshotProjection> snapshot;
   std::optional<battle::CombatProjection> combat;
   std::optional<BattleRecoveryNotice> recoveryNotice;
@@ -144,6 +154,17 @@ struct RoomExecutionMetrics final {
   std::uint64_t schedulingFailures;
 };
 
+struct RecoveredRoomExecutionState final {
+  lobby_room::Room room;
+  battle::BattleInstance battle;
+  battle_continuity::BattleRecording recording;
+  std::optional<std::uint64_t> nextBattleOrdinal;
+  std::optional<settlement::SettlementIntentBatch> settlementBatch;
+  std::optional<settlement::SettlementCapacityReservation>
+      settlementReservation;
+  bool settlementAlreadyDurable{};
+};
+
 class RoomExecutionCell final
     : public std::enable_shared_from_this<RoomExecutionCell> {
 public:
@@ -166,7 +187,19 @@ public:
          lobby_room::Room room, WorkBudget budget, OutcomeSink outcomeSink,
          const GameplayTransportReadinessPort *readiness,
          settlement::SettlementCapacityGate *capacityGate,
-         settlement::SettlementStoragePort *storage);
+         settlement::SettlementStoragePort *storage,
+         std::uint32_t writerRecoveryEpoch = 0U,
+         battle_continuity::DurableTickWritePort *continuityStorage = nullptr);
+  [[nodiscard]] static std::optional<std::shared_ptr<RoomExecutionCell>>
+  createRecovered(runtime::WorkerPool &workers,
+                  runtime::DeadlineScheduler &deadlines,
+                  RecoveredRoomExecutionState recovered, WorkBudget budget,
+                  OutcomeSink outcomeSink,
+                  const GameplayTransportReadinessPort *readiness,
+                  settlement::SettlementCapacityGate *capacityGate,
+                  settlement::SettlementStoragePort *storage,
+                  std::uint32_t writerRecoveryEpoch,
+                  battle_continuity::DurableTickWritePort *continuityStorage);
 
   [[nodiscard]] RoomCommandAdmission enqueue(RoomCommandEnvelope command);
   [[nodiscard]] RoomCommandAdmission
@@ -182,8 +215,12 @@ public:
   [[nodiscard]] lobby_room::RoomLifecycle lifecycle() const;
   [[nodiscard]] std::optional<settlement::SettlementIntentBatch>
   settlementBatch() const;
+  [[nodiscard]] std::optional<std::vector<std::uint8_t>> battleJournal() const;
+  [[nodiscard]] bool activateRecovered();
 
 private:
+  friend class RoomExecutionDirectory;
+
   static constexpr std::size_t kExternalQueueCapacity = 224;
   static constexpr std::size_t kControlQueueCapacity = 32;
 
@@ -196,16 +233,31 @@ private:
     CellEnvelope envelope;
   };
 
+  struct LiveBattleClockAnchor final {
+    shared::BattleInstanceId battleId;
+    std::chrono::steady_clock::time_point liveTime;
+    battle::BattleTime battleTime;
+  };
+
   RoomExecutionCell(runtime::WorkerPool &workers,
                     runtime::DeadlineScheduler &deadlines,
                     lobby_room::Room room, WorkBudget budget,
                     OutcomeSink outcomeSink,
                     const GameplayTransportReadinessPort *readiness,
                     settlement::SettlementCapacityGate *capacityGate,
-                    settlement::SettlementStoragePort *storage);
+                    settlement::SettlementStoragePort *storage,
+                    std::uint32_t writerRecoveryEpoch,
+                    battle_continuity::DurableTickWritePort *continuityStorage);
 
   [[nodiscard]] bool scheduleLocked();
   void submitPendingAppend();
+  void submitPendingContinuityWrite();
+  void enqueueContinuityCompletion(
+      battle_continuity::DurableTickWriteOutcome outcome);
+  void retryContinuityCompletionScheduling();
+  void armContinuityCompletionRetryLocked();
+  [[nodiscard]] bool armRecoveredDeadlineLocked();
+  void queueSettlementAppendLocked();
   [[nodiscard]] std::optional<QueuedRoomCommand> popNextLocked();
   [[nodiscard]] RoomCommandOutcome applyLocked(QueuedRoomCommand command);
   [[nodiscard]] bool
@@ -228,15 +280,27 @@ private:
   [[nodiscard]] battle::ClaimLootTerminalResult
   routeRetainedLootLocked(const battle::ClaimLootCommand &command,
                           std::chrono::steady_clock::time_point receivedAt);
+  [[nodiscard]] battle::BattleTime
+  battleTimeForLocked(std::chrono::steady_clock::time_point liveTime);
   void runTurn() noexcept;
 
   runtime::WorkerPool &workers_;
   runtime::DeadlineScheduler &deadlines_;
   lobby_room::Room room_;
   std::optional<battle::BattleInstance> battle_;
+  std::optional<battle_continuity::BattleRecording> battleRecording_;
+  std::optional<LiveBattleClockAnchor> battleClockAnchor_;
+  std::optional<std::chrono::steady_clock::time_point> battleCompletedLiveAt_;
   std::optional<settlement::SettlementIntentBatch> settlementBatch_;
   std::deque<battle::RetainedLootResults> retainedLootResults_;
   std::optional<settlement::DurableAppendRequest> pendingAppendRequest_;
+  std::optional<battle_continuity::DurableTickWriteRequest>
+      pendingContinuityWrite_;
+  std::optional<battle_continuity::DurableTickCommitted>
+      pendingContinuityReceipt_;
+  std::optional<RoomCommandOutcome> heldContinuityOutcome_;
+  std::optional<RoomCommandOutcome> releasedContinuityOutcome_;
+  std::optional<QueuedRoomCommand> continuityCompletion_;
   std::optional<settlement::SettlementCapacityReservation>
       settlementReservation_;
   std::uint64_t nextBattleOrdinal_{1};
@@ -245,6 +309,8 @@ private:
   const GameplayTransportReadinessPort *readiness_;
   std::optional<settlement::SettlementCapacityGate> capacityGate_;
   settlement::SettlementStoragePort *storage_;
+  const std::uint32_t writerRecoveryEpoch_;
+  battle_continuity::DurableTickWritePort *continuityStorage_;
   enum class SettlementAppendState : std::uint8_t {
     None,
     Appending,
@@ -253,11 +319,14 @@ private:
   SettlementAppendState settlementAppendState_{SettlementAppendState::None};
   std::optional<shared::BattleInstanceId> emittedResultFailureBattle_;
   bool settlementRecoveryNoticeEmitted_{false};
+  bool continuityDurabilityPending_{false};
+  bool continuityRecordingFailed_{false};
   mutable std::mutex mutex_;
   std::condition_variable idle_;
   std::deque<QueuedRoomCommand> externalQueue_;
   std::deque<QueuedRoomCommand> controlQueue_;
   std::unique_ptr<runtime::DeadlineLease> criticalDeadlineLease_;
+  std::unique_ptr<runtime::DeadlineLease> continuityCompletionLease_;
   std::optional<shared::BattleInstanceId> criticalDeadlineBattleId_;
   std::uint64_t criticalDeadlineToken_{0};
   std::size_t generalControlQueueDepth_{0};
@@ -277,6 +346,7 @@ private:
   std::uint64_t schedulingFailures_{0};
   bool scheduled_{false};
   bool retired_{false};
+  bool recoveredActivationPending_{false};
 };
 
 } // namespace lol::game_flow::execution

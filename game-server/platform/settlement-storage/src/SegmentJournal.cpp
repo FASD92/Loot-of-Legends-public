@@ -339,12 +339,14 @@ std::optional<JournalRecoveryResult> SegmentJournal::recoverAndRepair() {
   }
   recovered_ = true;
   healthy_ = recovery.status != JournalRecoveryStatus::CorruptTailQuarantined;
+  recovery.lastSequence = std::max(recovery.lastSequence, compactedThrough_);
   nextSequence_ = std::max(nextSequence_, recovery.lastSequence + 1u);
   return recovery;
 }
 
 AppendResult SegmentJournal::append(const AppendBatch &batch) {
-  if ((!recovered_ && !recoverAndRepair().has_value()) || !healthy_) {
+  const auto recovered = recoverAndRepair();
+  if (!recovered.has_value() || !healthy_) {
     return failed(AppendResultStatus::StorageUnavailable);
   }
   if (!nonzero(batch.batchId) || batch.canonicalIntents.size() < 2u ||
@@ -352,6 +354,20 @@ AppendResult SegmentJournal::append(const AppendBatch &batch) {
       std::any_of(batch.canonicalIntents.begin(), batch.canonicalIntents.end(),
                   [](const auto &payload) { return payload.empty(); })) {
     return failed(AppendResultStatus::InvalidBatch);
+  }
+
+  const auto existing = std::ranges::find_if(
+      recovered->batches, [&](const RecoveredBatch &candidate) {
+        return candidate.batchId == batch.batchId;
+      });
+  if (existing != recovered->batches.end()) {
+    if (existing->canonicalIntents != batch.canonicalIntents) {
+      return failed(AppendResultStatus::InvalidBatch);
+    }
+    return {
+        .status = AppendResultStatus::DurablyQueued,
+        .commitSequence = existing->commitSequence,
+    };
   }
 
   std::vector<std::vector<std::uint8_t>> records;

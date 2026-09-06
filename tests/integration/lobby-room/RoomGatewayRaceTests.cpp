@@ -356,6 +356,18 @@ bool disconnectTransfersHostAndStaleGenerationCannotMutate() {
          newRoom->hostSessionId == host.sessionId;
 }
 
+bool settlementHistoryNamespacesRestartRoomIds() {
+  const auto fresh =
+      RoomCommandGateway::firstRoomIdForSettlementHistory(0u);
+  const auto afterRetiredBatch =
+      RoomCommandGateway::firstRoomIdForSettlementHistory(8u);
+  const auto exhausted = RoomCommandGateway::firstRoomIdForSettlementHistory(
+      UINT64_C(0xffffffff));
+  return fresh == RoomId{UINT64_C(0x0000000100000001)} &&
+         afterRetiredBatch == RoomId{UINT64_C(0x0000000900000001)} &&
+         fresh != afterRetiredBatch && exhausted == std::nullopt;
+}
+
 } // namespace
 
 int main() {
@@ -370,6 +382,9 @@ int main() {
   }
   if (!disconnectTransfersHostAndStaleGenerationCannotMutate()) {
     return 4;
+  }
+  if (!settlementHistoryNamespacesRestartRoomIds()) {
+    return 5;
   }
   return EXIT_SUCCESS;
 }

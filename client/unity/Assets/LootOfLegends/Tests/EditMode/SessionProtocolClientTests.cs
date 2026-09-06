@@ -59,6 +59,36 @@ namespace LootOfLegends.Tests.EditMode
             Assert.That(model.SessionGeneration, Is.Zero);
         }
 
+        [Test]
+        public void ResumedWelcomeRequiresRequestAndSessionCorrelationBeforeRotation()
+        {
+            var model = new PlayerSessionReadModel();
+            model.BeginAuthentication();
+            Assert.That(model.Apply(new WelcomeSession(1, 11, 13, 0, "player-one")), Is.True);
+
+            Assert.That(
+                model.ApplyResumedWelcome(
+                    2,
+                    new WelcomeSession(1, 11, 14, 0, "stale-request")),
+                Is.False);
+            Assert.That(model.SessionGeneration, Is.EqualTo(13));
+
+            Assert.That(
+                model.ApplyResumedWelcome(
+                    2,
+                    new WelcomeSession(2, 99, 14, 0, "wrong-session")),
+                Is.False);
+            Assert.That(model.SessionGeneration, Is.EqualTo(13));
+
+            Assert.That(
+                model.ApplyResumedWelcome(
+                    2,
+                    new WelcomeSession(2, 11, 14, 0, "player-one")),
+                Is.True);
+            Assert.That(model.SessionGeneration, Is.EqualTo(14));
+            Assert.That(model.Nickname, Is.EqualTo("player-one"));
+        }
+
         private static byte[] GoldenFrame(string semanticName)
         {
             string path = Path.GetFullPath(Path.Combine(

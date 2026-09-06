@@ -37,12 +37,18 @@ public:
         const transport::tcp::NormalizedAuthRequest &request);
   [[nodiscard]] std::vector<RoutedSessionFrame>
   complete(const meta::ClaimCompletion &completion,
-           std::uint64_t serverTimeUnixMillis);
+           std::uint64_t serverTimeUnixMillis,
+           std::chrono::steady_clock::time_point now =
+               std::chrono::steady_clock::now());
   [[nodiscard]] std::optional<RoutedSessionFrame> requestRudpBindCapability(
       std::uint64_t connectionEpoch,
       const transport::tcp::RequestRudpBindCapability &request,
       std::chrono::steady_clock::time_point now);
   [[nodiscard]] bool disconnect(std::uint64_t connectionEpoch);
+  [[nodiscard]] bool detach(std::uint64_t connectionEpoch,
+                            std::chrono::steady_clock::time_point expiresAt);
+  [[nodiscard]] bool expireDetached(shared::SessionId sessionId,
+                                    shared::SessionGeneration generation);
 
 private:
   AuthClaimCoordinator &correlations_;

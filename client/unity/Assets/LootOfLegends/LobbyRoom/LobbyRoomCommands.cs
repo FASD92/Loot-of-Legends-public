@@ -51,6 +51,9 @@ namespace LootOfLegends.LobbyRoom
     {
         private readonly ConcurrentDictionary<ulong, TaskCompletionSource<RoomCommandResult>>
             pending = new ConcurrentDictionary<ulong, TaskCompletionSource<RoomCommandResult>>();
+        private readonly ConcurrentDictionary<ulong, byte> lobbyExitRequests =
+            new ConcurrentDictionary<ulong, byte>();
+        private int confirmedLobbyExit;
         private long orphanedResponseCount;
 
         public long OrphanedResponseCount => Interlocked.Read(ref orphanedResponseCount);
@@ -67,12 +70,28 @@ namespace LootOfLegends.LobbyRoom
             return completion.Task;
         }
 
+        public Task<RoomCommandResult> RegisterLobbyExit(ulong requestId)
+        {
+            Task<RoomCommandResult> completion = Register(requestId);
+            if (!lobbyExitRequests.TryAdd(requestId, 0))
+            {
+                throw new ArgumentException(
+                    "Lobby exit correlation must be unique", nameof(requestId));
+            }
+            return completion;
+        }
+
         public void Complete(ulong requestId, RoomCommandResult result)
         {
+            bool lobbyExit = lobbyExitRequests.TryRemove(requestId, out _);
             if (pending.TryRemove(
                     requestId,
                     out TaskCompletionSource<RoomCommandResult> completion))
             {
+                if (lobbyExit && result == RoomCommandResult.Ok)
+                {
+                    Interlocked.Exchange(ref confirmedLobbyExit, 1);
+                }
                 completion.TrySetResult(result);
                 return;
             }
@@ -81,12 +100,18 @@ namespace LootOfLegends.LobbyRoom
 
         public void Fail(ulong requestId, Exception error)
         {
+            lobbyExitRequests.TryRemove(requestId, out _);
             if (pending.TryRemove(
                     requestId,
                     out TaskCompletionSource<RoomCommandResult> completion))
             {
                 completion.TrySetException(error);
             }
+        }
+
+        public bool ConsumeConfirmedLobbyExit()
+        {
+            return Interlocked.Exchange(ref confirmedLobbyExit, 0) != 0;
         }
     }
 
@@ -114,7 +139,15 @@ namespace LootOfLegends.LobbyRoom
                 correlator.Complete(response.RequestId, (RoomCommandResult)response.ResultCode);
                 return;
             }
-            readModel.Apply(message);
+            bool wasInRoom = readModel.IsInRoom;
+            bool voluntaryLobbyExit = message is LobbyRoomListUpdate &&
+                wasInRoom && correlator.ConsumeConfirmedLobbyExit();
+            bool applied = readModel.Apply(message);
+            if (applied && message is LobbyRoomListUpdate && wasInRoom &&
+                !readModel.IsInRoom && !voluntaryLobbyExit)
+            {
+                readModel.PublishKicked();
+            }
         }
     }
 
@@ -161,7 +194,8 @@ namespace LootOfLegends.LobbyRoom
             return SendAsync(
                 requestId,
                 LobbyRoomProtocolCodec.EncodeLeaveRoom(requestId),
-                cancellationToken);
+                cancellationToken,
+                true);
         }
 
         public Task<RoomCommandResult> SetReadyAsync(
@@ -203,9 +237,12 @@ namespace LootOfLegends.LobbyRoom
         private async Task<RoomCommandResult> SendAsync(
             ulong requestId,
             byte[] frame,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool lobbyExit = false)
         {
-            Task<RoomCommandResult> completion = correlator.Register(requestId);
+            Task<RoomCommandResult> completion = lobbyExit
+                ? correlator.RegisterLobbyExit(requestId)
+                : correlator.Register(requestId);
             try
             {
                 await sender.SendAsync(frame, cancellationToken).ConfigureAwait(false);

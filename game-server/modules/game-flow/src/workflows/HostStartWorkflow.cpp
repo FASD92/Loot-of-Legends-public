@@ -41,6 +41,9 @@ commitHostStart(lobby_room::Room &room, shared::BattleInstanceId battleId,
       .roomId = eligibility.admission->roomId,
       .battleId = battleId,
       .candidates = std::move(candidates),
+      .rulesetVersion = battle::battleRulesetVersion,
+      .seed = battle::deriveBattleSeed(eligibility.admission->roomId, battleId,
+                                       battle::battleRulesetVersion),
   });
   if (created.code != battle::BattleLoadResultCode::Ok ||
       !created.battle.has_value() ||

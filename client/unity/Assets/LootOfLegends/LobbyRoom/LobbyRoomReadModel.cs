@@ -13,6 +13,7 @@ namespace LootOfLegends.LobbyRoom
         private long revision;
 
         public event Action Changed;
+        public event Action Kicked;
 
         public ulong SessionId { get; private set; }
         public ulong SessionGeneration { get; private set; }
@@ -60,6 +61,11 @@ namespace LootOfLegends.LobbyRoom
         void ILobbyRoomInboundMessageSink.OnMessage(LobbyRoomServerMessage message)
         {
             Apply(message);
+        }
+
+        internal void PublishKicked()
+        {
+            Kicked?.Invoke();
         }
 
         private static IReadOnlyList<RoomSummary> Copy(IReadOnlyList<RoomSummary> source)

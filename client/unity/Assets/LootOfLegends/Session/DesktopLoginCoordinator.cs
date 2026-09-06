@@ -41,7 +41,7 @@ namespace LootOfLegends.Session
                         listener.CallbackUri,
                         state,
                         S256(verifier),
-                        cancellationToken).ConfigureAwait(false);
+                        cancellationToken);
                     if (started.ExpiresAt <= DateTimeOffset.UtcNow)
                     {
                         throw new DesktopAuthException("Desktop auth attempt is already expired");

@@ -44,6 +44,23 @@ namespace LootOfLegends.Tests.EditMode
         }
 
         [Test]
+        public async Task SystemBrowserOpensOnCallingThreadAfterAsyncAuthStart()
+        {
+            int callingThread = Thread.CurrentThread.ManagedThreadId;
+            var api = new RecordingAuthApi(completeStartAsynchronously: true);
+            var browser = new RecordingBrowser();
+            var coordinator = new DesktopLoginCoordinator(
+                api,
+                new FakeListenerFactory(api, false),
+                browser,
+                new MetaSessionState());
+
+            await coordinator.SignInAsync(CancellationToken.None);
+
+            Assert.That(browser.OpenThread, Is.EqualTo(callingThread));
+        }
+
+        [Test]
         public void StateMismatchStopsBeforeExchangeAndDoesNotStoreSession()
         {
             var api = new RecordingAuthApi();
@@ -65,6 +82,13 @@ namespace LootOfLegends.Tests.EditMode
 
         private sealed class RecordingAuthApi : IDesktopAuthApi
         {
+            private readonly bool completeStartAsynchronously;
+
+            public RecordingAuthApi(bool completeStartAsynchronously = false)
+            {
+                this.completeStartAsynchronously = completeStartAsynchronously;
+            }
+
             public readonly Uri AuthorizationUrl =
                 new Uri("https://accounts.google.com/o/oauth2/v2/auth?opaque=1");
             public readonly string MetaSession =
@@ -87,9 +111,12 @@ namespace LootOfLegends.Tests.EditMode
                 Assert.That(loopbackRedirectUri.AbsolutePath, Is.EqualTo("/callback"));
                 StartState = state;
                 StartChallenge = codeChallenge;
-                return Task.FromResult(new DesktopAuthStart(
+                var started = new DesktopAuthStart(
                     AuthorizationUrl,
-                    DateTimeOffset.UtcNow.AddMinutes(2)));
+                    DateTimeOffset.UtcNow.AddMinutes(2));
+                return completeStartAsynchronously
+                    ? Task.Run(() => started)
+                    : Task.FromResult(started);
             }
 
             public Task<MetaSessionIssued> ExchangeAsync(
@@ -157,10 +184,12 @@ namespace LootOfLegends.Tests.EditMode
         private sealed class RecordingBrowser : ISystemBrowser
         {
             public Uri Opened { get; private set; }
+            public int OpenThread { get; private set; }
 
             public void Open(Uri uri)
             {
                 Opened = uri;
+                OpenThread = Thread.CurrentThread.ManagedThreadId;
             }
         }
     }

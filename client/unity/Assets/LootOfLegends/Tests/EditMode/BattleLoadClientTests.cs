@@ -22,6 +22,7 @@ namespace LootOfLegends.Tests.EditMode
         {
             Assert.That(Application.unityVersion, Is.EqualTo("6000.3.21f1"));
             Assert.That(EditorSettings.serializationMode, Is.EqualTo(SerializationMode.ForceText));
+            Assert.That(PlayerSettings.runInBackground, Is.True);
             Assert.That(
                 PlayerSettings.GetApiCompatibilityLevel(NamedBuildTarget.Standalone),
                 Is.EqualTo(ApiCompatibilityLevel.NET_Standard));

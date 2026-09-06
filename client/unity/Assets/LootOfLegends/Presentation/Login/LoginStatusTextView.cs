@@ -1,25 +1,30 @@
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace LootOfLegends.Presentation.Login
 {
-    [RequireComponent(typeof(TextMesh))]
     public sealed class LoginStatusTextView : MonoBehaviour
     {
-        private TextMesh label;
+        [SerializeField] private Text label;
+        private string copy = "로그인 준비 중입니다.";
 
         private void Awake()
         {
-            label = GetComponent<TextMesh>();
-            if (label == null)
-            {
-                label = gameObject.AddComponent<TextMesh>();
-            }
-            ShowStatus("로그인 준비 중입니다.");
+            Render();
         }
 
-        public void ShowStatus(string copy)
+        public void ShowStatus(string next)
         {
-            label.text = copy ?? string.Empty;
+            copy = next ?? string.Empty;
+            Render();
+        }
+
+        private void Render()
+        {
+            if (label != null)
+            {
+                label.text = copy;
+            }
         }
     }
 }

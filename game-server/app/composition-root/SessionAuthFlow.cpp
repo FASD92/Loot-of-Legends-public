@@ -65,8 +65,18 @@ SessionAuthFlow::SessionAuthFlow(AuthClaimCoordinator &correlations,
 std::vector<RoutedSessionFrame>
 SessionAuthFlow::begin(std::uint64_t connectionEpoch,
                        const transport::tcp::NormalizedAuthRequest &request) {
+  const auto resumeTarget =
+      request.resumeRequested
+          ? std::optional{session::ReplacedSession{
+                .sessionId = shared::SessionId{request.previousSessionId},
+                .generation =
+                    shared::SessionGeneration{
+                        request.previousSessionGeneration},
+            }}
+          : std::nullopt;
   if (!correlations_.beginClaim(connectionEpoch,
-                                shared::RequestId{request.requestId})) {
+                                shared::RequestId{request.requestId},
+                                resumeTarget)) {
     return {rejected(connectionEpoch, request.requestId,
                      AuthenticationRejectedReason::Invalid)};
   }
@@ -88,14 +98,19 @@ SessionAuthFlow::begin(std::uint64_t connectionEpoch,
 
 std::vector<RoutedSessionFrame>
 SessionAuthFlow::complete(const meta::ClaimCompletion &completion,
-                          std::uint64_t serverTimeUnixMillis) {
-  const AppliedClaim applied = correlations_.apply(completion);
+                          std::uint64_t serverTimeUnixMillis,
+                          std::chrono::steady_clock::time_point now) {
+  const AppliedClaim applied = correlations_.apply(completion, now);
   if (applied.kind == AppliedClaimKind::Stale) {
     return {};
   }
   if (applied.kind == AppliedClaimKind::Rejected) {
     return {rejected(applied.connectionEpoch, applied.requestId,
                      rejectionReason(applied.outcome))};
+  }
+  if (applied.kind == AppliedClaimKind::ResumeRejected) {
+    return {rejected(applied.connectionEpoch, applied.requestId,
+                     AuthenticationRejectedReason::ResumeUnavailable)};
   }
   if (!applied.authenticated.has_value()) {
     throw std::logic_error{"accepted claim has no session result"};
@@ -128,6 +143,16 @@ SessionAuthFlow::complete(const meta::ClaimCompletion &completion,
 
 bool SessionAuthFlow::disconnect(std::uint64_t connectionEpoch) {
   return correlations_.closeConnection(connectionEpoch);
+}
+
+bool SessionAuthFlow::detach(std::uint64_t connectionEpoch,
+                             std::chrono::steady_clock::time_point expiresAt) {
+  return correlations_.detachConnection(connectionEpoch, expiresAt);
+}
+
+bool SessionAuthFlow::expireDetached(shared::SessionId sessionId,
+                                     shared::SessionGeneration generation) {
+  return correlations_.expireDetached(sessionId, generation);
 }
 
 std::optional<RoutedSessionFrame> SessionAuthFlow::requestRudpBindCapability(
