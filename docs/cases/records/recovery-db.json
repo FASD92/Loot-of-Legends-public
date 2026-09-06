@@ -98,7 +98,7 @@
     "sameHost": true,
     "actualClientCount": 2,
     "retestedForPublication": false,
-    "runtimeIntegratedInPublicRoot": false
+    "runtimeIntegratedInPublicRoot": true
   },
   "selectionNote": "Copied aggregate observations and source identifiers. Original operational logs, endpoint addresses, credentials and player identifiers are not included."
 }

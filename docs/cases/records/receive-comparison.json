@@ -15,6 +15,7 @@
     "disconnectCorrelation.totalReceiveBufferDrops",
     "disconnectCorrelation.totalReliableExpiries",
     "disconnectCorrelation.totalPeerCloses",
+    "receiveQueueDepth",
     "roomFailures.count",
     "roomFailures.expectedRooms",
     "tickBudget.p99Ms",
@@ -50,6 +51,13 @@
       "totalReceiveBufferDrops": 424690.0,
       "totalReliableExpiries": 1161.0,
       "totalPeerCloses": 1161.0
+    },
+    "receiveQueueDepth": {
+      "windowSeconds": 100,
+      "samples": 9675,
+      "maximumBytes": 64140480,
+      "socketReceiveBufferBytes": 67108864,
+      "maximumUtilizationRatio": 0.9557676315307617
     },
     "roomFailures": {
       "count": 240,

@@ -4,7 +4,7 @@
 
 ## 기록 순서
 
-같은 논리 틱의 명령과 판정을 묶어 기록합니다. TickCommit 기록과 fdatasync 완료 후 결과를 보냅니다. 디스크 기록이 지연되면 해당 전투의 다음 진행도 기다립니다.
+같은 논리 틱의 명령과 판정을 묶어 기록합니다. TickCommit 기록과 data sync 완료 후 결과를 보냅니다. 실제 macOS 실행은 `fsync`를 사용하고 다른 POSIX 경로는 `fdatasync`를 사용합니다. 디스크 기록이 지연되면 해당 전투의 다음 진행도 기다립니다.
 
 복구 시 체크포인트 이후의 기록을 재생합니다. 클라이언트가 전체 스냅샷을 적용했다는 ACK를 보내기 전에는 새 전투 입력을 허용하지 않습니다.
 
@@ -31,12 +31,16 @@
 
 [DB 조회 기록의 공개용 사본](records/recovery-db.json)은 네 조회 시점의 집계값을 담습니다. 원래 기록에는 플레이어 ID와 인증 정보가 없었습니다. 공개 사본에서도 개인 식별자나 운영 주소를 추가하지 않았습니다.
 
+현재 공개 제품에는 [복구 설치](../../game-server/modules/game-flow/src/BattleContinuityRecovery.cpp), [journal 재생](../../game-server/modules/battle-continuity/src/BattleReplay.cpp), [동기 저장소](../../game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp)가 포함됩니다. [실제 서버 진입 테스트](../../tests/integration/server-entry/ServerEntryTests.cpp)는 child GameServer를 SIGKILL한 뒤 같은 port와 저장소로 다시 시작합니다.
+
+정산은 Game의 [SettlementPublisher](../../game-server/modules/settlement/src/application/SettlementPublisher.cpp)가 Meta에 보내고, Meta의 [SettlementApplication](../../meta-server/src/main/java/com/fasd92/lootoflegends/meta/settlement/application/SettlementApplication.java)이 동일 ID와 payload hash를 확인합니다. [SettlementApplyApplication](../../meta-server/src/main/java/com/fasd92/lootoflegends/meta/settlement/application/SettlementApplyApplication.java)은 한 transaction에서 자산을 적용한 뒤 inbox를 Applied로 바꿉니다. [MySQL 정산 테스트](../../meta-server/src/test/java/com/fasd92/lootoflegends/meta/settlement/SettlementAcceptanceTest.java)는 replay와 conflict 및 rollback을 검사합니다.
+
 ## 검증 범위
 
 macOS ARM64/APFS의 같은 호스트에서 수행한 단일 시나리오입니다. MySQL은 8.4였습니다. 다른 호스트 전환과 디스크 손실 및 대규모 부하 중 복구는 이 실행의 검증 범위가 아닙니다.
 
 보고서의 RPO 0은 종료 전에 성공 응답과 디스크 기록 완료가 확인된 명령에 한정합니다. 모든 미확정 명령의 무손실이나 전원 장애에 대한 보장이 아닙니다. 이번 공개 작업에서 Unity 시나리오를 다시 실행하지 않았습니다.
 
-루트 공개 코드에는 이 복구 기능 전체를 아직 동기화하지 않았습니다. 이 문서는 실행 결과의 공개이며 현재 공개 빌드에 복구 기능이 추가됐다는 선언이 아닙니다.
+현재 공개 루트는 원본 main의 복구 코드를 포함합니다. 다만 위 실행 결과는 더 이른 exact source `ee4654d`의 단일 시나리오입니다. 이번 공개 동기화에서 Unity 시나리오나 DB 대조를 다시 실행하지 않았습니다.
 
 [사례 목록](README.md)

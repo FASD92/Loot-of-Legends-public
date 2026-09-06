@@ -11,7 +11,15 @@
     "game": "3e703cf7b0258804bdf110432db7449b9547a17c",
     "meta": "65d1e286e63523fa0463da8e7a029a502755d017",
     "loadgen": "ee5ec95f485ee8c4e8071439047a0581153cbf59",
+    "gameImageSha256": "4bed497a37e93e9a0a94fe1e8d0ec50ddbd5c4919361ee82da6bdbb19e5947ad",
+    "metaImageSha256": "1cc76cdb05d719a0018fca4859a151c4ec7e690486474dc2a36330d667ca51b6",
+    "loadgenImageSha256": "0531138267b085a21218a0e41576018c417211c72fc92f5ff1af005edb22d0ec",
     "sourceDirty": false
+  },
+  "environment": {
+    "name": "release-aws-arm64-001",
+    "sha256": "767585dc2b11fffd685a35ad03b0c899863f4a6f38abbf2d73d5a3becbab6f8d",
+    "instanceType": "UNKNOWN"
   },
   "profile": {
     "name": "soak-5250p-3600s@1.0.0",
@@ -35,6 +43,12 @@
     "roomQueueSampleP99Ms": 5.08,
     "schedulerSlipP99Ms": 24,
     "late30MinuteRssSlopeKBPerSecond": 0.14
+  },
+  "rssEvidence": {
+    "publicPath": "docs/cases/records/rss-capacity-5250-60m.tsv",
+    "sha256": "2116d7755b1371bb6eba0d2c66c9d8789dd4fb174e7a6ae2665de936611d4164",
+    "peakRssDecimalMB": 132.009984,
+    "stable55MinuteSlopeKBPerSecond": 0.021483932233491397
   },
   "originalReceipt": {
     "evaluationStatus": "INVALID",

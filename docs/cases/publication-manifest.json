@@ -1,20 +1,21 @@
 {
-  "schemaVersion": 1,
-  "publishedAt": "2026-09-06",
-  "publicBaseRevision": "f3593396ecf496665b0daa6e360e642f5c44ed19",
-  "scope": "Historical case reports and reviewed excerpts; no product runtime replacement.",
+  "schemaVersion": 2,
+  "publishedAt": "2026-09-07",
+  "productSourceRevision": "17c6d7fc0996e389fdf025de8a926974f9186b79",
+  "publicSyncBaseRevision": "2f6c44fb335d1ded7f72a3d4ef8673682fd885dc",
+  "scope": "Historical case records remain tied to their run SHAs; current product code is synchronized separately.",
   "files": [
     {
       "path": "docs/cases/README.md",
-      "sha256": "8a4c87109768d06d0daf2a7157948d8f41a50b6591cdc0390f88ac2c44929055"
+      "sha256": "cecd0402e535835f5ee8bdd7bef3d93b5444cac1010c5fcc628a6d8783aca15f"
     },
     {
       "path": "docs/cases/battle-recovery.md",
-      "sha256": "c9ec8eacb4374e24d40ad466eddf51510e3fc8e06fe669f5cf1995a9aa7755c5"
+      "sha256": "5a90890a86c22170c18b561ddba819d6889067294b80d7d80a7c6917d7c73e61"
     },
     {
       "path": "docs/cases/capacity-5250.md",
-      "sha256": "b6de83da2de9142c8b6783def10283838b21faba11f6a1823e7af0c099eb42c0"
+      "sha256": "2494e2c2304102b979d639dfb4bc5a80931a4c6467bc7b47c65b141d8e561634"
     },
     {
       "path": "docs/cases/code/memory-retention-test.txt",
@@ -30,23 +31,39 @@
     },
     {
       "path": "docs/cases/memory-retention.md",
-      "sha256": "8804279be32a1b7b0c0d6ccb87b507f294dfdecc4b315df57731e7ce7f348dc7"
+      "sha256": "7d3c0f583e42d4e49bccdedec742d5068c48e03c2394abb3d47e92a687182b6b"
     },
     {
       "path": "docs/cases/receive-budget.md",
-      "sha256": "831566565c3f87187878d0ed53797fa03b357823c8a25f0c51c4c05e354763b6"
+      "sha256": "846b88a59aa5160193d207985888417a18604e78651977be7e283672e147bb53"
     },
     {
       "path": "docs/cases/records/capacity-5250.json",
-      "sha256": "837a042d6765363f847d5feb85b831baac131758dc71e722c1c9aa0525e12a0c"
+      "sha256": "6ab6b5d58e301b212eacc6cc3c4458c49b2cde07c9922f9e70b173dba9e89c8a"
     },
     {
       "path": "docs/cases/records/receive-comparison.json",
-      "sha256": "343c742afba9506a7c32423d7c25f44b0c1a3f997a86c07b222a2e4ae1896251"
+      "sha256": "c1c348174b4c1a9e0bd22f0b8b2b918b12f76d0d9ff5fec723ee254ad29448bf"
     },
     {
       "path": "docs/cases/records/recovery-db.json",
-      "sha256": "d4d111ddca1bd0d9eb2dcee988231314676cfe29ad1601277067d4fa28ae86b4"
+      "sha256": "4bfdff9964a44e3ff2c053e3b57ec6a649ea19590ad365061dd95412db4ea720"
+    },
+    {
+      "path": "docs/cases/records/rss-capacity-5250-60m.tsv",
+      "sha256": "2116d7755b1371bb6eba0d2c66c9d8789dd4fb174e7a6ae2665de936611d4164"
+    },
+    {
+      "path": "docs/cases/records/rss-manifest.json",
+      "sha256": "364784c6633225288899659bad4dd3505e09f074a0e1ca5ff4b6fc807d4ffed3"
+    },
+    {
+      "path": "docs/cases/records/rss-post-fix-3000p.tsv",
+      "sha256": "a0703faafca1a9bec7b754fb864851b9c77696d73bf41494118f35112585e4cd"
+    },
+    {
+      "path": "docs/cases/records/rss-pre-fix-3000p.tsv",
+      "sha256": "1fc60e26196a40cc4c10f4c5c023a5e8cd838f74aa113e744fe81be9f5a9339e"
     }
   ]
 }

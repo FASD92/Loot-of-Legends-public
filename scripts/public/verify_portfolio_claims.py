@@ -15,8 +15,13 @@ from urllib.parse import unquote, urlsplit
 EVIDENCE_PATHS = (
     "CMakeLists.txt",
     "README.md",
+    "docs/product-source.md",
     "docs/recruiter-audit.md",
     "docs/verification.md",
+    "contracts/battle-continuity/battle-continuity-v1.json",
+    "game-server/modules/battle-continuity/include/lol/battle_continuity/FlightRecorder.hpp",
+    "game-server/modules/game-flow/include/lol/game_flow/BattleContinuityRecovery.hpp",
+    "game-server/platform/battle-continuity-storage/include/lol/battle_continuity_storage/ContinuityStorage.hpp",
     "game-server/platform/transport-tcp/include/lol/transport/tcp/TcpConnection.hpp",
     "game-server/platform/runtime-linux/include/lol/runtime/linux/EpollReactor.hpp",
     "game-server/platform/transport-rudp/include/lol/transport/rudp/ReliableQueue.hpp",
@@ -28,6 +33,7 @@ EVIDENCE_PATHS = (
     "tools/load/tests/test_runner_runtime.py",
     "meta-server/src/main/java/com/fasd92/lootoflegends/meta/platform/mysql/JdbcSettlementInbox.java",
     "meta-server/src/test/java/com/fasd92/lootoflegends/meta/settlement/SettlementAcceptanceTest.java",
+    "client/unity/Assets/LootOfLegends/Battle/BattleSessionReconnectClient.cs",
     "client/unity/Assets/LootOfLegends/Tests/EditMode/RudpCombatClientTests.cs",
 )
 

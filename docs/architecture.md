@@ -24,8 +24,10 @@ Unity
                     BattleInstance
           server tick / position / range / cooldown
           damage / drop state / first accepted owner
-                            │
-                            v
+                            |
+              TickCommit + data sync
+               battle replay / restore
+                            |
          durable journal → SettlementPublisher
                             │
                             v
@@ -67,6 +69,14 @@ Cell mutex 아래 `scheduled_`를 전이한 한 run만 `WorkerPool`에 제출하
   bounded submit, accepted-task drain, stop lifecycle
 - [`RoomGatewayRaceTests.cpp`](../tests/integration/lobby-room/RoomGatewayRaceTests.cpp):
   gateway/session/Room 경쟁 경계
+
+## Same-host battle continuity
+
+[`FlightRecorder.cpp`](../game-server/modules/battle-continuity/src/FlightRecorder.cpp)는 domain admission을 통과한 결정과 state hash를 기록합니다. [`ContinuityStorage.cpp`](../game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp)는 writer epoch와 append 및 data sync를 맡습니다. Room Cell은 완료 전 결과를 보류하고 file I/O를 직접 수행하지 않습니다.
+
+재시작하면 [`BattleReplay.cpp`](../game-server/modules/battle-continuity/src/BattleReplay.cpp)가 checkpoint 이후 기록을 실제 `BattleInstance` 규칙으로 재생합니다. [`BattleContinuityRecovery.cpp`](../game-server/modules/game-flow/src/BattleContinuityRecovery.cpp)는 복구한 Room과 Session 및 Battle을 listener가 열리기 전에 설치합니다. 계약은 [`battle-continuity-v1.md`](../contracts/battle-continuity/battle-continuity-v1.md)가 소유합니다.
+
+이 경로는 같은 host와 endpoint 및 local durable filesystem을 전제로 합니다. 다중 host 장애 전환이나 storage replication은 제공하지 않습니다.
 
 ## Custom RUDP: transport reliability is not gameplay idempotency
 
@@ -118,4 +128,4 @@ MySQL Testcontainers에서 replay/conflict, apply-once, update 실패 rollback�
 SHA-256과 공개 leak scan을 검증한다. 따라서 `evaluationStatus=PASS`만으로 package 완결성을
 주장하지 않고 `packageStatus`를 함께 확인해야 한다.
 
-이 저장소에는 qualifying capacity 결과가 없다. harness 구현과 기능 검증은 capacity 달성 수치가 아니다.
+현재 공개 제품 코드는 qualifying capacity 실행을 새로 하지 않았습니다. [5,250세션 기록](cases/capacity-5250.md)은 더 이른 진단 source의 60분 실행이며 현재 build의 부하 결과로 바꾸지 않습니다. harness 구현과 기능 검증도 capacity 달성 수치가 아닙니다.
