@@ -370,7 +370,7 @@ bool reliableLifecycleStreamKeepsBattleScope() {
       queue.discardAcknowledged(6, 0) != 1 || !queue.contains(7)) {
     return false;
   }
-  const auto retransmit = queue.poll(kStart + 200ms);
+  const auto retransmit = queue.poll(kStart + 1000ms);
   return retransmit.transmissions.size() == 1 &&
          retransmit.transmissions.front().sequence == 7;
 }

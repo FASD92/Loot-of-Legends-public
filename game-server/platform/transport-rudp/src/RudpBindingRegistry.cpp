@@ -203,6 +203,109 @@ RudpPacketStatus RudpBindingRegistry::statusLocked(
   return RudpPacketStatus::Current;
 }
 
+std::optional<RttEstimate> RudpBindingRegistry::rtt(
+    std::uint64_t sessionId, std::uint64_t sessionGeneration,
+    std::uint32_t transportEpoch, const RudpEndpoint &endpoint) const {
+  std::lock_guard lock{mutex_};
+  if (statusLocked(sessionId, sessionGeneration, transportEpoch, endpoint) !=
+      RudpPacketStatus::Current)
+    return std::nullopt;
+  return bindings_.at(sessionId).estimator.snapshot();
+}
+
+bool RudpBindingRegistry::recordRtt(std::uint64_t sessionId,
+                                    std::uint64_t sessionGeneration,
+                                    std::uint32_t transportEpoch,
+                                    const RudpEndpoint &endpoint,
+                                    std::chrono::microseconds sample,
+                                    std::optional<std::uint64_t> revision) {
+  std::lock_guard lock{mutex_};
+  if (statusLocked(sessionId, sessionGeneration, transportEpoch, endpoint) !=
+      RudpPacketStatus::Current)
+    return false;
+  auto &binding = bindings_.at(sessionId);
+  if (!binding.estimator.observe(sample))
+    return false;
+  if (revision && *revision == binding.recoveryRevision &&
+      binding.recoveryFloor.count() != 0) {
+    binding.recoveryFloor = std::chrono::milliseconds{0};
+    ++binding.recoveryRevision;
+    ++recovery_.reset;
+  }
+  return true;
+}
+
+RudpRtoPolicy RudpBindingRegistry::Binding::policy() const {
+  return {.initialRto = std::max(estimator.snapshot().rto, recoveryFloor),
+          .recoveryFloor = recoveryFloor,
+          .revision = recoveryRevision};
+}
+
+std::optional<RudpRtoPolicy>
+RudpBindingRegistry::rtoPolicy(std::uint64_t sessionId,
+                               std::uint64_t generation, std::uint32_t epoch,
+                               const RudpEndpoint &endpoint) const {
+  std::lock_guard lock{mutex_};
+  if (statusLocked(sessionId, generation, epoch, endpoint) !=
+      RudpPacketStatus::Current)
+    return std::nullopt;
+  return bindings_.at(sessionId).policy();
+}
+
+bool RudpBindingRegistry::recordTimeout(std::uint64_t sessionId,
+                                        std::uint64_t generation,
+                                        std::uint32_t epoch,
+                                        const RudpEndpoint &endpoint,
+                                        std::uint64_t revision,
+                                        std::chrono::milliseconds interval) {
+  std::lock_guard lock{mutex_};
+  if (statusLocked(sessionId, generation, epoch, endpoint) !=
+      RudpPacketStatus::Current) {
+    ++recovery_.staleTimeouts;
+    return false;
+  }
+  auto &binding = bindings_.at(sessionId);
+  if (revision != binding.recoveryRevision) {
+    ++recovery_.staleTimeouts;
+    return false;
+  }
+  if (interval < RttEstimator::kMinimumRto ||
+      interval > RttEstimator::kMaximumRto)
+    return false;
+  const auto floor = std::max(
+      binding.recoveryFloor, std::min(interval * 2, RttEstimator::kMaximumRto));
+  if (floor == binding.recoveryFloor)
+    return false;
+  if (binding.recoveryFloor.count() == 0)
+    ++recovery_.entered;
+  else
+    ++recovery_.escalated;
+  binding.recoveryFloor = floor;
+  ++binding.recoveryRevision;
+  return true;
+}
+
+RudpRecoveryObservation RudpBindingRegistry::recoveryObservation() const {
+  std::lock_guard lock{mutex_};
+  auto result = recovery_;
+  for (const auto &[sessionId, binding] : bindings_) {
+    static_cast<void>(sessionId);
+    result.policies.push_back(binding.policy());
+  }
+  return result;
+}
+
+std::vector<RttEstimate> RudpBindingRegistry::rttSnapshots() const {
+  std::lock_guard lock{mutex_};
+  std::vector<RttEstimate> result;
+  result.reserve(bindings_.size());
+  for (const auto &[sessionId, binding] : bindings_) {
+    static_cast<void>(sessionId);
+    result.push_back(binding.estimator.snapshot());
+  }
+  return result;
+}
+
 RudpReceiveResult RudpBindingRegistry::receive(const RudpHeader &header,
                                                const RudpEndpoint &endpoint,
                                                Clock::time_point now) {

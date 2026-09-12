@@ -22,5 +22,11 @@ if(BUILD_TESTING)
   target_link_libraries(battle_continuity_storage_tests PRIVATE
     lol_battle_continuity_storage)
   loot_apply_compile_policy(battle_continuity_storage_tests)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(battle_continuity_storage_tests PRIVATE
+      LOL_STORAGE_IO_PROBES)
+    target_link_options(battle_continuity_storage_tests PRIVATE
+      "LINKER:--wrap=pread" "LINKER:--wrap=fdatasync")
+  endif()
   add_test(NAME battle_continuity_storage COMMAND battle_continuity_storage_tests)
 endif()

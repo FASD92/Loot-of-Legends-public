@@ -23,3 +23,7 @@ add_test(NAME server_entry_terminal_retirement
 set_tests_properties(server_entry_terminal_retirement PROPERTIES TIMEOUT 100)
 add_test(NAME server_entry_movement_ack COMMAND server_entry_tests movement-ack)
 set_tests_properties(server_entry_movement_ack PROPERTIES TIMEOUT 30)
+add_test(NAME server_entry_ack_only COMMAND server_entry_tests ack-only)
+set_tests_properties(server_entry_ack_only PROPERTIES TIMEOUT 30)
+add_test(NAME server_entry_rtt_sampling COMMAND server_entry_tests rtt-sampling)
+set_tests_properties(server_entry_rtt_sampling PROPERTIES TIMEOUT 30)

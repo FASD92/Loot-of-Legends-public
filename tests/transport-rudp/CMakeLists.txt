@@ -12,3 +12,8 @@ add_executable(rudp_delivery_tests
 target_link_libraries(rudp_delivery_tests PRIVATE lol_transport_rudp)
 loot_apply_compile_policy(rudp_delivery_tests)
 add_test(NAME rudp_delivery COMMAND rudp_delivery_tests)
+
+add_executable(rudp_timing_tests RudpTimingTests.cpp)
+target_link_libraries(rudp_timing_tests PRIVATE lol_transport_rudp)
+loot_apply_compile_policy(rudp_timing_tests)
+add_test(NAME rudp_timing COMMAND rudp_timing_tests)

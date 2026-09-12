@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1633,13 +1634,69 @@ bool combatFlowReliableStateCountsBoundByLifecycle() {
       if (!decoded.header.has_value()) {
         return false;
       }
+      flow.recordSend(transmission, now, true);
       static_cast<void>(flow.discardAcknowledged(
           decoded.header->sessionId, decoded.header->sessionGeneration,
-          decoded.header->transportEpoch, decoded.header->sequence, 0));
+          decoded.header->transportEpoch, decoded.header->sequence, 0,
+          now + 100ms));
     }
-    if (flow.reliableStateCount() != 0) {
+    const auto hostRtt = bindings.rtt(1, 1, *hostEpoch, endpoint(1));
+    if (flow.reliableStateCount() != 0 || !hostRtt || hostRtt->rto != 300ms ||
+        flow.reliabilityObservation().acceptedSamples != 2) {
       return false;
     }
+    // A new queue on this same binding must reuse the learned timer.
+    const auto attack = attackDatagram(1, *hostEpoch, 2, 1, 1);
+    if (!attack ||
+        flow.submitAttack(*attack, endpoint(1), now + 150ms) !=
+            RudpCombatSubmitResult::Accepted ||
+        !workers.waitUntilIdle(2s))
+      return false;
+    feedCombat(flow, combat);
+    const auto firstSend = flow.pollReliable(now + 200ms);
+    if (firstSend.transmissions.empty())
+      return false;
+    for (const auto &tx : firstSend.transmissions)
+      flow.recordSend(tx, now + 200ms, true);
+    if (!flow.pollReliable(now + 499ms).transmissions.empty() ||
+        flow.pollReliable(now + 500ms).transmissions.empty())
+      return false;
+    for (const auto &tx : firstSend.transmissions) {
+      const auto h = RudpCombatCodec::decode(tx.datagram).header;
+      if (!h)
+        return false;
+      static_cast<void>(flow.discardAcknowledged(
+          h->sessionId, h->sessionGeneration, h->transportEpoch, h->sequence, 0,
+          now + 550ms));
+    }
+    const auto nextAttack = attackDatagram(1, *hostEpoch, 3, 2, 1);
+    if (!nextAttack ||
+        flow.submitAttack(*nextAttack, endpoint(1), now + 600ms) !=
+            RudpCombatSubmitResult::Accepted ||
+        !workers.waitUntilIdle(2s))
+      return false;
+    feedCombat(flow, combat);
+    const auto fresh = flow.pollReliable(now + 650ms);
+    if (fresh.transmissions.empty())
+      return false;
+    for (const auto &tx : fresh.transmissions)
+      flow.recordSend(tx, now + 650ms, true);
+    if (!flow.pollReliable(now + 950ms).transmissions.empty()) {
+      std::cerr
+          << "binding must retain the 600ms recovery timer for new packets\n";
+      return false;
+    }
+    for (const auto &tx : fresh.transmissions) {
+      const auto h = RudpCombatCodec::decode(tx.datagram).header;
+      if (!h)
+        return false;
+      static_cast<void>(flow.discardAcknowledged(
+          h->sessionId, h->sessionGeneration, h->transportEpoch, h->sequence, 0,
+          now + 1050ms));
+    }
+    if (bindings.rtt(1, 1, *hostEpoch, endpoint(1))->samples <=
+        hostRtt->samples)
+      return false;
   }
 
   // Reliable expiry retires the identity to baseline.
@@ -1737,7 +1794,7 @@ bool combatFlowReliableStateCountsBoundByLifecycle() {
     if (spawnTransmissions != 2 || flow.reliableStateCount() != 2) {
       return false;
     }
-    polled = flow.pollReliable(now + 250ms);
+    polled = flow.pollReliable(now + 1000ms);
     if (polled.transmissions.empty() || flow.reliableStateCount() != 2) {
       return false;
     }
@@ -2591,7 +2648,7 @@ bool combatFlowActiveIdentityReplaysUntilAck() {
   if (polled.transmissions.size() != 2 || flow.reliableStateCount() != 2) {
     return false;
   }
-  polled = flow.pollReliable(now + 250ms);
+  polled = flow.pollReliable(now + 1000ms);
   if (polled.transmissions.empty() || flow.reliableStateCount() != 2) {
     return false;
   }

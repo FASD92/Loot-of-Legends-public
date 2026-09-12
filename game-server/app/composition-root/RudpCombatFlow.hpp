@@ -37,6 +37,21 @@ struct RudpCombatPollResult final {
   std::vector<RudpPeerFailure> failures;
 };
 
+struct RudpReliabilityObservation final {
+  std::uint64_t acceptedSamples{0};
+  std::uint64_t retransmittedSamples{0};
+  std::uint64_t unconfirmedSamples{0};
+  std::uint64_t nonpositiveSamples{0};
+  std::uint64_t expiredSamples{0};
+  std::uint64_t staleSamples{0};
+  std::uint64_t coalescedSamples{0};
+  std::uint64_t noNewEntryAcks{0};
+  std::uint64_t retransmissions{0};
+  std::uint64_t expiries{0};
+  std::uint64_t sendFailures{0};
+  std::vector<std::chrono::milliseconds> effectiveRtos;
+};
+
 class RudpCombatFlow final {
 public:
   RudpCombatFlow(transport::rudp::RudpBindingRegistry &bindings,
@@ -51,11 +66,16 @@ public:
                   const transport::rudp::RudpEndpoint &endpoint,
                   std::chrono::steady_clock::time_point receivedAt);
 
-  [[nodiscard]] std::size_t discardAcknowledged(std::uint64_t sessionId,
-                                                std::uint64_t sessionGeneration,
-                                                std::uint32_t transportEpoch,
-                                                std::uint32_t ack,
-                                                std::uint32_t ackBits);
+  [[nodiscard]] std::size_t
+  discardAcknowledged(std::uint64_t sessionId, std::uint64_t sessionGeneration,
+                      std::uint32_t transportEpoch, std::uint32_t ack,
+                      std::uint32_t ackBits,
+                      std::chrono::steady_clock::time_point receivedAt =
+                          std::chrono::steady_clock::now());
+
+  void recordSend(const EncodedRudpDatagram &datagram,
+                  std::chrono::steady_clock::time_point sentAt, bool succeeded);
+  [[nodiscard]] RudpReliabilityObservation reliabilityObservation();
 
   [[nodiscard]] RudpCombatPollResult
   pollReliable(std::chrono::steady_clock::time_point now);
@@ -128,6 +148,7 @@ private:
   game_flow::RoomCommandGateway &gateway_;
   std::mutex mutex_;
   std::map<ReliableKey, ReliableState> reliableStates_;
+  RudpReliabilityObservation reliabilityObservation_;
   // Session close is idempotent, so only the first current failure per
   // SessionId needs a main-loop handoff; a newer identity replaces stale work.
   std::map<std::uint64_t, RudpPeerFailure> pendingFailures_;

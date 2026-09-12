@@ -1,8 +1,11 @@
 #pragma once
 
+#include <lol/transport/rudp/RttEstimator.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace lol::transport::rudp {
@@ -31,6 +34,22 @@ struct ReliableTransmission final {
 struct ReliablePollResult final {
   std::vector<ReliableTransmission> transmissions;
   std::vector<std::uint32_t> expiredSequences;
+  struct Timeout final {
+    std::uint64_t revision;
+    std::chrono::milliseconds interval;
+  };
+  std::vector<Timeout> timeouts;
+};
+
+struct ReliableAckResult final {
+  std::size_t removed{0};
+  std::optional<std::chrono::microseconds> sample;
+  std::uint64_t sampleRevision{0};
+  std::size_t retransmitted{0};
+  std::size_t sendUnconfirmed{0};
+  std::size_t nonpositive{0};
+  std::size_t expired{0};
+  std::size_t coalesced{0};
 };
 
 class ReliableQueue final {
@@ -41,7 +60,16 @@ public:
                                                std::vector<std::byte> datagram,
                                                ReliableLane lane,
                                                Clock::time_point now);
-  [[nodiscard]] ReliablePollResult poll(Clock::time_point now);
+  [[nodiscard]] ReliablePollResult
+  poll(Clock::time_point now,
+       std::chrono::milliseconds initialRto = RttEstimator::kBootstrapRto,
+       std::uint64_t revision = 0);
+  [[nodiscard]] bool recordSend(std::uint32_t sequence, std::uint8_t attempt,
+                                Clock::time_point sentAt, bool succeeded);
+  [[nodiscard]] ReliableAckResult acknowledge(std::uint32_t ack,
+                                              std::uint32_t ackBits,
+                                              Clock::time_point receivedAt);
+  [[nodiscard]] std::vector<std::chrono::milliseconds> effectiveRtos() const;
   [[nodiscard]] std::size_t discardAcknowledged(std::uint32_t ack,
                                                 std::uint32_t ackBits);
 
@@ -58,9 +86,18 @@ private:
     std::vector<std::byte> datagram;
     Clock::time_point queuedAt;
     Clock::time_point nextTransmissionAt;
+    Clock::time_point lastTransmissionAt;
+    std::optional<Clock::time_point> firstSuccessfulSend;
+    std::optional<Clock::time_point> lastSuccessfulSend;
     std::chrono::milliseconds retryDelay;
     std::uint8_t transmissions;
+    std::uint8_t recordedAttempt;
+    std::uint64_t revision{0};
   };
+
+  [[nodiscard]] ReliableAckResult
+  removeAcknowledged(std::uint32_t ack, std::uint32_t ackBits,
+                     std::optional<Clock::time_point> receivedAt);
 
   std::vector<Entry> entries_;
   std::size_t applicationEntries_{0};

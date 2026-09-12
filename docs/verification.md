@@ -1,5 +1,26 @@
 # 공개본 검증 기록
 
+## 2026-09-12 동기화 후보
+
+V2 main `450ecb5ffbf5689adc3f71bddf398bc8678949d4`의 제품 코드를 적용한 공개 저장소 checkout에서 검사했습니다.
+
+- AppleClang 21 Debug 전체 C++ 빌드 208 steps 성공
+- CTest 등록 63개 모두 통과: 사용자 요청으로 중단하기 전 1~51번 PASS, 같은 빌드에서 재개한 52~63번 12/12 PASS
+- 실제 서버 진입 검사에 same-process reconnect, 중요 저장 이후 일반 변경 rollback, terminal retirement, ACK-only와 RTT sampling 포함
+- 아키텍처 검사: 17 targets / 46 edges / 239 source files / 0 findings
+
+한 번에 전체 63/63을 실행한 기록은 아닙니다. 새 부하 시험, Windows 네트워크 비교, Unity 실행과 Meta Gradle 검사는 수행하지 않았습니다.
+
+```sh
+cmake --preset dev-debug
+cmake --build --preset dev-debug --parallel 4
+ctest --preset dev-debug --output-on-failure
+# 51번 완료 뒤 사용자 요청으로 중단, 같은 빌드에서 재개
+ctest --preset dev-debug -I 52,63 --output-on-failure
+```
+
+## 2026-09-07 검증
+
 2026-09-07에 공개 저장소 checkout만 사용했습니다. 제품 코드의 원본 기준은 `17c6d7fc0996e389fdf025de8a926974f9186b79`입니다.
 
 ## 환경

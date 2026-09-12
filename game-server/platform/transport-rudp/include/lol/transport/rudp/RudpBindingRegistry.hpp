@@ -1,5 +1,6 @@
 #pragma once
 
+#include <lol/transport/rudp/RttEstimator.hpp>
 #include <lol/transport/rudp/RudpCodec.hpp>
 #include <lol/transport/rudp/RudpPeer.hpp>
 
@@ -67,6 +68,20 @@ struct ExpiredRudpBinding final {
   std::uint64_t sessionGeneration;
 };
 
+struct RudpRtoPolicy final {
+  std::chrono::milliseconds initialRto{RttEstimator::kBootstrapRto};
+  std::chrono::milliseconds recoveryFloor{0};
+  std::uint64_t revision{0};
+};
+
+struct RudpRecoveryObservation final {
+  std::uint64_t entered{0};
+  std::uint64_t escalated{0};
+  std::uint64_t reset{0};
+  std::uint64_t staleTimeouts{0};
+  std::vector<RudpRtoPolicy> policies;
+};
+
 class RudpBindingRegistry final {
 public:
   using Clock = std::chrono::steady_clock;
@@ -95,6 +110,24 @@ public:
   [[nodiscard]] bool isBound(std::uint64_t sessionId,
                              std::uint64_t sessionGeneration) const noexcept;
 
+  [[nodiscard]] std::optional<RttEstimate>
+  rtt(std::uint64_t sessionId, std::uint64_t sessionGeneration,
+      std::uint32_t transportEpoch, const RudpEndpoint &endpoint) const;
+  [[nodiscard]] bool
+  recordRtt(std::uint64_t sessionId, std::uint64_t sessionGeneration,
+            std::uint32_t transportEpoch, const RudpEndpoint &endpoint,
+            std::chrono::microseconds sample,
+            std::optional<std::uint64_t> revision = std::nullopt);
+  [[nodiscard]] std::vector<RttEstimate> rttSnapshots() const;
+  [[nodiscard]] std::optional<RudpRtoPolicy>
+  rtoPolicy(std::uint64_t sessionId, std::uint64_t sessionGeneration,
+            std::uint32_t transportEpoch, const RudpEndpoint &endpoint) const;
+  [[nodiscard]] bool
+  recordTimeout(std::uint64_t sessionId, std::uint64_t sessionGeneration,
+                std::uint32_t transportEpoch, const RudpEndpoint &endpoint,
+                std::uint64_t revision, std::chrono::milliseconds interval);
+  [[nodiscard]] RudpRecoveryObservation recoveryObservation() const;
+
 private:
   struct Binding final {
     std::uint64_t sessionGeneration;
@@ -106,6 +139,10 @@ private:
     AckState acceptedAck;
     RudpPeerDelivery delivery;
     Clock::time_point lastSeen;
+    RttEstimator estimator{};
+    std::chrono::milliseconds recoveryFloor{0};
+    std::uint64_t recoveryRevision{0};
+    [[nodiscard]] RudpRtoPolicy policy() const;
   };
 
   struct PendingCapability final {
@@ -122,6 +159,7 @@ private:
   mutable std::mutex mutex_;
   std::map<std::uint64_t, PendingCapability> pendingCapabilities_;
   std::map<std::uint64_t, Binding> bindings_;
+  RudpRecoveryObservation recovery_;
 };
 
 } // namespace lol::transport::rudp

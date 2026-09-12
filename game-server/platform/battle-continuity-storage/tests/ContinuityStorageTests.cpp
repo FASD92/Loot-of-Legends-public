@@ -3,11 +3,13 @@
 #include <lol/battle_continuity_storage/ContinuityStorage.hpp>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
@@ -21,6 +23,35 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#ifdef LOL_STORAGE_IO_PROBES
+namespace {
+std::atomic<bool> observeStorageIo{false};
+std::atomic<std::size_t> storageReadBytes{0U};
+std::atomic<std::size_t> storageSyncCalls{0U};
+std::atomic<bool> failNextStorageSync{false};
+} // namespace
+extern "C" ssize_t __real_pread(int, void *, size_t, off_t);
+extern "C" int __real_fdatasync(int);
+extern "C" ssize_t __wrap_pread(int fd, void *buffer, size_t count,
+                                off_t offset) {
+  const auto result = __real_pread(fd, buffer, count, offset);
+  if (observeStorageIo && result > 0) {
+    storageReadBytes += static_cast<std::size_t>(result);
+  }
+  return result;
+}
+extern "C" int __wrap_fdatasync(int fd) {
+  if (observeStorageIo) {
+    ++storageSyncCalls;
+  }
+  if (failNextStorageSync.exchange(false)) {
+    errno = EIO;
+    return -1;
+  }
+  return __real_fdatasync(fd);
+}
+#endif
 
 namespace {
 
@@ -177,7 +208,8 @@ RecordedTickBatch validBatch(const BattleIdentity &battle,
         Record{.header = header(battle, writerEpoch, RecordType::BattleStart,
                                 firstSequence, 0U),
                .payload = BattleStartPayload{
-                   .rulesetVersion = 1U,
+                   .rulesetVersion =
+                       lol::battle_continuity::kSupportedBattleRulesetVersion,
                    .battleSeed = 17U,
                    .tickHertz = 20U,
                    .initialStateHash = stateHash,
@@ -351,8 +383,7 @@ bool differentKeyFailsGloballyBeforeEpochAdvance() {
   const auto differentKey =
       createKey(directory.path(), 32U, S_IRUSR | S_IWUSR, "different.key");
   flipByte(differentKey, 0);
-  const auto rejected =
-      ContinuityStorage::open(directory.path(), differentKey);
+  const auto rejected = ContinuityStorage::open(directory.path(), differentKey);
   if (rejected.ok() || rejected.error != StorageError::InvalidKey) {
     return false;
   }
@@ -794,8 +825,7 @@ bool mismatchedJournalFilenameIsQuarantinedWithoutCanonicalTombstone() {
   const auto filenameIdentity = identity(1U, 1U);
   CompletionLatch completion;
   if (submit(*opened.storage, validBatch(canonical, 1U, 1U, 0U, true),
-             completion,
-             Bytes{0x73U}) != DurableTickSubmitResult::Accepted ||
+             completion, Bytes{0x73U}) != DurableTickSubmitResult::Accepted ||
       !completion.wait().has_value()) {
     return false;
   }
@@ -843,8 +873,7 @@ bool malformedJournalFilenameIsQuarantinedWithoutTombstone() {
   const auto canonical = identity(1U, 1U);
   CompletionLatch completion;
   if (submit(*opened.storage, validBatch(canonical, 1U, 1U, 0U, true),
-             completion,
-             Bytes{0x75U}) != DurableTickSubmitResult::Accepted ||
+             completion, Bytes{0x75U}) != DurableTickSubmitResult::Accepted ||
       !completion.wait().has_value()) {
     return false;
   }
@@ -880,8 +909,7 @@ bool repairedTailWithMismatchedJournalFilenameIsQuarantined() {
   const auto filenameIdentity = identity(1U, 1U);
   CompletionLatch completion;
   if (submit(*opened.storage, validBatch(canonical, 1U, 1U, 0U, true),
-             completion,
-             Bytes{0x74U}) != DurableTickSubmitResult::Accepted ||
+             completion, Bytes{0x74U}) != DurableTickSubmitResult::Accepted ||
       !completion.wait().has_value()) {
     return false;
   }
@@ -917,7 +945,265 @@ bool repairedTailWithMismatchedJournalFilenameIsQuarantined() {
 
 } // namespace
 
+bool repeatedAppendsDoNotRereadCommittedHistory() {
+#ifdef LOL_STORAGE_IO_PROBES
+  TempDirectory directory;
+  auto opened =
+      ContinuityStorage::open(directory.path(), createKey(directory.path()));
+  if (!opened.ok()) {
+    return false;
+  }
+  const auto epoch = opened.storage->writerRecoveryEpoch();
+  const auto battle = identity(epoch, 1U);
+  std::uint64_t sequence = 1U;
+  for (std::uint64_t tick = 0U; tick < 66U; ++tick) {
+    auto batch = validBatch(battle, epoch, sequence, tick, tick == 0U);
+    sequence = batch.lastRecordSequence + 1U;
+    if (tick == 64U) {
+      storageReadBytes = 0U;
+      storageSyncCalls = 0U;
+      observeStorageIo = true;
+    }
+    CompletionLatch completion;
+    const auto accepted = submit(*opened.storage, std::move(batch), completion);
+    const auto result = completion.wait();
+    opened.storage->waitUntilIdle();
+    if (accepted != DurableTickSubmitResult::Accepted || !result.has_value() ||
+        !std::holds_alternative<DurableTickCommitted>(*result)) {
+      observeStorageIo = false;
+      return false;
+    }
+  }
+  observeStorageIo = false;
+  if (storageReadBytes != 0U || storageSyncCalls != 2U) {
+    std::fprintf(stderr, "steady append: read bytes=%zu, sync calls=%zu\n",
+                 storageReadBytes.load(), storageSyncCalls.load());
+  }
+  return storageReadBytes == 0U && storageSyncCalls == 2U;
+#else
+  return true;
+#endif
+}
+
+bool cachedTailRejectsChangedFilesAndInvalidContinuation() {
+  for (int scenario = 0; scenario < 5; ++scenario) {
+    TempDirectory directory;
+    auto opened =
+        ContinuityStorage::open(directory.path(), createKey(directory.path()));
+    if (!opened.ok()) {
+      return false;
+    }
+    const auto epoch = opened.storage->writerRecoveryEpoch();
+    const auto battle = identity(epoch, 1U);
+    auto initial = validBatch(battle, epoch, 1U, 0U, true);
+    const auto firstSequence = initial.lastRecordSequence + 1U;
+    CompletionLatch start;
+    if (submit(*opened.storage, std::move(initial), start) !=
+            DurableTickSubmitResult::Accepted ||
+        !start.wait().has_value()) {
+      return false;
+    }
+    opened.storage->waitUntilIdle();
+    const auto journal = opened.storage->journalPath(battle);
+    auto next = validBatch(battle, epoch, firstSequence, 2U, false);
+    const auto afterNext = next.lastRecordSequence + 1U;
+    CompletionLatch second;
+    if (submit(*opened.storage, std::move(next), second) !=
+            DurableTickSubmitResult::Accepted ||
+        !second.wait().has_value()) {
+      return false;
+    }
+    opened.storage->waitUntilIdle();
+    if (scenario == 0) {
+      // Same size and inode, but a previously committed byte changed.
+      std::this_thread::sleep_for(2ms);
+      flipByte(journal, 15);
+    } else if (scenario == 1) {
+      if (::truncate(journal.c_str(), 12) != 0) {
+        return false;
+      }
+    } else if (scenario == 2) {
+      // Valid bytes for another identity, replacing the cached pathname.
+      std::filesystem::rename(journal, directory.path() / "original.saved");
+      const auto fd =
+          ::open(journal.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+      if (fd < 0 || ::close(fd) != 0) {
+        return false;
+      }
+      writeAppend(
+          journal,
+          validBatch(identity(epoch, 2U), epoch, 1U, 0U, true).encodedRecords);
+    }
+    const auto sizeBefore = std::filesystem::file_size(journal);
+    CompletionLatch rejected;
+    auto invalid =
+        validBatch(battle, epoch, scenario == 3 ? afterNext + 1U : afterNext,
+                   scenario == 4 ? 1U : 3U, false);
+    if (submit(*opened.storage, std::move(invalid), rejected) !=
+        DurableTickSubmitResult::Accepted) {
+      return false;
+    }
+    const auto result = rejected.wait();
+    opened.storage->waitUntilIdle();
+    if (!result.has_value() ||
+        !std::holds_alternative<DurableTickWriteFailed>(*result) ||
+        std::filesystem::file_size(journal) != sizeBefore) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool coldAppendValidatesOnceAndSyncFailureNeverConfirms() {
+  TempDirectory directory;
+  const auto key = createKey(directory.path());
+  auto opened = ContinuityStorage::open(directory.path(), key);
+  if (!opened.ok()) {
+    return false;
+  }
+  const auto battle = identity(opened.storage->writerRecoveryEpoch(), 1U);
+  auto initial =
+      validBatch(battle, opened.storage->writerRecoveryEpoch(), 1U, 0U, true);
+  const auto sequence = initial.lastRecordSequence + 1U;
+  CompletionLatch start;
+  if (submit(*opened.storage, std::move(initial), start, Bytes{0x74U}) !=
+          DurableTickSubmitResult::Accepted ||
+      !start.wait().has_value()) {
+    return false;
+  }
+  opened.storage->stop();
+  opened.storage.reset();
+  opened = ContinuityStorage::open(directory.path(), key);
+  if (!opened.ok()) {
+    return false;
+  }
+#ifdef LOL_STORAGE_IO_PROBES
+  storageReadBytes = 0U;
+  observeStorageIo = true;
+#endif
+  CompletionLatch appended;
+  auto next = validBatch(battle, opened.storage->writerRecoveryEpoch(),
+                         sequence, 1U, false);
+  const auto followingSequence = next.lastRecordSequence + 1U;
+  const auto accepted = submit(*opened.storage, std::move(next), appended);
+  const auto result = appended.wait();
+  opened.storage->waitUntilIdle();
+#ifdef LOL_STORAGE_IO_PROBES
+  observeStorageIo = false;
+  if (storageReadBytes == 0U) {
+    return false;
+  }
+#endif
+  if (accepted != DurableTickSubmitResult::Accepted || !result.has_value() ||
+      !std::holds_alternative<DurableTickCommitted>(*result)) {
+    return false;
+  }
+#ifdef LOL_STORAGE_IO_PROBES
+  failNextStorageSync = true;
+  CompletionLatch failed;
+  if (submit(*opened.storage,
+             validBatch(battle, opened.storage->writerRecoveryEpoch(),
+                        followingSequence, 2U, false),
+             failed) != DurableTickSubmitResult::Accepted) {
+    return false;
+  }
+  const auto failure = failed.wait();
+  opened.storage->waitUntilIdle();
+  if (!failure.has_value() ||
+      !std::holds_alternative<DurableTickWriteFailed>(*failure)) {
+    return false;
+  }
+  // A failed sync may still have appended complete bytes. Revalidate those
+  // bytes from disk rather than trusting an unconfirmed cached tail.
+  storageReadBytes = 0U;
+  storageSyncCalls = 0U;
+  observeStorageIo = true;
+  CompletionLatch retry;
+  const auto retryAccepted =
+      submit(*opened.storage,
+             validBatch(battle, opened.storage->writerRecoveryEpoch(),
+                        followingSequence + 2U, 3U, false),
+             retry);
+  const auto retried = retry.wait();
+  opened.storage->waitUntilIdle();
+  observeStorageIo = false;
+  if (retryAccepted != DurableTickSubmitResult::Accepted ||
+      !retried.has_value() ||
+      !std::holds_alternative<DurableTickCommitted>(*retried) ||
+      storageReadBytes == 0U || storageSyncCalls != 1U) {
+    return false;
+  }
+#else
+  (void)followingSequence;
+#endif
+  return true;
+}
+
+bool multipleCompleteTicksUseOneSyncAndRejectBrokenRanges() {
+  for (int scenario = 0; scenario < 4; ++scenario) {
+    TempDirectory directory;
+    auto opened =
+        ContinuityStorage::open(directory.path(), createKey(directory.path()));
+    if (!opened.ok())
+      return false;
+    const auto epoch = opened.storage->writerRecoveryEpoch();
+    const auto battle = identity(epoch, 1U);
+    CompletionLatch start;
+    if (submit(*opened.storage, validBatch(battle, epoch, 1U, 0U, true),
+               start) != DurableTickSubmitResult::Accepted ||
+        !start.wait().has_value())
+      return false;
+    opened.storage->waitUntilIdle();
+    CompletionLatch previous;
+    if (submit(*opened.storage, validBatch(battle, epoch, 4U, 10U, false),
+               previous) != DurableTickSubmitResult::Accepted ||
+        !previous.wait().has_value())
+      return false;
+    opened.storage->waitUntilIdle();
+    auto combined =
+        validBatch(battle, epoch, 6U, scenario == 2 ? 9U : 11U, false);
+    auto next = validBatch(battle, epoch, scenario == 3 ? 9U : 8U, 12U, false);
+    combined.encodedRecords.insert(combined.encodedRecords.end(),
+                                   next.encodedRecords.begin(),
+                                   next.encodedRecords.end());
+    combined.lastRecordSequence = next.lastRecordSequence;
+    combined.logicalTick = next.logicalTick;
+    if (scenario == 1)
+      combined.encodedRecords[20] ^= 0x01U;
+    const auto journal = opened.storage->journalPath(battle);
+    const auto oldSize = std::filesystem::file_size(journal);
+#ifdef LOL_STORAGE_IO_PROBES
+    storageSyncCalls = 0U;
+    observeStorageIo = true;
+#endif
+    CompletionLatch completion;
+    const auto accepted =
+        submit(*opened.storage, std::move(combined), completion);
+    const auto result = completion.wait();
+    opened.storage->waitUntilIdle();
+#ifdef LOL_STORAGE_IO_PROBES
+    observeStorageIo = false;
+    if (storageSyncCalls != (scenario == 0 ? 1U : 0U))
+      return false;
+#endif
+    if (accepted != DurableTickSubmitResult::Accepted || !result.has_value() ||
+        std::holds_alternative<DurableTickCommitted>(*result) !=
+            (scenario == 0))
+      return false;
+    if (scenario != 0 && std::filesystem::file_size(journal) != oldSize)
+      return false;
+  }
+  return true;
+}
+
 int main() {
+  if (!multipleCompleteTicksUseOneSyncAndRejectBrokenRanges())
+    return EXIT_FAILURE;
+  if (!repeatedAppendsDoNotRereadCommittedHistory() ||
+      !cachedTailRejectsChangedFilesAndInvalidContinuation() ||
+      !coldAppendValidatesOnceAndSyncFailureNeverConfirms()) {
+    return EXIT_FAILURE;
+  }
   return rejectsUnsafeRootAndKey() && manifestChecksumFailureStopsStartup() &&
                  differentKeyFailsGloballyBeforeEpochAdvance() &&
                  leaseAndEpochPersist() &&

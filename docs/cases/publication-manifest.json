@@ -1,17 +1,17 @@
 {
   "schemaVersion": 2,
-  "publishedAt": "2026-09-07",
-  "productSourceRevision": "17c6d7fc0996e389fdf025de8a926974f9186b79",
-  "publicSyncBaseRevision": "2f6c44fb335d1ded7f72a3d4ef8673682fd885dc",
+  "publishedAt": "2026-09-12",
+  "productSourceRevision": "450ecb5ffbf5689adc3f71bddf398bc8678949d4",
+  "publicSyncBaseRevision": "b5abe227de582130483ceab9b3dcb8477fec2284",
   "scope": "Historical case records remain tied to their run SHAs; current product code is synchronized separately.",
   "files": [
     {
       "path": "docs/cases/README.md",
-      "sha256": "cecd0402e535835f5ee8bdd7bef3d93b5444cac1010c5fcc628a6d8783aca15f"
+      "sha256": "c837069d943e7de55bf410d229581a330dce0f17515afdf89743404b5214954b"
     },
     {
       "path": "docs/cases/battle-recovery.md",
-      "sha256": "5a90890a86c22170c18b561ddba819d6889067294b80d7d80a7c6917d7c73e61"
+      "sha256": "19f6e1fe0d3a90538983514a1f3ed3fbe8085268b48c375a87554b32adfc80e9"
     },
     {
       "path": "docs/cases/capacity-5250.md",
@@ -64,6 +64,10 @@
     {
       "path": "docs/cases/records/rss-pre-fix-3000p.tsv",
       "sha256": "1fc60e26196a40cc4c10f4c5c023a5e8cd838f74aa113e744fe81be9f5a9339e"
+    },
+    {
+      "path": "docs/cases/rudp-rto.md",
+      "sha256": "435cfe65fa7a00901ce03de43c139f7928f80f0502f98c1835bcb464c1a292fd"
     }
   ]
 }

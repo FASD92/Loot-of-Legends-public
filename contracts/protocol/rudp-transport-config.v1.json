@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "contractId": "LOL-V2-RUDP-TRANSPORT-CONFIG",
   "status": "Accepted",
-  "version": "1.0.0",
+  "version": "4.0.0",
   "rudp": {
     "magicHex": "4c4f4c32",
     "protocolMajor": 1,
@@ -25,6 +25,15 @@
   },
   "reliability": {
     "initialRtoMillis": 200,
+    "senderScope": "cpp-server",
+    "rtoPolicy": "binding-srtt-rttvar-recovery-floor-entry-backoff",
+    "minimumRtoMillis": 200,
+    "minimumRttSamples": 1,
+    "clockGranularityMicros": 1000,
+    "srttAlphaDenominator": 8,
+    "rttvarBetaDenominator": 4,
+    "variationMultiplier": 4,
+    "rttSampling": "latest-successful-single-attempt-per-ack",
     "backoffMultiplier": 2,
     "maximumRtoMillis": 1000,
     "maximumTotalTransmissions": 5,
@@ -32,7 +41,17 @@
     "queueTotalEntries": 256,
     "queueApplicationEntryLimit": 224,
     "queueControlReserveEntries": 32,
-    "queueTotalBytes": 262144
+    "queueTotalBytes": 262144,
+    "recoveryTimeout": "successful-previous-attempt-current-revision",
+    "recoveryReset": "current-revision-single-attempt-sample"
+  },
+  "clientReliability": {
+    "rtoPolicy": "fixed-entry-backoff",
+    "initialRtoMillis": 200,
+    "backoffMultiplier": 2,
+    "maximumRtoMillis": 1000,
+    "maximumTotalTransmissions": 5,
+    "wallClockExpiryMillis": 5000
   },
   "movement": {
     "boundsMillimeters": {

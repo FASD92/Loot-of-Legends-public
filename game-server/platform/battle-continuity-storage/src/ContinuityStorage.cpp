@@ -12,6 +12,7 @@
 #include <deque>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -59,6 +60,30 @@ constexpr std::size_t kEnvelopeTagBytes = 16U;
 constexpr std::size_t kMaximumEnvelopePlaintextBytes = 1U << 20U;
 constexpr std::size_t kMaximumQueuedBytes =
     battle_continuity::kMaximumJournalBytes;
+// Bound memory retained for inactive battles; eviction only costs a cold read.
+constexpr std::size_t kMaximumVerifiedJournalTails = 1024U;
+
+bool sameFileVersion(const struct stat &left,
+                     const struct stat &right) noexcept {
+#ifdef __APPLE__
+  const auto leftModified = left.st_mtimespec;
+  const auto rightModified = right.st_mtimespec;
+  const auto leftChanged = left.st_ctimespec;
+  const auto rightChanged = right.st_ctimespec;
+#else
+  const auto leftModified = left.st_mtim;
+  const auto rightModified = right.st_mtim;
+  const auto leftChanged = left.st_ctim;
+  const auto rightChanged = right.st_ctim;
+#endif
+  return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
+         left.st_size == right.st_size && left.st_uid == right.st_uid &&
+         left.st_mode == right.st_mode && left.st_nlink == right.st_nlink &&
+         leftModified.tv_sec == rightModified.tv_sec &&
+         leftModified.tv_nsec == rightModified.tv_nsec &&
+         leftChanged.tv_sec == rightChanged.tv_sec &&
+         leftChanged.tv_nsec == rightChanged.tv_nsec;
+}
 
 int noFollowFlags(int flags) noexcept {
 #ifdef O_CLOEXEC
@@ -707,6 +732,7 @@ struct ParsedBatch final {
   std::uint32_t writerRecoveryEpoch{0U};
   std::uint64_t firstSequence{0U};
   std::uint64_t lastSequence{0U};
+  std::uint64_t firstLogicalTick{0U};
   std::uint64_t logicalTick{0U};
 };
 
@@ -749,6 +775,7 @@ std::optional<ParsedBatch> parseBatch(std::span<const std::uint8_t> bytes,
   result.writerRecoveryEpoch = first.writerRecoveryEpoch;
   result.firstSequence = first.recordSequence;
   result.logicalTick = first.logicalTick;
+  result.firstLogicalTick = first.logicalTick;
   if (!validIdentity(result.identity) ||
       result.writerRecoveryEpoch != expectedWriterEpoch) {
     return std::nullopt;
@@ -756,9 +783,17 @@ std::optional<ParsedBatch> parseBatch(std::span<const std::uint8_t> bytes,
   battle_continuity::Hash lastHash{};
   bool hasLastHash = false;
   bool sawTerminal = false;
+  std::size_t batchBegin = 0U;
   for (std::size_t index = 0U; index < result.records.size(); ++index) {
     const auto &record = result.records[index];
     const auto &header = record.header;
+    if (index == batchBegin) {
+      if (header.recordType == RecordType::TickCommit ||
+          header.logicalTick < result.logicalTick || sawTerminal) {
+        return std::nullopt;
+      }
+      result.logicalTick = header.logicalTick;
+    }
     if (index >
             std::numeric_limits<std::uint64_t>::max() - result.firstSequence ||
         header.recordSequence != result.firstSequence + index ||
@@ -772,24 +807,51 @@ std::optional<ParsedBatch> parseBatch(std::span<const std::uint8_t> bytes,
       return std::nullopt;
     }
     if (record.header.recordType == RecordType::TickCommit) {
-      if (index + 1U != result.records.size()) {
-        return std::nullopt;
-      }
       const auto &commit =
           std::get<battle_continuity::TickCommitPayload>(record.payload);
-      if (commit.firstRecordSequence != result.firstSequence ||
+      if (commit.firstRecordSequence !=
+              result.records[batchBegin].header.recordSequence ||
           header.recordSequence == 0U ||
           commit.lastDataRecordSequence != header.recordSequence - 1U ||
-          commit.recordCount != result.records.size() - 1U || !hasLastHash ||
+          commit.recordCount != index - batchBegin || !hasLastHash ||
           commit.committedStateHash != lastHash) {
         return std::nullopt;
       }
+      // The initial batch remains exactly Start, Checkpoint, Commit even when
+      // a request contains additional complete batches.
+      if (result.records[batchBegin].header.recordSequence == 1U &&
+          (index - batchBegin != 2U ||
+           result.records[batchBegin].header.recordType !=
+               RecordType::BattleStart ||
+           result.records[batchBegin + 1U].header.recordType !=
+               RecordType::Checkpoint ||
+           result.logicalTick != 0U ||
+           std::get<battle_continuity::BattleStartPayload>(
+               result.records[batchBegin].payload)
+                   .initialStateHash !=
+               std::get<battle_continuity::CheckpointPayload>(
+                   result.records[batchBegin + 1U].payload)
+                   .stateHash)) {
+        return std::nullopt;
+      }
+      batchBegin = index + 1U;
+      hasLastHash = false;
     } else {
+      if (header.recordType == RecordType::BattleStart &&
+          header.recordSequence != 1U) {
+        return std::nullopt;
+      }
       if (!recordStateHash(record, lastHash)) {
         return std::nullopt;
       }
       hasLastHash = true;
       if (record.header.recordType == RecordType::TerminalReceipt) {
+        // Match decodeJournal: exactly one checkpoint must follow the receipt.
+        if (index + 3U != result.records.size() ||
+            result.records[index + 1U].header.recordType !=
+                RecordType::Checkpoint) {
+          return std::nullopt;
+        }
         sawTerminal = true;
       } else if (sawTerminal &&
                  record.header.recordType != RecordType::Checkpoint) {
@@ -944,6 +1006,13 @@ StorageError sidecarErrorFor(bool io) noexcept {
 } // namespace
 
 struct ContinuityStorage::Impl final {
+  struct VerifiedJournalTail final {
+    struct stat fileVersion {};
+    std::uint64_t lastSequence{0U};
+    std::uint64_t logicalTick{0U};
+    std::uint32_t writerEpoch{0U};
+  };
+
   struct Job final {
     battle_continuity::DurableTickWriteRequest request;
     battle_continuity::DurableTickWritePort::CompletionSink completion;
@@ -1152,16 +1221,33 @@ struct ContinuityStorage::Impl final {
                 battle_continuity::DurableTickWriteFailure::InvalidBatch};
       }
       const auto journal = journalPathFor(root_, batch.identity);
-      const auto existing =
-          readRegularFile(journal, battle_continuity::kMaximumJournalBytes);
-      if (!existing.missing && !existing.bytes.has_value()) {
+      struct stat before {};
+      const bool existingMissing = ::lstat(journal.c_str(), &before) != 0;
+      const bool missingError = existingMissing && errno != ENOENT;
+      std::optional<VerifiedJournalTail> verified;
+      if (const auto cached = verifiedTails_.find(journal);
+          cached != verifiedTails_.end()) {
+        if (!existingMissing &&
+            sameFileVersion(cached->second.fileVersion, before)) {
+          verified = cached->second;
+        }
+        // Any rejection or partial I/O below must leave this entry untrusted.
+        verifiedTails_.erase(cached);
+      }
+      if (missingError ||
+          (!existingMissing &&
+           (!S_ISREG(before.st_mode) || before.st_uid != ::geteuid() ||
+            (before.st_mode & 07777) != (S_IRUSR | S_IWUSR) ||
+            before.st_size < 0 ||
+            static_cast<std::uintmax_t>(before.st_size) >
+                battle_continuity::kMaximumJournalBytes))) {
         return battle_continuity::DurableTickWriteFailed{
             .identity = batch.identity,
             .writerRecoveryEpoch = batch.writerRecoveryEpoch,
             .lastRecordSequence = batch.lastRecordSequence,
             .failure = battle_continuity::DurableTickWriteFailure::IoFailure};
       }
-      if (request.privateEnvelopePlaintext.has_value() && !existing.missing) {
+      if (request.privateEnvelopePlaintext.has_value() && !existingMissing) {
         return battle_continuity::DurableTickWriteFailed{
             .identity = batch.identity,
             .writerRecoveryEpoch = batch.writerRecoveryEpoch,
@@ -1169,8 +1255,7 @@ struct ContinuityStorage::Impl final {
             .failure =
                 battle_continuity::DurableTickWriteFailure::InvalidBatch};
       }
-      Bytes combined;
-      if (existing.missing) {
+      if (existingMissing) {
         const auto initial =
             battle_continuity::decodeJournal(batch.encodedRecords);
         if (!initial.ok() ||
@@ -1183,38 +1268,64 @@ struct ContinuityStorage::Impl final {
                   battle_continuity::DurableTickWriteFailure::InvalidBatch};
         }
       } else {
-        const auto existingDecoded =
-            battle_continuity::decodeJournal(*existing.bytes);
-        if (!existingDecoded.ok() ||
-            existingDecoded.committedBytes != existing.bytes->size() ||
-            existingDecoded.records.empty() ||
-            existingDecoded.records.back().header.recordType !=
-                RecordType::TickCommit ||
-            parsed->firstSequence <=
-                existingDecoded.records.back().header.recordSequence) {
+        if (!verified.has_value()) {
+          const auto existing =
+              readRegularFile(journal, battle_continuity::kMaximumJournalBytes);
+          if (!existing.bytes.has_value()) {
+            return battle_continuity::DurableTickWriteFailed{
+                .identity = batch.identity,
+                .writerRecoveryEpoch = batch.writerRecoveryEpoch,
+                .lastRecordSequence = batch.lastRecordSequence,
+                .failure =
+                    battle_continuity::DurableTickWriteFailure::IoFailure};
+          }
+          const auto decoded =
+              battle_continuity::decodeJournal(*existing.bytes);
+          if (!decoded.ok() ||
+              decoded.committedBytes != existing.bytes->size() ||
+              decoded.records.empty() ||
+              decoded.records.back().header.recordType !=
+                  RecordType::TickCommit) {
+            return battle_continuity::DurableTickWriteFailed{
+                .identity = batch.identity,
+                .writerRecoveryEpoch = batch.writerRecoveryEpoch,
+                .lastRecordSequence = batch.lastRecordSequence,
+                .failure =
+                    battle_continuity::DurableTickWriteFailure::IoFailure};
+          }
+          if (decoded.records.front().header.originRecoveryEpoch !=
+                  batch.identity.originRecoveryEpoch ||
+              decoded.records.front().header.roomId != batch.identity.roomId ||
+              decoded.records.front().header.battleInstanceId !=
+                  batch.identity.battleInstanceId) {
+            return battle_continuity::DurableTickWriteFailed{
+                .identity = batch.identity,
+                .writerRecoveryEpoch = batch.writerRecoveryEpoch,
+                .lastRecordSequence = batch.lastRecordSequence,
+                .failure =
+                    battle_continuity::DurableTickWriteFailure::InvalidBatch};
+          }
+          const auto &last = decoded.records.back().header;
+          verified =
+              VerifiedJournalTail{.fileVersion = before,
+                                  .lastSequence = last.recordSequence,
+                                  .logicalTick = last.logicalTick,
+                                  .writerEpoch = last.writerRecoveryEpoch};
+        }
+        if (parsed->firstSequence <= verified->lastSequence) {
           return battle_continuity::DurableTickWriteFailed{
               .identity = batch.identity,
               .writerRecoveryEpoch = batch.writerRecoveryEpoch,
               .lastRecordSequence = batch.lastRecordSequence,
               .failure = battle_continuity::DurableTickWriteFailure::IoFailure};
         }
-        const auto expectedFirst =
-            existingDecoded.records.back().header.recordSequence + 1U;
+        const auto expectedFirst = verified->lastSequence + 1U;
         if (parsed->firstSequence != expectedFirst ||
-            existing.bytes->size() > battle_continuity::kMaximumJournalBytes -
-                                         batch.encodedRecords.size()) {
-          return battle_continuity::DurableTickWriteFailed{
-              .identity = batch.identity,
-              .writerRecoveryEpoch = batch.writerRecoveryEpoch,
-              .lastRecordSequence = batch.lastRecordSequence,
-              .failure =
-                  battle_continuity::DurableTickWriteFailure::InvalidBatch};
-        }
-        combined = *existing.bytes;
-        combined.insert(combined.end(), batch.encodedRecords.begin(),
-                        batch.encodedRecords.end());
-        const auto decoded = battle_continuity::decodeJournal(combined);
-        if (!decoded.ok() || decoded.committedBytes != combined.size()) {
+            parsed->firstLogicalTick < verified->logicalTick ||
+            parsed->writerRecoveryEpoch < verified->writerEpoch ||
+            static_cast<std::size_t>(before.st_size) >
+                battle_continuity::kMaximumJournalBytes -
+                    batch.encodedRecords.size()) {
           return battle_continuity::DurableTickWriteFailed{
               .identity = batch.identity,
               .writerRecoveryEpoch = batch.writerRecoveryEpoch,
@@ -1254,20 +1365,42 @@ struct ContinuityStorage::Impl final {
       }
       struct stat status {};
       const bool statOk = ::fstat(descriptor, &status) == 0;
-      const auto expectedSize = existing.missing ? 0U : existing.bytes->size();
+      const auto expectedSize =
+          existingMissing ? 0U : static_cast<std::size_t>(before.st_size);
       const bool appendOk =
           statOk && static_cast<std::size_t>(status.st_size) == expectedSize &&
+          (existingMissing || sameFileVersion(before, status)) &&
           status.st_uid == ::geteuid() &&
           (status.st_mode & 07777) == (S_IRUSR | S_IWUSR) &&
           writeAll(descriptor, batch.encodedRecords) && syncData(descriptor);
+      struct stat after {};
+      const bool afterOk = appendOk && ::fstat(descriptor, &after) == 0 &&
+                           after.st_size >= 0 &&
+                           static_cast<std::size_t>(after.st_size) ==
+                               expectedSize + batch.encodedRecords.size();
       const bool closeOk = ::close(descriptor) == 0;
-      if (!appendOk || !closeOk ||
-          (existing.missing && !syncDirectory(rootDescriptor_))) {
+      if (!afterOk || !closeOk ||
+          (existingMissing && !syncDirectory(rootDescriptor_))) {
         return battle_continuity::DurableTickWriteFailed{
             .identity = batch.identity,
             .writerRecoveryEpoch = batch.writerRecoveryEpoch,
             .lastRecordSequence = batch.lastRecordSequence,
             .failure = battle_continuity::DurableTickWriteFailure::IoFailure};
+      }
+      // Only the storage worker touches this bounded cache. Startup/recovery
+      // still scans full journals; a changed file version forces a cold check.
+      try {
+        if (verifiedTails_.size() >= kMaximumVerifiedJournalTails) {
+          verifiedTails_.erase(verifiedTails_.begin());
+        }
+        verifiedTails_.emplace(
+            journal,
+            VerifiedJournalTail{.fileVersion = after,
+                                .lastSequence = parsed->lastSequence,
+                                .logicalTick = parsed->logicalTick,
+                                .writerEpoch = parsed->writerRecoveryEpoch});
+      } catch (...) {
+        // Cache allocation is optional; the next append validates from disk.
       }
       return battle_continuity::DurableTickCommitted{
           .identity = batch.identity,
@@ -1365,7 +1498,7 @@ struct ContinuityStorage::Impl final {
             .artifact = artifact.path.empty() ? entry.path() : artifact.path,
             .identity = std::nullopt,
             .reason = artifact.ok ? StorageError::JournalCorrupt
-                                   : StorageError::JournalIo});
+                                  : StorageError::JournalIo});
         continue;
       }
       const auto status =
@@ -1410,12 +1543,13 @@ struct ContinuityStorage::Impl final {
             .roomId = first.roomId,
             .battleInstanceId = first.battleInstanceId};
         if (identity != *filenameIdentity) {
-          const auto artifact = quarantineJournal(entry.path(), rootDescriptor_);
+          const auto artifact =
+              quarantineJournal(entry.path(), rootDescriptor_);
           result.quarantined.push_back(QuarantinedBattle{
               .artifact = artifact.path.empty() ? entry.path() : artifact.path,
               .identity = filenameIdentity,
               .reason = artifact.ok ? StorageError::JournalCorrupt
-                                     : StorageError::JournalIo});
+                                    : StorageError::JournalIo});
           continue;
         }
         if (skipTombstoned(*filenameIdentity, entry.path(), result)) {
@@ -1455,7 +1589,7 @@ struct ContinuityStorage::Impl final {
             .artifact = artifact.path.empty() ? entry.path() : artifact.path,
             .identity = filenameIdentity,
             .reason = artifact.ok ? StorageError::JournalCorrupt
-                                   : StorageError::JournalIo});
+                                  : StorageError::JournalIo});
         continue;
       }
       if (skipTombstoned(*filenameIdentity, entry.path(), result)) {
@@ -1595,6 +1729,7 @@ struct ContinuityStorage::Impl final {
   std::array<std::uint8_t, 32> key_;
   std::uint32_t epoch_;
   std::size_t queueCapacity_;
+  std::map<std::filesystem::path, VerifiedJournalTail> verifiedTails_;
   std::mutex lifecycleMutex_;
   std::mutex mutex_;
   std::condition_variable changed_;
