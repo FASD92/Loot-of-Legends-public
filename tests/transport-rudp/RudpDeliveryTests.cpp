@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <vector>
 
@@ -60,7 +61,7 @@ bool retransmissionUsesFrozenBackoffAndExpiry() {
     return false;
   }
 
-  const auto first = queue.poll(kStart);
+  const auto first = queue.poll(kStart, 200ms);
   const auto earlySecond = queue.poll(kStart + 199ms);
   const auto second = queue.poll(kStart + 200ms);
   const auto earlyThird = queue.poll(kStart + 599ms);
@@ -151,6 +152,15 @@ bool queuePreservesControlReserveAndByteBound() {
 } // namespace
 
 int main() {
+  ReliableQueue bootstrap;
+  if (bootstrap.enqueue(1, datagram(), ReliableLane::Application, kStart) !=
+          ReliableQueueAdmission::Accepted ||
+      bootstrap.poll(kStart).transmissions.size() != 1 ||
+      !bootstrap.poll(kStart + 199ms).transmissions.empty() ||
+      bootstrap.poll(kStart + 200ms).transmissions.size() != 1) {
+    std::cerr << "bootstrap must retry at 200ms, never earlier\n";
+    return EXIT_FAILURE;
+  }
   return receiveWindowTracksReorderDuplicateAndWrap() &&
                  retransmissionUsesFrozenBackoffAndExpiry() &&
                  acknowledgementOnlyDiscardsTransportEntries() &&

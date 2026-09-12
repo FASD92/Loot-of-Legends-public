@@ -101,8 +101,7 @@ class FlightRecorder final {
 public:
   [[nodiscard]] static std::optional<FlightRecorder>
   start(const battle::BattleInstance &battle, BattleIdentity identity,
-        std::uint32_t writerRecoveryEpoch,
-        const RoomRecoveryState &roomState);
+        std::uint32_t writerRecoveryEpoch, const RoomRecoveryState &roomState);
 
   FlightRecorder(FlightRecorder &&) noexcept = default;
   FlightRecorder &operator=(FlightRecorder &&) noexcept = default;
@@ -115,8 +114,8 @@ public:
                 const battle::BattleDeterministicState &before,
                 const RoomRecoveryState &beforeRoom,
                 const battle::BattleInstance &after,
-                const RoomRecoveryState &afterRoom,
-                std::uint16_t decisionCode, Bytes outcomePayload);
+                const RoomRecoveryState &afterRoom, std::uint16_t decisionCode,
+                Bytes outcomePayload);
 
   [[nodiscard]] RecorderAppendResult
   appendCheckpoint(const battle::BattleInstance &battle,
@@ -165,6 +164,9 @@ private:
   std::uint64_t batchLastTick_;
   std::uint64_t nextSequence_;
   bool terminalRecorded_;
+  // Encoded history includes deferred RAM records; never grows past the
+  // existing journal budget while waiting for the next critical event.
+  std::size_t encodedBytes_{0U};
 };
 
 struct TerminalRecording final {
@@ -179,19 +181,20 @@ struct RecordedTickBatch final {
   std::uint32_t writerRecoveryEpoch;
   std::uint64_t firstRecordSequence;
   std::uint64_t lastRecordSequence;
+  // A write can contain several complete tick batches. This is the last tick;
+  // first/lastRecordSequence cover the entire deferred prefix being submitted.
   std::uint64_t logicalTick;
   bool terminal;
   Bytes encodedRecords;
 };
 
-// Owns the production checkpoint policy around the semantic recorder.  The
+// Owns the critical-event persistence policy around the semantic recorder. The
 // caller remains the single Battle writer and supplies each admitted mutation.
 class BattleRecording final {
 public:
   [[nodiscard]] static std::optional<BattleRecording>
   start(const battle::BattleInstance &battle, BattleIdentity identity,
-        std::uint32_t writerRecoveryEpoch,
-        const RoomRecoveryState &roomState);
+        std::uint32_t writerRecoveryEpoch, const RoomRecoveryState &roomState);
   [[nodiscard]] static std::optional<BattleRecording>
   resume(const battle::BattleInstance &battle,
          std::vector<Record> committedRecords,
@@ -208,8 +211,7 @@ public:
                  const battle::BattleDeterministicState &before,
                  const RoomRecoveryState &beforeRoom,
                  const battle::BattleInstance &after,
-                 const RoomRecoveryState &afterRoom,
-                 std::uint16_t decisionCode,
+                 const RoomRecoveryState &afterRoom, std::uint16_t decisionCode,
                  std::optional<TerminalRecording> terminal);
 
   [[nodiscard]] std::optional<RecordedTickBatch> takePendingBatch();
@@ -219,13 +221,13 @@ public:
   roomRecoveryState() const noexcept;
 
 private:
-  BattleRecording(FlightRecorder recorder, std::uint64_t lastCheckpointTick,
+  BattleRecording(FlightRecorder recorder, std::size_t submittedRecordCount,
                   std::optional<RecordedTickBatch> pendingBatch,
                   std::optional<RoomRecoveryState> roomState) noexcept;
   [[nodiscard]] bool capturePendingBatch(bool terminal);
 
   FlightRecorder recorder_;
-  std::uint64_t lastCheckpointTick_;
+  std::size_t submittedRecordCount_;
   std::optional<RecordedTickBatch> pendingBatch_;
   std::optional<RoomRecoveryState> roomState_;
 };

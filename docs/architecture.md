@@ -25,8 +25,9 @@ Unity
           server tick / position / range / cooldown
           damage / drop state / first accepted owner
                             |
-              TickCommit + data sync
-               battle replay / restore
+          일반 변경은 RAM 기록 후 즉시 결과 전송
+       중요 사건은 누적 기록 + checkpoint data sync
+                  battle replay / restore
                             |
          durable journal → SettlementPublisher
                             │
@@ -72,7 +73,9 @@ Cell mutex 아래 `scheduled_`를 전이한 한 run만 `WorkerPool`에 제출하
 
 ## Same-host battle continuity
 
-[`FlightRecorder.cpp`](../game-server/modules/battle-continuity/src/FlightRecorder.cpp)는 domain admission을 통과한 결정과 state hash를 기록합니다. [`ContinuityStorage.cpp`](../game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp)는 writer epoch와 append 및 data sync를 맡습니다. Room Cell은 완료 전 결과를 보류하고 file I/O를 직접 수행하지 않습니다.
+[`FlightRecorder.cpp`](../game-server/modules/battle-continuity/src/FlightRecorder.cpp)는 domain admission을 통과한 결정과 state hash를 RAM에 누적합니다. 일반 이동과 비치명적 공격은 저장 요청 없이 결과를 전송합니다. 전투 시작과 상태 전환 및 몬스터 처치와 전리품 변경 및 전투 종료에서는 누적 기록과 전체 checkpoint를 [`ContinuityStorage.cpp`](../game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp)에 append하고 data sync합니다. 중요 결과는 저장 완료 후 전송합니다.
+
+주기 저장은 없습니다. 장애가 나면 마지막 중요 저장 이후의 일반 변경은 모두 되돌아갈 수 있습니다. 자세한 기준은 [`ADR-0019`](adr/ADR-0019-critical-event-battle-persistence.md)와 [`critical-event-policy-v1.json`](../contracts/battle-continuity/critical-event-policy-v1.json)에 있습니다.
 
 재시작하면 [`BattleReplay.cpp`](../game-server/modules/battle-continuity/src/BattleReplay.cpp)가 checkpoint 이후 기록을 실제 `BattleInstance` 규칙으로 재생합니다. [`BattleContinuityRecovery.cpp`](../game-server/modules/game-flow/src/BattleContinuityRecovery.cpp)는 복구한 Room과 Session 및 Battle을 listener가 열리기 전에 설치합니다. 계약은 [`battle-continuity-v1.md`](../contracts/battle-continuity/battle-continuity-v1.md)가 소유합니다.
 

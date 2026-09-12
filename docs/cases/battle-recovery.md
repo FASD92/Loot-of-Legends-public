@@ -1,14 +1,26 @@
-# 강제 종료 후 전투와 자산 확인
+# 중요 사건 저장과 전투 복구
 
-실제 GameServer 프로세스에 SIGKILL을 보낸 뒤 같은 실행 파일과 endpoint로 다시 시작했습니다. Unity Standalone 두 개가 기존 전투로 돌아와 이동과 공격을 이어갔습니다. 루팅과 Result 및 Collection까지 완료한 뒤 MySQL을 조회했습니다.
+게임 서버는 일반 이동과 비치명적 공격을 RAM에 기록하고 즉시 결과를 보냅니다. 전투 시작과 상태 전환, 몬스터 처치, 전리품 변경, 전투 종료 같은 중요 사건에서는 누적 기록과 전체 checkpoint를 디스크에 동기화한 뒤 중요 결과를 보냅니다.
 
-## 기록 순서
+주기 저장은 없습니다. 프로세스 장애가 나면 마지막 중요 저장 이후의 일반 변경은 모두 되돌아갈 수 있습니다. 저장을 마친 중요 결과는 동일 호스트와 디스크가 유지되는 조건에서 보존합니다.
 
-같은 논리 틱의 명령과 판정을 묶어 기록합니다. TickCommit 기록과 data sync 완료 후 결과를 보냅니다. 실제 macOS 실행은 `fsync`를 사용하고 다른 POSIX 경로는 `fdatasync`를 사용합니다. 디스크 기록이 지연되면 해당 전투의 다음 진행도 기다립니다.
+구현은 [저장 판정](../../game-server/modules/battle-continuity/src/FlightRecorder.cpp), [저장소](../../game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp), [정책 계약](../../contracts/battle-continuity/critical-event-policy-v1.json)에서 확인할 수 있습니다. 정책 결정은 [ADR-0019](../adr/ADR-0019-critical-event-battle-persistence.md)에 기록했습니다.
 
-복구 시 체크포인트 이후의 기록을 재생합니다. 클라이언트가 전체 스냅샷을 적용했다는 ACK를 보내기 전에는 새 전투 입력을 허용하지 않습니다.
+## 현재 정책의 서버 진입 검사
 
-## 해당 실행에서 확인한 결과
+실제 GameServer child process와 TCP/UDP 테스트 클라이언트로 다음 경로를 검사했습니다.
+
+- 일반 이동과 공격 뒤 SIGKILL 시 마지막 중요 저장 지점의 위치와 HP로 복귀
+- 같은 Session과 Room 및 Battle 유지, 새 generation 적용, stale transport 차단
+- 전체 snapshot 적용 ACK 뒤 입력 재개
+- 복귀 뒤 공격과 loot 및 Result 완료
+- terminal 재시작 뒤 정산 기록 중복 없음
+
+[서버 진입 테스트](../../tests/integration/server-entry/ServerEntryTests.cpp)는 이 경로를 실행합니다. 새 정책의 실제 Unity 강제 종료 실행과 외부 MySQL 대조는 수행하지 않았습니다.
+
+## Unity와 MySQL 실행 기록
+
+2026-09-02에는 매 logical tick을 동기화하던 정책으로 실제 GameServer 프로세스에 SIGKILL을 보낸 뒤 같은 실행 파일과 endpoint로 다시 시작했습니다. Unity Standalone 두 개가 기존 전투로 돌아와 이동과 공격을 이어갔습니다. 루팅과 Result 및 Collection까지 완료한 뒤 MySQL을 조회했습니다.
 
 | 항목 | 결과 |
 | --- | --- |
@@ -19,7 +31,7 @@
 | 입력 재개 | snapshot 적용 ACK 이후 |
 | 재생 | GCC와 Clang의 동일 journal 최종 상태 해시 일치 |
 
-실행 source는 `ee4654daf5611b93b7a80b62d16d3f06018da97e`입니다. 결과 보고서는 이후 커밋 `17c6d7fc0996e389fdf025de8a926974f9186b79`에 있는 최종 보고서를 사용했습니다. 보고서 저장 버전과 실험 실행 버전을 구분합니다.
+실행 source는 `ee4654daf5611b93b7a80b62d16d3f06018da97e`입니다.
 
 ## 재시작 후 DB 대조
 
@@ -29,18 +41,12 @@
 | 아이템 수량 합계 | 2 | 2 | 2 |
 | 지갑 잔액 합계 | 400 | 400 | 400 |
 
-[DB 조회 기록의 공개용 사본](records/recovery-db.json)은 네 조회 시점의 집계값을 담습니다. 원래 기록에는 플레이어 ID와 인증 정보가 없었습니다. 공개 사본에서도 개인 식별자나 운영 주소를 추가하지 않았습니다.
-
-현재 공개 제품에는 [복구 설치](../../game-server/modules/game-flow/src/BattleContinuityRecovery.cpp), [journal 재생](../../game-server/modules/battle-continuity/src/BattleReplay.cpp), [동기 저장소](../../game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp)가 포함됩니다. [실제 서버 진입 테스트](../../tests/integration/server-entry/ServerEntryTests.cpp)는 child GameServer를 SIGKILL한 뒤 같은 port와 저장소로 다시 시작합니다.
+[DB 조회 기록](records/recovery-db.json)은 네 조회 시점의 집계값을 담습니다.
 
 정산은 Game의 [SettlementPublisher](../../game-server/modules/settlement/src/application/SettlementPublisher.cpp)가 Meta에 보내고, Meta의 [SettlementApplication](../../meta-server/src/main/java/com/fasd92/lootoflegends/meta/settlement/application/SettlementApplication.java)이 동일 ID와 payload hash를 확인합니다. [SettlementApplyApplication](../../meta-server/src/main/java/com/fasd92/lootoflegends/meta/settlement/application/SettlementApplyApplication.java)은 한 transaction에서 자산을 적용한 뒤 inbox를 Applied로 바꿉니다. [MySQL 정산 테스트](../../meta-server/src/test/java/com/fasd92/lootoflegends/meta/settlement/SettlementAcceptanceTest.java)는 replay와 conflict 및 rollback을 검사합니다.
 
-## 검증 범위
+## 범위
 
-macOS ARM64/APFS의 같은 호스트에서 수행한 단일 시나리오입니다. MySQL은 8.4였습니다. 다른 호스트 전환과 디스크 손실 및 대규모 부하 중 복구는 이 실행의 검증 범위가 아닙니다.
-
-보고서의 RPO 0은 종료 전에 성공 응답과 디스크 기록 완료가 확인된 명령에 한정합니다. 모든 미확정 명령의 무손실이나 전원 장애에 대한 보장이 아닙니다. 이번 공개 작업에서 Unity 시나리오를 다시 실행하지 않았습니다.
-
-현재 공개 루트는 원본 main의 복구 코드를 포함합니다. 다만 위 실행 결과는 더 이른 exact source `ee4654d`의 단일 시나리오입니다. 이번 공개 동기화에서 Unity 시나리오나 DB 대조를 다시 실행하지 않았습니다.
+복구는 같은 호스트와 endpoint 및 local durable filesystem을 전제로 합니다. 다중 호스트 전환과 디스크 손실 및 대규모 부하 중 복구는 검증하지 않았습니다. 현재 정책의 결과 손실 0은 저장 완료 후 전송한 중요 결과에만 적용합니다.
 
 [사례 목록](README.md)

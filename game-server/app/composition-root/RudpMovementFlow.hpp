@@ -39,6 +39,8 @@ enum class RudpMovementSubmitResult {
 struct EncodedRudpDatagram final {
   transport::rudp::RudpEndpoint endpoint;
   std::vector<std::byte> datagram;
+  // Local feedback token; never encoded on the wire. Zero means untracked.
+  std::uint8_t reliableAttempt{0};
 };
 
 class RudpMovementFlow final {

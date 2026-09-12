@@ -213,7 +213,7 @@ RudpCombatFlow::submitAttack(std::span<const std::byte> datagram,
   static_cast<void>(discardAcknowledged(
       decoded.header->sessionId, decoded.header->sessionGeneration,
       decoded.header->transportEpoch, decoded.header->ack,
-      decoded.header->ackBits));
+      decoded.header->ackBits, receivedAt));
   if (*received.disposition != transport::rudp::ReceiveDisposition::Newest &&
       *received.disposition != transport::rudp::ReceiveDisposition::Reordered) {
     return RudpCombatSubmitResult::StaleTransport;
@@ -267,7 +267,7 @@ RudpCombatSubmitResult RudpCombatFlow::submitClaimLoot(
   static_cast<void>(discardAcknowledged(
       decoded.header->sessionId, decoded.header->sessionGeneration,
       decoded.header->transportEpoch, decoded.header->ack,
-      decoded.header->ackBits));
+      decoded.header->ackBits, receivedAt));
   if (*received.disposition != transport::rudp::ReceiveDisposition::Newest &&
       *received.disposition != transport::rudp::ReceiveDisposition::Reordered) {
     return RudpCombatSubmitResult::StaleTransport;
@@ -298,22 +298,78 @@ RudpCombatSubmitResult RudpCombatFlow::submitClaimLoot(
   return RudpCombatSubmitResult::RoomRejected;
 }
 
-std::size_t RudpCombatFlow::discardAcknowledged(std::uint64_t sessionId,
-                                                std::uint64_t sessionGeneration,
-                                                std::uint32_t transportEpoch,
-                                                std::uint32_t ack,
-                                                std::uint32_t ackBits) {
+std::size_t RudpCombatFlow::discardAcknowledged(
+    std::uint64_t sessionId, std::uint64_t sessionGeneration,
+    std::uint32_t transportEpoch, std::uint32_t ack, std::uint32_t ackBits,
+    std::chrono::steady_clock::time_point receivedAt) {
   std::lock_guard lock{mutex_};
   const auto state = reliableStates_.find(
       ReliableKey{sessionId, sessionGeneration, transportEpoch});
   if (state == reliableStates_.end()) {
+    ++reliabilityObservation_.noNewEntryAcks;
     return 0;
   }
-  const auto removed = state->second.queue.discardAcknowledged(ack, ackBits);
+  const auto result = state->second.queue.acknowledge(ack, ackBits, receivedAt);
+  reliabilityObservation_.retransmittedSamples += result.retransmitted;
+  reliabilityObservation_.unconfirmedSamples += result.sendUnconfirmed;
+  reliabilityObservation_.nonpositiveSamples += result.nonpositive;
+  reliabilityObservation_.expiredSamples += result.expired;
+  reliabilityObservation_.coalescedSamples += result.coalesced;
+  if (result.removed == 0)
+    ++reliabilityObservation_.noNewEntryAcks;
+  if (result.sample) {
+    if (bindings_.recordRtt(sessionId, sessionGeneration, transportEpoch,
+                            state->second.endpoint, *result.sample,
+                            result.sampleRevision)) {
+      ++reliabilityObservation_.acceptedSamples;
+    } else {
+      ++reliabilityObservation_.staleSamples;
+    }
+  }
   if (state->second.queue.empty()) {
     reliableStates_.erase(state);
   }
-  return removed;
+  return result.removed;
+}
+
+void RudpCombatFlow::recordSend(const EncodedRudpDatagram &datagram,
+                                std::chrono::steady_clock::time_point sentAt,
+                                bool succeeded) {
+  const auto decoded =
+      transport::rudp::RudpHeaderCodec::decode(datagram.datagram);
+  if (!decoded.header ||
+      decoded.header->flag != transport::rudp::RudpFlag::Reliable ||
+      datagram.reliableAttempt == 0)
+    return;
+  const auto &header = *decoded.header;
+  std::lock_guard lock{mutex_};
+  const auto state = reliableStates_.find(ReliableKey{
+      header.sessionId, header.sessionGeneration, header.transportEpoch});
+  if (state == reliableStates_.end() ||
+      state->second.endpoint != datagram.endpoint ||
+      bindings_.status(header.sessionId, header.sessionGeneration,
+                       header.transportEpoch, datagram.endpoint) !=
+          transport::rudp::RudpPacketStatus::Current)
+    return;
+  if (state->second.queue.recordSend(header.sequence, datagram.reliableAttempt,
+                                     sentAt, succeeded) &&
+      !succeeded)
+    ++reliabilityObservation_.sendFailures;
+}
+
+RudpReliabilityObservation RudpCombatFlow::reliabilityObservation() {
+  std::lock_guard lock{mutex_};
+  auto result = reliabilityObservation_;
+  for (const auto &[key, state] : reliableStates_) {
+    if (bindings_.status(key.sessionId, key.sessionGeneration,
+                         key.transportEpoch, state.endpoint) !=
+        transport::rudp::RudpPacketStatus::Current)
+      continue;
+    const auto values = state.queue.effectiveRtos();
+    result.effectiveRtos.insert(result.effectiveRtos.end(), values.begin(),
+                                values.end());
+  }
+  return result;
 }
 
 RudpCombatPollResult
@@ -325,21 +381,32 @@ RudpCombatFlow::pollReliable(std::chrono::steady_clock::time_point now) {
     // is still the current binding. After session close/replacement, timeout,
     // TransportEpoch rebind, or invalidation the stored identity is stale and
     // must be dropped without transmit/expiry work.
-    const auto bindingStatus =
-        bindings_.status(state->first.sessionId, state->first.sessionGeneration,
-                         state->first.transportEpoch, state->second.endpoint);
-    if (bindingStatus != transport::rudp::RudpPacketStatus::Current) {
+    const auto estimate = bindings_.rtoPolicy(
+        state->first.sessionId, state->first.sessionGeneration,
+        state->first.transportEpoch, state->second.endpoint);
+    if (!estimate) {
       state = reliableStates_.erase(state);
       continue;
     }
-    auto polled = state->second.queue.poll(now);
+    auto polled =
+        state->second.queue.poll(now, estimate->initialRto, estimate->revision);
+    for (const auto &timeout : polled.timeouts) {
+      static_cast<void>(bindings_.recordTimeout(
+          state->first.sessionId, state->first.sessionGeneration,
+          state->first.transportEpoch, state->second.endpoint, timeout.revision,
+          timeout.interval));
+    }
     for (auto &transmission : polled.transmissions) {
+      if (transmission.attempt > 1)
+        ++reliabilityObservation_.retransmissions;
       result.transmissions.push_back(EncodedRudpDatagram{
           .endpoint = state->second.endpoint,
           .datagram = std::move(transmission.datagram),
+          .reliableAttempt = transmission.attempt,
       });
     }
     for (const auto sequence : polled.expiredSequences) {
+      ++reliabilityObservation_.expiries;
       recordPeerFailureLocked(RudpPeerFailure{
           .sessionId = shared::SessionId{state->first.sessionId},
           .generation =

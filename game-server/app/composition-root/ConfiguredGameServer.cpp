@@ -1082,8 +1082,65 @@ public:
                 .maxResponseBytes = 64u * 1024u,
             },
             [this] {
-              return gameMetrics_->snapshot(gateway_->observation(),
-                                            capacity_.metrics());
+              auto snapshot = gameMetrics_->snapshot(gateway_->observation(),
+                                                     capacity_.metrics());
+              const auto reliable = combatFlow_->reliabilityObservation();
+              snapshot.rudpAcceptedSamples =
+                  static_cast<double>(reliable.acceptedSamples);
+              snapshot.rudpRetransmittedSamples =
+                  static_cast<double>(reliable.retransmittedSamples);
+              snapshot.rudpUnconfirmedSamples =
+                  static_cast<double>(reliable.unconfirmedSamples);
+              snapshot.rudpNonpositiveSamples =
+                  static_cast<double>(reliable.nonpositiveSamples);
+              snapshot.rudpExpiredSamples =
+                  static_cast<double>(reliable.expiredSamples);
+              snapshot.rudpStaleSamples =
+                  static_cast<double>(reliable.staleSamples);
+              snapshot.rudpCoalescedSamples =
+                  static_cast<double>(reliable.coalescedSamples);
+              snapshot.rudpNoNewEntryAcks =
+                  static_cast<double>(reliable.noNewEntryAcks);
+              snapshot.rudpRetransmissions =
+                  static_cast<double>(reliable.retransmissions);
+              snapshot.rudpExpiries = static_cast<double>(reliable.expiries);
+              snapshot.rudpSendFailures =
+                  static_cast<double>(reliable.sendFailures);
+              for (const auto interval : reliable.effectiveRtos) {
+                snapshot.rudpEffectiveRtoMs.push_back(
+                    static_cast<double>(interval.count()));
+              }
+              const auto recovery = bindings_.recoveryObservation();
+              snapshot.rudpRecoveryEntered =
+                  static_cast<double>(recovery.entered);
+              snapshot.rudpRecoveryEscalated =
+                  static_cast<double>(recovery.escalated);
+              snapshot.rudpRecoveryReset = static_cast<double>(recovery.reset);
+              snapshot.rudpRecoveryStaleTimeouts =
+                  static_cast<double>(recovery.staleTimeouts);
+              snapshot.rudpRecoveryActive = 0;
+              for (const auto &policy : recovery.policies) {
+                snapshot.rudpInitialRtoMs.push_back(
+                    static_cast<double>(policy.initialRto.count()));
+                if (policy.recoveryFloor.count() > 0) {
+                  ++*snapshot.rudpRecoveryActive;
+                  snapshot.rudpRecoveryFloorMs.push_back(
+                      static_cast<double>(policy.recoveryFloor.count()));
+                }
+              }
+              for (const auto &estimate : bindings_.rttSnapshots()) {
+                snapshot.rudpBaseRtoMs.push_back(
+                    static_cast<double>(estimate.rto.count()));
+                if (estimate.samples != 0) {
+                  snapshot.rudpSrttMs.push_back(
+                      std::chrono::duration<double, std::milli>{estimate.srtt}
+                          .count());
+                  snapshot.rudpRttvarMs.push_back(
+                      std::chrono::duration<double, std::milli>{estimate.rttvar}
+                          .count());
+                }
+              }
+              return snapshot;
             });
       }
 
@@ -2772,7 +2829,9 @@ private:
     }
     auto reliable = combatFlow_->pollReliable(std::chrono::steady_clock::now());
     for (const auto &datagram : reliable.transmissions) {
-      sendDatagram(datagram);
+      const auto sentAt = std::chrono::steady_clock::now();
+      const bool succeeded = sendDatagram(datagram);
+      combatFlow_->recordSend(datagram, sentAt, succeeded);
     }
     for (const auto &failure : reliable.failures) {
       const auto closed = correlations_->closeRudpPeer(failure);
@@ -2797,10 +2856,10 @@ private:
         gateway_->disconnect(closed.sessionId, closed.generation));
   }
 
-  void sendDatagram(const EncodedRudpDatagram &datagram) {
+  bool sendDatagram(const EncodedRudpDatagram &datagram) {
     const auto address = socketAddressFor(datagram.endpoint);
     if (!address.has_value()) {
-      return;
+      return false;
     }
     const auto sent = ::sendto(
         udpSocket_.get(), datagram.datagram.data(), datagram.datagram.size(), 0,
@@ -2808,6 +2867,8 @@ private:
     if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
       fatalStop_.store(true, std::memory_order_release);
     }
+    return sent >= 0 &&
+           static_cast<std::size_t>(sent) == datagram.datagram.size();
   }
 
   void receiveDatagrams() {
@@ -2884,13 +2945,14 @@ private:
       }
       return;
     }
-    if (header.messageId == 24u) {
+    if (header.flag == transport::rudp::RudpFlag::AckOnly ||
+        header.messageId == 24u) {
       const auto received = bindings_.receive(header, endpoint, now);
       if (received.status == transport::rudp::RudpPacketStatus::Current &&
           combatFlow_ != nullptr) {
         static_cast<void>(combatFlow_->discardAcknowledged(
             header.sessionId, header.sessionGeneration, header.transportEpoch,
-            header.ack, header.ackBits));
+            header.ack, header.ackBits, now));
       }
       return;
     }
@@ -2902,7 +2964,7 @@ private:
            submitted == RudpMovementSubmitResult::RoomRejected)) {
         static_cast<void>(combatFlow_->discardAcknowledged(
             header.sessionId, header.sessionGeneration, header.transportEpoch,
-            header.ack, header.ackBits));
+            header.ack, header.ackBits, now));
       }
     } else if (header.messageId == 27u && combatFlow_ != nullptr) {
       static_cast<void>(combatFlow_->submitAttack(datagram, endpoint, now));

@@ -1,5 +1,6 @@
 add_library(lol_transport_rudp STATIC
   src/ReliableQueue.cpp
+  src/RttEstimator.cpp
   src/RudpBindingRegistry.cpp
   src/RudpCombatCodec.cpp
   src/RudpCodec.cpp

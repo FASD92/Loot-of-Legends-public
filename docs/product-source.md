@@ -3,16 +3,16 @@
 ## 고정한 원본
 
 - 저장소: [FASD92/Loot-of-Legends-V2](https://github.com/FASD92/Loot-of-Legends-V2)
-- main SHA: [`17c6d7fc0996e389fdf025de8a926974f9186b79`](https://github.com/FASD92/Loot-of-Legends-V2/commit/17c6d7fc0996e389fdf025de8a926974f9186b79)
-- 공개 동기화 전 기준: `2f6c44fb335d1ded7f72a3d4ef8673682fd885dc`
-- 원본 검토 델타 SHA-256: `8a0e89b2550927fc24d68eacf8a4df9defc63340ae64af9e5327782004945540`
+- main SHA: `450ecb5ffbf5689adc3f71bddf398bc8678949d4`
+- 공개 동기화 전 기준: `b5abe227de582130483ceab9b3dcb8477fec2284`
 
 원본 Git 이력은 옮기지 않았습니다. 검토한 파일의 내용만 공개 브랜치에 적용했습니다.
 
 ## 포함한 범위
 
 - CMake와 게임 서버 제품 코드
-- battle continuity 계약과 관련 C++ 테스트
+- battle continuity 계약과 중요 사건 저장 및 관련 C++ 테스트
+- 연결별 RTT 기반 RUDP 재전송과 타이밍 테스트
 - 현재 TCP/RUDP golden을 읽는 공개 load protocol client
 - 기존 내용과 동일한 Meta 제품 소스와 Gradle build
 - Unity C#과 asmdef 및 uGUI package lock과 companion meta

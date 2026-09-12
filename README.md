@@ -2,33 +2,33 @@
 
 C++ 게임 서버가 이동과 전투 및 루팅을 판정하는 멀티플레이 게임입니다. Spring 메타 서버는 정산을 받아 MySQL 자산에 반영합니다. 1인 개발 프로젝트이며 AI 에이전트가 구현에 참여했습니다.
 
-[플레이 시연](https://www.youtube.com/watch?v=rjpUEDnBJJg)
+[플레이 시연](https://youtu.be/GLW8JMvRCWk)
 
-[![5인 전투에서 고가 전리품을 획득하는 장면](docs/gameplay-loot.png)](https://www.youtube.com/watch?v=rjpUEDnBJJg&t=50s)
+[![전투에서 태양의 금고를 공략하는 장면](docs/gameplay-loot.png)](https://youtu.be/GLW8JMvRCWk?t=34)
 
-*5인 전투의 고가 전리품 획득 단계*
+*태양의 금고 전투 장면*
 
 ## 개발 사례
 
 | 사례 | 코드와 테스트 | 실행 기록 |
 | --- | --- | --- |
-| [5,000세션 수신 병목](docs/cases/receive-budget.md) | [변경 상수](docs/cases/code/receive-budget.txt) | [전후 비교](docs/cases/records/receive-comparison.json) |
+| [연결별 RUDP 재전송](docs/cases/rudp-rto.md) | [연결별 학습](game-server/platform/transport-rudp/src/RudpBindingRegistry.cpp) [타이밍 테스트](tests/transport-rudp/RudpTimingTests.cpp) | [네트워크 조건별 측정](docs/cases/rudp-rto.md#최종-초기-200ms-정책의-측정) |
 | [전투 결과 만료 정리](docs/cases/memory-retention.md) | [변경 코드](docs/cases/code/memory-retention.txt) [회귀 테스트](docs/cases/code/memory-retention-test.txt) | [수정 전 RSS](docs/cases/records/rss-pre-fix-3000p.tsv) [수정 후 RSS](docs/cases/records/rss-post-fix-3000p.tsv) |
 | [5,250세션 60분 실행](docs/cases/capacity-5250.md) | [판정 조건](docs/cases/records/capacity-5250.json) | [60분 RSS](docs/cases/records/rss-capacity-5250-60m.tsv) |
-| [강제 종료 후 전투 복귀](docs/cases/battle-recovery.md) | [복구 코드](game-server/modules/game-flow/src/BattleContinuityRecovery.cpp) [실제 서버 테스트](tests/integration/server-entry/ServerEntryTests.cpp) | [MySQL 자산 대조](docs/cases/records/recovery-db.json) |
+| [중요 사건 저장과 전투 복귀](docs/cases/battle-recovery.md) | [저장 판정](game-server/modules/battle-continuity/src/FlightRecorder.cpp) [실제 서버 테스트](tests/integration/server-entry/ServerEntryTests.cpp) | [저장 정책](docs/adr/ADR-0019-critical-event-battle-persistence.md) [MySQL 자산 대조](docs/cases/records/recovery-db.json) |
 
 사례의 수치는 문서에 적힌 당시 실행 SHA의 결과입니다. 수신 병목과 메모리 정리는 과거 진단 브랜치의 실험이며 최신 제품 main에 합치지 않았습니다. 5,250세션 부하와 전투 복구도 서로 다른 버전과 환경에서 실행했습니다.
 
 ## 현재 공개 제품 코드
 
-공개 제품 기준은 원본 main [`17c6d7fc0996e389fdf025de8a926974f9186b79`](https://github.com/FASD92/Loot-of-Legends-V2/commit/17c6d7fc0996e389fdf025de8a926974f9186b79)입니다. 게임 서버와 계약 및 관련 C++ 테스트를 이 SHA에서 동기화했습니다. 메타 서버와 Gradle 빌드 파일은 이미 같은 내용이었습니다. Unity는 C#과 asmdef 및 uGUI lock과 GUID를 맞췄습니다.
+공개 제품 코드는 Loot-of-Legends-V2 main `450ecb5ffbf5689adc3f71bddf398bc8678949d4`에서 동기화했습니다. 중요 사건 저장 정책과 연결별 RTT 기반 RUDP 재전송을 포함합니다.
 
 | 역할 | 코드 | 테스트 |
 | --- | --- | --- |
 | 서버 진입과 소켓 | [ConfiguredGameServer](game-server/app/composition-root/ConfiguredGameServer.cpp) | [서버 진입 테스트](tests/integration/server-entry/ServerEntryTests.cpp) |
 | Room별 상태 변경 | [RoomExecutionCell](game-server/modules/game-flow/src/execution/RoomExecutionCell.cpp) | [Room 테스트](game-server/modules/game-flow/tests/RoomExecutionCellTests.cpp) |
-| 전투 기록과 재생 | [BattleReplay](game-server/modules/battle-continuity/src/BattleReplay.cpp) | [재생 테스트](game-server/modules/battle-continuity/tests/BattleReplayTests.cpp) |
-| 복구 저장소 | [ContinuityStorage](game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp) | [저장소 테스트](game-server/platform/battle-continuity-storage/tests/ContinuityStorageTests.cpp) |
+| 중요 사건 저장과 재생 | [FlightRecorder](game-server/modules/battle-continuity/src/FlightRecorder.cpp) | [기록 테스트](game-server/modules/battle-continuity/tests/FlightRecorderTests.cpp) |
+| 복구 저장소 | [ContinuityStorage](game-server/platform/battle-continuity-storage/src/ContinuityStorage.cpp) | [중요 사건 저장 정책](docs/adr/ADR-0019-critical-event-battle-persistence.md) |
 | 정산 전송 | [SettlementPublisher](game-server/modules/settlement/src/application/SettlementPublisher.cpp) | [전송 테스트](tests/integration/settlement/SettlementPublisherTests.cpp) |
 | MySQL 자산 반영 | [JdbcAssetStore](meta-server/src/main/java/com/fasd92/lootoflegends/meta/platform/mysql/JdbcAssetStore.java) | [정산 테스트](meta-server/src/test/java/com/fasd92/lootoflegends/meta/settlement/SettlementAcceptanceTest.java) |
 | Unity 전투 복귀 | [BattleSessionReconnectClient](client/unity/Assets/LootOfLegends/Battle/BattleSessionReconnectClient.cs) | [재접속 테스트](client/unity/Assets/LootOfLegends/Tests/EditMode/BattleSessionReconnectClientTests.cs) |
@@ -45,17 +45,17 @@ C++ 게임 서버가 이동과 전투 및 루팅을 판정하는 멀티플레이
 
 ## 공개본 검증
 
-2026-09-07에 공개 저장소 checkout만 사용했습니다.
+2026-09-12에 공개 저장소 checkout만 사용했습니다.
 
-<!-- portfolio-test-count: ctest=60 load-unittest=47 -->
+<!-- portfolio-test-count: ctest=63 load-unittest=47 -->
 
 | 검증 | 결과 |
 | --- | --- |
 | CMake 구성과 전체 C++ 빌드 | PASS |
-| CTest | 60/60 PASS |
-| 아키텍처 검사 | 17 targets / 46 edges / 236 source files / 0 findings |
-| Load 도구 단위 테스트 | 47/47 PASS |
-| Meta Gradle check | BUILD SUCCESSFUL |
+| CTest | 63개 모두 PASS, 중단 전 51개와 재개 후 12개 |
+| 아키텍처 검사 | 17 targets / 46 edges / 239 source files / 0 findings |
+
+Load 도구 47/47 PASS와 Meta Gradle check 성공은 [2026-09-07 검증 기록](docs/verification.md)에 있습니다.
 
 Unity Editor는 사용하지 않았습니다. 공개본에는 라이선스를 별도로 검토해야 하는 Presentation과 ThirdParty 미디어가 없으므로 asset 기반 테스트의 PASS를 주장하지 않습니다.
 

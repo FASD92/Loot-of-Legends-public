@@ -721,14 +721,15 @@ bool authoritativeOutcomeWaitsForContinuityDurability() {
     return false;
   }
   const auto request = continuity.request();
-  const auto journal = request.has_value()
-                           ? lol::battle_continuity::decodeJournal(
-                                 request->batch.encodedRecords)
-                           : lol::battle_continuity::JournalDecodeResult{};
+  const auto journal =
+      request.has_value()
+          ? lol::battle_continuity::decodeJournal(request->batch.encodedRecords)
+          : lol::battle_continuity::JournalDecodeResult{};
   const auto checkpoint =
       journal.ok()
           ? std::ranges::find_if(
-                journal.records, [](const auto &record) {
+                journal.records,
+                [](const auto &record) {
                   return record.header.recordType ==
                          lol::battle_continuity::RecordType::Checkpoint;
                 })
@@ -762,8 +763,8 @@ bool authoritativeOutcomeWaitsForContinuityDurability() {
       initialState.state->room.roomId != RoomId{roomValue} ||
       initialState.state->room.capacity != 10U ||
       initialState.state->room.hostParticipantSlot != 1U ||
-      initialState.state->room.memberSlots != std::vector<std::uint16_t>{1U,
-                                                                          2U} ||
+      initialState.state->room.memberSlots !=
+          std::vector<std::uint16_t>{1U, 2U} ||
       initialState.state->room.phase != RoomRecoveryPhase::Loading ||
       initialState.state->room.nextBattleOrdinal != 2U ||
       !continuity.complete() || !cell->waitUntilIdle(2s)) {
@@ -817,8 +818,8 @@ bool roomMemberMutationChangesRecordedCompositeHash() {
   if (!journal.ok()) {
     return false;
   }
-  const auto decision = std::ranges::find_if(
-      journal.records, [](const auto &record) {
+  const auto decision =
+      std::ranges::find_if(journal.records, [](const auto &record) {
         return record.header.recordType ==
                lol::battle_continuity::RecordType::CommandDecision;
       });
@@ -833,8 +834,8 @@ bool roomMemberMutationChangesRecordedCompositeHash() {
           ? lol::battle_continuity::decodeRoomRecoveryState(
                 payload->roomRecoveryStateBytes)
           : lol::battle_continuity::RoomRecoveryStateDecodeResult{};
-  const auto initialCheckpoint = std::ranges::find_if(
-      journal.records, [](const auto &record) {
+  const auto initialCheckpoint =
+      std::ranges::find_if(journal.records, [](const auto &record) {
         return record.header.recordType ==
                lol::battle_continuity::RecordType::Checkpoint;
       });
@@ -853,7 +854,8 @@ bool roomMemberMutationChangesRecordedCompositeHash() {
          roomState.state->memberSlots == std::vector<std::uint16_t>{2U} &&
          roomState.state->phase == RoomRecoveryPhase::Loading &&
          roomState.state->nextBattleOrdinal == 2U && initialState.ok() &&
-         initialState.state.has_value() && initialCheckpointPayload != nullptr &&
+         initialState.state.has_value() &&
+         initialCheckpointPayload != nullptr &&
          payload->postDecisionStateHash != initialCheckpointPayload->stateHash;
 }
 
@@ -983,14 +985,14 @@ bool continuityQueueFullSuppressesSuccessAndFencesQueuedWork() {
   }
   const auto outcomes = collector.take();
   const auto detail = cell->detail();
-  const auto notices = std::ranges::count_if(
-      outcomes, [](const RoomCommandOutcome &outcome) {
+  const auto notices =
+      std::ranges::count_if(outcomes, [](const RoomCommandOutcome &outcome) {
         return outcome.recoveryNotice.has_value() &&
                outcome.recoveryNotice->reason ==
                    BattleRecoveryReason::ContinuityRecordingFailed;
       });
-  const auto hostStartSucceeded = std::ranges::any_of(
-      outcomes, [](const RoomCommandOutcome &outcome) {
+  const auto hostStartSucceeded =
+      std::ranges::any_of(outcomes, [](const RoomCommandOutcome &outcome) {
         return outcome.kind == RoomCommandKind::HostStartEligibility &&
                outcome.code == RoomResultCode::Ok;
       });
@@ -1217,32 +1219,60 @@ bool recoveredCellContinuesSequenceAndRearmsLogicalDeadline() {
   }
   const auto request = continuity.request();
   if (!request.has_value() || request->batch.firstRecordSequence != 4U ||
-      request->batch.lastRecordSequence != 5U ||
+      request->batch.lastRecordSequence != 6U ||
       request->batch.writerRecoveryEpoch != 5U || !collector.take().empty() ||
       !continuity.complete() || !(*cell)->waitUntilIdle(2s)) {
     return false;
   }
   const auto outcomes = collector.take();
-  return outcomes.size() == 1U &&
-         outcomes.front().kind == RoomCommandKind::ArenaLoadComplete;
+  if (outcomes.size() != 1U ||
+      outcomes.front().kind != RoomCommandKind::ArenaLoadComplete ||
+      !isAccepted(
+          (*cell)->enqueue(loadComplete(2U, roomValue + 1U, roomValue))) ||
+      !continuity.waitForRequest() || !collector.take().empty() ||
+      !continuity.complete() || !(*cell)->waitUntilIdle(2s))
+    return false;
+  collector.take();
+  const auto at = std::chrono::steady_clock::now() + 100ms;
+  if (!isAccepted((*cell)->enqueue(RoomCommandEnvelope{
+          .requestId = RequestId{3U},
+          .command = RoomCellCommand{lol::battle::MoveCommand{
+              SessionId{roomValue}, SessionGeneration{1U}, BattleInstanceId{1U},
+              1U, lol::battle::DirectionIntent{1, 0, 0}}},
+          .receivedAt = at})) ||
+      !(*cell)->waitUntilIdle(2s) || continuity.request().has_value() ||
+      collector.take().empty())
+    return false;
+  if (!isAccepted((*cell)->enqueueControl(RoomControlEnvelope{
+          .command = RoomControlCommand{lol::battle::MovementTickCommand{
+              BattleInstanceId{1U}, 2U}},
+          .occurredAt = at})) ||
+      !(*cell)->waitUntilIdle(2s) || continuity.request().has_value())
+    return false;
+  const auto tick = collector.take();
+  if (tick.size() != 1U || !tick.front().snapshot.has_value() ||
+      !isAccepted((*cell)->enqueueControl(suspendBattleInput(roomValue))) ||
+      !continuity.waitForRequest() || !collector.take().empty())
+    return false;
+  return continuity.complete() && (*cell)->waitUntilIdle(2s) &&
+         collector.take().size() == 1U;
 }
 
 bool recoveredActivationSerializesDeadlineAndRetirement() {
   enum class DeadlinePhase { Loading, Combat, Loot };
 
-  const auto runCase = [](DeadlinePhase phase,
-                          bool retireBeforeActivation) {
+  const auto runCase = [](DeadlinePhase phase, bool retireBeforeActivation) {
     const auto epoch = static_cast<std::uint64_t>(
-        phase == DeadlinePhase::Loading
-            ? (retireBeforeActivation ? 17U : 14U)
-            : phase == DeadlinePhase::Combat ? 15U : 16U);
+        phase == DeadlinePhase::Loading  ? (retireBeforeActivation ? 17U : 14U)
+        : phase == DeadlinePhase::Combat ? 15U
+                                         : 16U);
     const auto roomValue = (epoch << 32U) | 1U;
     auto room = makeRoomWithMember(roomValue, true);
     if (!room.has_value()) {
       return false;
     }
-    const auto eligibility = room->prepareHostStart(
-        HostStartEligibilityCommand{SessionId{roomValue}, SessionGeneration{1}});
+    const auto eligibility = room->prepareHostStart(HostStartEligibilityCommand{
+        SessionId{roomValue}, SessionGeneration{1}});
     if (!eligibility.admission.has_value() ||
         room->commitLoading(*eligibility.admission) != RoomResultCode::Ok) {
       return false;
@@ -1290,15 +1320,19 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
     if (!recording.has_value() || !recording->takePendingBatch().has_value()) {
       return false;
     }
-    const auto recordDecision = [&](CanonicalCommand command,
-                                    const auto &before,
-                                    const RoomRecoveryState &beforeRoom,
-                                    const RoomRecoveryState &afterRoom,
-                                    std::uint16_t decisionCode) {
-      return recording->recordDecision(command, before, beforeRoom, battle,
-                                       afterRoom, decisionCode, std::nullopt) &&
-             recording->takePendingBatch().has_value();
-    };
+    const auto recordDecision =
+        [&](CanonicalCommand command, const auto &before,
+            const RoomRecoveryState &beforeRoom,
+            const RoomRecoveryState &afterRoom, std::uint16_t decisionCode) {
+          const bool accepted =
+              recording->recordDecision(command, before, beforeRoom, battle,
+                                        afterRoom, decisionCode, std::nullopt);
+          // This fixture explicitly supplies a fully persisted legacy journal
+          // to restore/deadline tests. New runtime writes need not occur every
+          // tick.
+          (void)recording->takePendingBatch();
+          return accepted;
+        };
     const auto load = [&](const auto &member, std::uint64_t tick) {
       return battle.completeLoad(
                  lol::battle::ArenaLoadCompleteCommand{
@@ -1325,8 +1359,8 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
     } else {
       const auto firstBefore = battle.exportDeterministicState();
       if (!load(eligibility.admission->members[0], 0U) ||
-          !recordDecision(CanonicalCommand::arenaLoadComplete(1U),
-                          firstBefore, roomState, roomState,
+          !recordDecision(CanonicalCommand::arenaLoadComplete(1U), firstBefore,
+                          roomState, roomState,
                           static_cast<std::uint16_t>(
                               lol::battle::BattleLoadResultCode::Ok))) {
         return false;
@@ -1338,8 +1372,8 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
       }
       auto inProgressRoomState = roomState;
       inProgressRoomState.phase = RoomRecoveryPhase::InProgress;
-      if (!recordDecision(CanonicalCommand::arenaLoadComplete(2U),
-                          secondBefore, roomState, inProgressRoomState,
+      if (!recordDecision(CanonicalCommand::arenaLoadComplete(2U), secondBefore,
+                          roomState, inProgressRoomState,
                           static_cast<std::uint16_t>(
                               lol::battle::BattleLoadResultCode::Ok))) {
         return false;
@@ -1349,9 +1383,9 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
       if (phase == DeadlinePhase::Combat) {
         const auto before = battle.exportDeterministicState();
         if (battle.integrateMovement(
-                lol::battle::MovementTickCommand{BattleInstanceId{1}, 1U},
-                lol::battle::BattleTime::fromLogicalTick(600U)) !=
-                lol::battle::MovementResultCode::Ok ||
+                      lol::battle::MovementTickCommand{BattleInstanceId{1}, 1U},
+                      lol::battle::BattleTime::fromLogicalTick(600U))
+                    != lol::battle::MovementResultCode::Ok ||
             !recordDecision(CanonicalCommand::movementTick(1U), before,
                             roomState, roomState,
                             static_cast<std::uint16_t>(
@@ -1367,8 +1401,8 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
           const auto before = battle.exportDeterministicState();
           const auto execution = battle.attackWithApplied(
               lol::battle::AttackCommand{
-                  .commandId = lol::battle::CommandId{.high = 0U,
-                                                       .low = index + 1U},
+                  .commandId =
+                      lol::battle::CommandId{.high = 0U, .low = index + 1U},
                   .sessionId = SessionId{roomValue},
                   .generation = SessionGeneration{1},
                   .battleId = BattleInstanceId{1},
@@ -1379,8 +1413,9 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
               !execution.applied.has_value() ||
               !recordDecision(
                   CanonicalCommand::attack(
-                      1U, lol::battle_continuity::CommandId{.high = 0U,
-                                                            .low = index + 1U},
+                      1U,
+                      lol::battle_continuity::CommandId{.high = 0U,
+                                                        .low = index + 1U},
                       lol::battle::CombatRuleset::monsterId),
                   before, roomState, roomState,
                   static_cast<std::uint16_t>(execution.result.code))) {
@@ -1391,10 +1426,10 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
         const auto before = state;
         if (!state.lootDeadlineTick.has_value() ||
             battle.integrateMovement(
-                lol::battle::MovementTickCommand{BattleInstanceId{1}, 1U},
-                lol::battle::BattleTime::fromLogicalTick(
-                    *state.lootDeadlineTick)) !=
-                lol::battle::MovementResultCode::Ok ||
+                      lol::battle::MovementTickCommand{BattleInstanceId{1}, 1U},
+                      lol::battle::BattleTime::fromLogicalTick(
+                          *state.lootDeadlineTick))
+                    != lol::battle::MovementResultCode::Ok ||
             !recordDecision(CanonicalCommand::movementTick(1U), before,
                             roomState, roomState,
                             static_cast<std::uint16_t>(
@@ -1431,8 +1466,8 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
         [&collector](RoomCommandOutcome outcome) {
           collector.add(std::move(outcome));
         },
-        &readiness, &gate, &settlement,
-        static_cast<std::uint32_t>(epoch), &continuity);
+        &readiness, &gate, &settlement, static_cast<std::uint32_t>(epoch),
+        &continuity);
     if (!cell.has_value()) {
       return false;
     }
@@ -1480,6 +1515,10 @@ bool recoveredActivationSerializesDeadlineAndRetirement() {
   const auto combat = loading && runCase(DeadlinePhase::Combat, false);
   const auto loot = combat && runCase(DeadlinePhase::Loot, false);
   const auto retired = loot && runCase(DeadlinePhase::Loading, true);
+  if (!retired)
+    std::fprintf(stderr,
+                 "activation phases: loading=%d combat=%d loot=%d retired=%d\n",
+                 loading, combat, loot, retired);
   return retired;
 }
 
@@ -2880,6 +2919,11 @@ bool emptyRoomClosesOnlyAfterDurability() {
 } // namespace
 
 int main() {
+  const auto check = [](const char *name, bool passed) {
+    if (!passed)
+      std::fprintf(stderr, "%s failed\n", name);
+    return passed;
+  };
   if (!budgetReschedulesAndPreservesOrder() ||
       !oneCellHasOnlyOneActiveWorker() || !twoCellsRunInParallel() ||
       !workerPoolRejectsOverflowAndDrainsAcceptedWork() ||
@@ -2894,8 +2938,10 @@ int main() {
       !continuityQueueFullSuppressesSuccessAndFencesQueuedWork() ||
       !staleContinuityCommitDoesNotFailCloseOrReleaseHeldOutcome() ||
       !staleContinuityWriteFailureDoesNotFailCloseOrReleaseHeldOutcome() ||
-      !recoveredCellContinuesSequenceAndRearmsLogicalDeadline() ||
-      !recoveredActivationSerializesDeadlineAndRetirement() ||
+      !check("recovered selective cell",
+             recoveredCellContinuesSequenceAndRearmsLogicalDeadline()) ||
+      !check("recovered activation",
+             recoveredActivationSerializesDeadlineAndRetirement()) ||
       !suspendAndResumeBattleInputUsesTheCellMailbox() ||
       !hostStartCommitsOneBattleAndRoomLoading() ||
       !hostStartReservesCapacityAndLoadCancelReleasesIt() ||

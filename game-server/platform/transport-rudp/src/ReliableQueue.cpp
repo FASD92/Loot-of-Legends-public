@@ -15,9 +15,7 @@ constexpr std::size_t kMaximumApplicationEntries = 224;
 constexpr std::size_t kMaximumBytes = 262144;
 constexpr std::size_t kMaximumDatagramBytes = 1200;
 constexpr std::uint8_t kMaximumTransmissions = 5;
-constexpr auto kInitialRetryDelay = 200ms;
-constexpr auto kMaximumRetryDelay = 1000ms;
-constexpr auto kExpiry = 5000ms;
+constexpr auto kExpiry = RttEstimator::kExpiry;
 
 } // namespace
 
@@ -55,13 +53,19 @@ ReliableQueueAdmission ReliableQueue::enqueue(std::uint32_t sequence,
       .datagram = std::move(datagram),
       .queuedAt = now,
       .nextTransmissionAt = now,
-      .retryDelay = kInitialRetryDelay,
+      .lastTransmissionAt = now,
+      .firstSuccessfulSend = std::nullopt,
+      .lastSuccessfulSend = std::nullopt,
+      .retryDelay = RttEstimator::kBootstrapRto,
       .transmissions = 0,
+      .recordedAttempt = 0,
   });
   return ReliableQueueAdmission::Accepted;
 }
 
-ReliablePollResult ReliableQueue::poll(Clock::time_point now) {
+ReliablePollResult ReliableQueue::poll(Clock::time_point now,
+                                       std::chrono::milliseconds initialRto,
+                                       std::uint64_t revision) {
   ReliablePollResult result;
   for (auto entry = entries_.begin(); entry != entries_.end();) {
     if (now - entry->queuedAt >= kExpiry) {
@@ -75,6 +79,19 @@ ReliablePollResult ReliableQueue::poll(Clock::time_point now) {
     }
     if (entry->transmissions < kMaximumTransmissions &&
         now >= entry->nextTransmissionAt) {
+      if (entry->transmissions == 0) {
+        entry->revision = revision;
+        entry->retryDelay = std::clamp(initialRto, RttEstimator::kMinimumRto,
+                                       RttEstimator::kMaximumRto);
+      } else if (entry->recordedAttempt == entry->transmissions &&
+                 entry->lastSuccessfulSend &&
+                 *entry->lastSuccessfulSend >= entry->lastTransmissionAt) {
+        result.timeouts.push_back(
+            {entry->revision,
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 entry->nextTransmissionAt - entry->lastTransmissionAt)});
+      }
+      entry->lastTransmissionAt = now;
       ++entry->transmissions;
       result.transmissions.push_back(ReliableTransmission{
           .sequence = entry->sequence,
@@ -83,7 +100,8 @@ ReliablePollResult ReliableQueue::poll(Clock::time_point now) {
       });
       if (entry->transmissions < kMaximumTransmissions) {
         entry->nextTransmissionAt = now + entry->retryDelay;
-        entry->retryDelay = std::min(entry->retryDelay * 2, kMaximumRetryDelay);
+        entry->retryDelay =
+            std::min(entry->retryDelay * 2, RttEstimator::kMaximumRto);
       }
     }
     ++entry;
@@ -93,7 +111,20 @@ ReliablePollResult ReliableQueue::poll(Clock::time_point now) {
 
 std::size_t ReliableQueue::discardAcknowledged(std::uint32_t ack,
                                                std::uint32_t ackBits) {
-  std::size_t removed = 0;
+  return removeAcknowledged(ack, ackBits, std::nullopt).removed;
+}
+
+ReliableAckResult ReliableQueue::acknowledge(std::uint32_t ack,
+                                             std::uint32_t ackBits,
+                                             Clock::time_point receivedAt) {
+  return removeAcknowledged(ack, ackBits, receivedAt);
+}
+
+ReliableAckResult
+ReliableQueue::removeAcknowledged(std::uint32_t ack, std::uint32_t ackBits,
+                                  std::optional<Clock::time_point> receivedAt) {
+  ReliableAckResult result;
+  std::optional<Clock::time_point> selectedSentAt;
   for (auto entry = entries_.begin(); entry != entries_.end();) {
     if (entry->transmissions == 0 ||
         !isAcknowledged(entry->sequence,
@@ -101,14 +132,67 @@ std::size_t ReliableQueue::discardAcknowledged(std::uint32_t ack,
       ++entry;
       continue;
     }
+    if (receivedAt) {
+      if (*receivedAt - entry->queuedAt >= kExpiry) {
+        ++result.expired;
+      } else if (entry->transmissions != 1) {
+        ++result.retransmitted;
+      } else if (!entry->firstSuccessfulSend) {
+        ++result.sendUnconfirmed;
+      } else {
+        const auto sample =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                *receivedAt - *entry->firstSuccessfulSend);
+        if (sample <= std::chrono::microseconds::zero()) {
+          ++result.nonpositive;
+        } else {
+          if (selectedSentAt)
+            ++result.coalesced;
+          if (!selectedSentAt ||
+              *entry->firstSuccessfulSend > *selectedSentAt) {
+            selectedSentAt = entry->firstSuccessfulSend;
+            result.sample = sample;
+            result.sampleRevision = entry->revision;
+          }
+        }
+      }
+    }
     bytes_ -= entry->datagram.size();
     if (entry->lane == ReliableLane::Application) {
       --applicationEntries_;
     }
     entry = entries_.erase(entry);
-    ++removed;
+    ++result.removed;
   }
-  return removed;
+  return result;
+}
+
+bool ReliableQueue::recordSend(std::uint32_t sequence, std::uint8_t attempt,
+                               Clock::time_point sentAt, bool succeeded) {
+  const auto entry = std::ranges::find(entries_, sequence, &Entry::sequence);
+  if (entry == entries_.end() || attempt == 0 ||
+      entry->transmissions != attempt || entry->recordedAttempt == attempt ||
+      sentAt < entry->lastTransmissionAt || sentAt - entry->queuedAt >= kExpiry)
+    return false;
+  entry->recordedAttempt = attempt;
+  if (succeeded) {
+    if (attempt == 1)
+      entry->firstSuccessfulSend = sentAt;
+    entry->lastSuccessfulSend = sentAt;
+  }
+  return true;
+}
+
+std::vector<std::chrono::milliseconds> ReliableQueue::effectiveRtos() const {
+  std::vector<std::chrono::milliseconds> result;
+  for (const auto &entry : entries_) {
+    if (entry.transmissions > 0 &&
+        entry.transmissions < kMaximumTransmissions) {
+      result.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(
+          entry.nextTransmissionAt - entry.lastTransmissionAt));
+    }
+  }
+  return result;
 }
 
 bool ReliableQueue::contains(std::uint32_t sequence) const noexcept {

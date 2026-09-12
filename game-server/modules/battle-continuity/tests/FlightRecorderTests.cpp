@@ -1,8 +1,12 @@
 #include <lol/battle/BattleLoadApi.hpp>
+#include <lol/battle/CombatApi.hpp>
+#include <lol/battle/MovementApi.hpp>
+#include <lol/battle_continuity/BattleReplay.hpp>
 #include <lol/battle_continuity/FlightRecorder.hpp>
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <utility>
 #include <vector>
@@ -19,9 +23,9 @@ using lol::battle_continuity::BattleIdentity;
 using lol::battle_continuity::BattleRecording;
 using lol::battle_continuity::CanonicalCommand;
 using lol::battle_continuity::FlightRecorder;
+using lol::battle_continuity::RecorderErrorCode;
 using lol::battle_continuity::RoomRecoveryPhase;
 using lol::battle_continuity::RoomRecoveryState;
-using lol::battle_continuity::RecorderErrorCode;
 using lol::shared::AccountId;
 using lol::shared::BattleInstanceId;
 using lol::shared::RoomId;
@@ -46,7 +50,7 @@ BattleInstance createdBattle() {
               BattleStartCandidate{account(2), SessionId{12},
                                    SessionGeneration{4}, "private-two"},
           },
-      .rulesetVersion = 1,
+      .rulesetVersion = lol::battle::battleRulesetVersion,
       .seed = 17,
   });
   if (result.code != BattleLoadResultCode::Ok || !result.battle.has_value()) {
@@ -86,9 +90,9 @@ bool recorderEmitsOnlyAStateMutation() {
   auto recorder = std::move(*started);
   const auto before = battle.exportDeterministicState();
 
-  const auto noMutation = recorder.appendCommand(
-      CanonicalCommand::suspendInput(1), before, roomState(), battle,
-      roomState(), 0, {});
+  const auto noMutation =
+      recorder.appendCommand(CanonicalCommand::suspendInput(1), before,
+                             roomState(), battle, roomState(), 0, {});
   if (noMutation.recorded || !noMutation.ok()) {
     return false;
   }
@@ -203,9 +207,9 @@ bool differentTickRequiresPreviousBatchCommit() {
           true, BattleTime::fromLogicalTick(1)) != BattleLoadResultCode::Ok) {
     return false;
   }
-  const auto rejected = recorder->appendCommand(
-      CanonicalCommand::arenaLoadComplete(1), before, roomState(), battle,
-      roomState(), 0, {});
+  const auto rejected =
+      recorder->appendCommand(CanonicalCommand::arenaLoadComplete(1), before,
+                              roomState(), battle, roomState(), 0, {});
   return !rejected.ok() && !rejected.recorded && rejected.error.has_value() &&
          rejected.error->code == RecorderErrorCode::BatchNotCommitted;
 }
@@ -264,12 +268,12 @@ bool battleRecordingCommitsInitialBatchAndPhaseCheckpoint() {
       !recording->recordDecision(CanonicalCommand::arenaLoadComplete(1U),
                                  firstBefore, roomState(), battle, roomState(),
                                  0U, std::nullopt) ||
-      recording->records().size() != 5U) {
+      recording->records().size() != 6U) {
     return false;
   }
   const auto firstBatch = recording->takePendingBatch();
   if (!firstBatch.has_value() || firstBatch->firstRecordSequence != 4U ||
-      firstBatch->lastRecordSequence != 5U || firstBatch->terminal ||
+      firstBatch->lastRecordSequence != 6U || firstBatch->terminal ||
       firstBatch->encodedRecords.empty()) {
     return false;
   }
@@ -284,20 +288,20 @@ bool battleRecordingCommitsInitialBatchAndPhaseCheckpoint() {
       !recording->recordDecision(CanonicalCommand::arenaLoadComplete(2U),
                                  secondBefore, roomState(), battle, roomState(),
                                  0U, std::nullopt) ||
-      recording->records().size() != 8U) {
+      recording->records().size() != 9U) {
     return false;
   }
-  if (recording->records()[5].header.recordType !=
+  if (recording->records()[6].header.recordType !=
           lol::battle_continuity::RecordType::CommandDecision ||
-      recording->records()[6].header.recordType !=
-          lol::battle_continuity::RecordType::Checkpoint ||
       recording->records()[7].header.recordType !=
+          lol::battle_continuity::RecordType::Checkpoint ||
+      recording->records()[8].header.recordType !=
           lol::battle_continuity::RecordType::TickCommit) {
     return false;
   }
   const auto phaseBatch = recording->takePendingBatch();
-  if (!phaseBatch.has_value() || phaseBatch->firstRecordSequence != 6U ||
-      phaseBatch->lastRecordSequence != 8U || phaseBatch->terminal ||
+  if (!phaseBatch.has_value() || phaseBatch->firstRecordSequence != 7U ||
+      phaseBatch->lastRecordSequence != 9U || phaseBatch->terminal ||
       phaseBatch->encodedRecords.empty()) {
     return false;
   }
@@ -309,19 +313,19 @@ bool battleRecordingCommitsInitialBatchAndPhaseCheckpoint() {
       !recording->recordDecision(CanonicalCommand::suspendInput(1U),
                                  periodicBefore, roomState(), battle,
                                  roomState(), 0U, std::nullopt) ||
-      recording->records().size() != 11U) {
+      recording->records().size() != 12U) {
     return false;
   }
   const auto periodicBatch = recording->takePendingBatch();
   return periodicBatch.has_value() &&
-         periodicBatch->firstRecordSequence == 9U &&
-         periodicBatch->lastRecordSequence == 11U &&
+         periodicBatch->firstRecordSequence == 10U &&
+         periodicBatch->lastRecordSequence == 12U &&
          periodicBatch->logicalTick == 21U && !periodicBatch->terminal &&
          !periodicBatch->encodedRecords.empty() &&
-         recording->records()[9].header.recordType ==
-             lol::battle_continuity::RecordType::Checkpoint &&
-         recording->records()[9].header.logicalTick == 21U &&
          recording->records()[10].header.recordType ==
+             lol::battle_continuity::RecordType::Checkpoint &&
+         recording->records()[10].header.logicalTick == 21U &&
+         recording->records()[11].header.recordType ==
              lol::battle_continuity::RecordType::TickCommit;
 }
 
@@ -351,7 +355,7 @@ bool battleRecordingResumesCommittedSequenceWithNewWriterEpoch() {
   }
   auto resumed = BattleRecording::resume(battle, committedRecords, 3U);
   if (!resumed.has_value() || resumed->takePendingBatch().has_value() ||
-      resumed->records().size() != 5U ||
+      resumed->records().size() != 6U ||
       !resumed->roomRecoveryState().has_value() ||
       *resumed->roomRecoveryState() != roomState()) {
     return false;
@@ -371,14 +375,179 @@ bool battleRecordingResumesCommittedSequenceWithNewWriterEpoch() {
   }
   const auto batch = resumed->takePendingBatch();
   return batch.has_value() && batch->writerRecoveryEpoch == 3U &&
-         batch->firstRecordSequence == 6U && batch->lastRecordSequence == 8U &&
+         batch->firstRecordSequence == 7U && batch->lastRecordSequence == 9U &&
          batch->logicalTick == 2U &&
-         resumed->records()[5].header.writerRecoveryEpoch == 3U;
+         resumed->records()[6].header.writerRecoveryEpoch == 3U;
+}
+
+lol::battle::MovementResultCode advanceTick(
+    BattleInstance &battle, const lol::battle::MovementTickCommand &command,
+    BattleTime at) {
+  const auto code = battle.integrateMovement(command, at);
+  if (code == lol::battle::MovementResultCode::Ok && command.serverTick % 2U == 0U) {
+    static_cast<void>(battle.captureStateSnapshot());
+  }
+  return code;
+}
+
+bool movementDefersDiskUntilCriticalEventAndRestoresDurablePrefix() {
+  auto battle = createdBattle();
+  auto recording = BattleRecording::start(battle, identity(), 2U, roomState());
+  if (!recording.has_value()) {
+    return false;
+  }
+  lol::battle_continuity::Bytes durable;
+  const auto persistPending = [&] {
+    auto batch = recording->takePendingBatch();
+    if (!batch.has_value()) {
+      return false;
+    }
+    durable.insert(durable.end(), batch->encodedRecords.begin(),
+                   batch->encodedRecords.end());
+    return true;
+  };
+  if (!persistPending()) {
+    return false;
+  }
+  for (std::uint16_t slot = 1U; slot <= 2U; ++slot) {
+    const auto before = battle.exportDeterministicState();
+    if (battle.completeLoad(
+            ArenaLoadCompleteCommand{
+                SessionId{10U + slot}, SessionGeneration{2U + slot},
+                identity().roomId, identity().battleInstanceId},
+            true,
+            BattleTime::fromLogicalTick(1U)) != BattleLoadResultCode::Ok ||
+        !recording->recordDecision(CanonicalCommand::arenaLoadComplete(slot),
+                                   before, roomState(), battle, roomState(), 0U,
+                                   std::nullopt) ||
+        !persistPending()) {
+      return false;
+    }
+  }
+  const auto durableHash =
+      lol::battle_continuity::BattleReplayer::restoreJournal(durable)
+          .finalStateHash;
+  const auto beforeMove = battle.exportDeterministicState();
+  const lol::battle::DirectionIntent direction{1, 0, 0};
+  if (battle.acceptMove({SessionId{11}, SessionGeneration{3},
+                         identity().battleInstanceId, 1U, direction},
+                        BattleTime::fromLogicalTick(2U)) !=
+          lol::battle::MovementResultCode::Ok ||
+      !recording->recordDecision(
+          CanonicalCommand::move(1U, {0U, 1U}, direction), beforeMove,
+          roomState(), battle, roomState(), 0U, std::nullopt) ||
+      recording->takePendingBatch().has_value()) {
+    return false;
+  }
+  const auto beforeTick = battle.exportDeterministicState();
+  if (advanceTick(battle, {identity().battleInstanceId, 2U},
+                                 BattleTime::fromLogicalTick(2U)) != lol::battle::MovementResultCode::Ok ||
+      !recording->recordDecision(CanonicalCommand::movementTick(2U), beforeTick,
+                                 roomState(), battle, roomState(), 0U,
+                                 std::nullopt) ||
+      recording->takePendingBatch().has_value()) {
+    return false;
+  }
+  // No disk submission occurred: a crash restores the pre-movement state.
+  // Cross the former periodic checkpoint boundary without a disk write.
+  for (std::uint32_t tick = 3U; tick <= 240U; ++tick) {
+    const auto before = battle.exportDeterministicState();
+    if (advanceTick(battle, {identity().battleInstanceId, tick},
+                                   BattleTime::fromLogicalTick(tick)) != lol::battle::MovementResultCode::Ok ||
+        !recording->recordDecision(CanonicalCommand::movementTick(tick), before,
+                                   roomState(), battle, roomState(), 0U,
+                                   std::nullopt) ||
+        recording->takePendingBatch().has_value()) {
+      std::fprintf(stderr, "volatile tick failed at %u\n", tick);
+      return false;
+    }
+  }
+  const auto rolledBack =
+      lol::battle_continuity::BattleReplayer::restoreJournal(durable);
+  if (!rolledBack.ok() || !durableHash.has_value() ||
+      rolledBack.finalStateHash != durableHash) {
+    return false;
+  }
+  const auto beforeAttack = battle.exportDeterministicState();
+  const auto hit =
+      battle.attackWithApplied({{0U, 1U},
+                                SessionId{11},
+                                SessionGeneration{3},
+                                identity().battleInstanceId,
+                                lol::battle::CombatRuleset::monsterId},
+                               BattleTime::fromLogicalTick(240U));
+  if (hit.result.code != lol::battle::AttackResultCode::Ok ||
+      hit.result.remainingHitPoints == 0U ||
+      !recording->recordDecision(
+          CanonicalCommand::attack(1U, {0U, 1U},
+                                   lol::battle::CombatRuleset::monsterId),
+          beforeAttack, roomState(), battle, roomState(), 0U, std::nullopt) ||
+      recording->takePendingBatch().has_value())
+    return false;
+  const auto beforeSuspend = battle.exportDeterministicState();
+  if (battle.suspendInput(SessionId{11}, SessionGeneration{3},
+                          BattleTime::fromLogicalTick(241U)) !=
+          lol::battle::BattleInputResultCode::Ok ||
+      !recording->recordDecision(CanonicalCommand::suspendInput(1U),
+                                 beforeSuspend, roomState(), battle,
+                                 roomState(), 0U, std::nullopt) ||
+      !persistPending()) {
+    return false;
+  }
+  const auto restored =
+      lol::battle_continuity::BattleReplayer::restoreJournal(durable);
+  const auto expected = lol::battle_continuity::encodeRecoveryState(
+      battle.exportDeterministicState(), roomState());
+  if (!(restored.ok() && expected.ok() &&
+        restored.finalStateHash ==
+            lol::battle_continuity::recoveryStateHash(expected.bytes)))
+    return false;
+  const auto beforeResume = battle.exportDeterministicState();
+  if (battle.resumeInput(SessionId{11}, SessionGeneration{3},
+                         BattleTime::fromLogicalTick(242U)) !=
+          lol::battle::BattleInputResultCode::Ok ||
+      !recording->recordDecision(CanonicalCommand::resumeInput(1U),
+                                 beforeResume, roomState(), battle, roomState(),
+                                 0U, std::nullopt) ||
+      !persistPending())
+    return false;
+  for (std::uint64_t attackId = 2U; attackId <= 16U; ++attackId) {
+    const auto before = battle.exportDeterministicState();
+    const auto result = battle.attackWithApplied(
+        {{0U, attackId},
+         SessionId{11},
+         SessionGeneration{3},
+         identity().battleInstanceId,
+         lol::battle::CombatRuleset::monsterId},
+        BattleTime::fromLogicalTick(241U + attackId * 16U));
+    if (result.result.code != lol::battle::AttackResultCode::Ok ||
+        !recording->recordDecision(
+            CanonicalCommand::attack(1U, {0U, attackId},
+                                     lol::battle::CombatRuleset::monsterId),
+            before, roomState(), battle, roomState(), 0U, std::nullopt))
+      return false;
+    if (attackId < 16U) {
+      if (recording->takePendingBatch().has_value())
+        return false;
+    } else if (result.result.remainingHitPoints != 0U || !persistPending())
+      return false;
+  }
+  const auto afterKill =
+      lol::battle_continuity::BattleReplayer::restoreJournal(durable);
+  const auto killState = lol::battle_continuity::encodeRecoveryState(
+      battle.exportDeterministicState(), roomState());
+  return afterKill.ok() && killState.ok() &&
+         afterKill.finalStateHash ==
+             lol::battle_continuity::recoveryStateHash(killState.bytes);
 }
 
 } // namespace
 
 int main() {
+  if (!movementDefersDiskUntilCriticalEventAndRestoresDurablePrefix()) {
+    std::fputs("selective persistence regression failed\n", stderr);
+    return EXIT_FAILURE;
+  }
   if (!recorderEmitsOnlyAStateMutation() ||
       !journalRoundTripsWithInitialCheckpoint() ||
       !duplicateAndStaleAdmissionDoNotBecomeMutationRecords() ||

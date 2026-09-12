@@ -83,6 +83,41 @@ bool isKnownCommand(CanonicalCommandKind kind) noexcept {
 
 bool isEmptyId(CommandId id) noexcept { return id.high == 0U && id.low == 0U; }
 
+bool isCriticalChange(const CanonicalCommand &command,
+                      const battle::BattleDeterministicState &before,
+                      const RoomRecoveryState &beforeRoom,
+                      const battle::BattleDeterministicState &after,
+                      const RoomRecoveryState &afterRoom) {
+  if (command.kind != CanonicalCommandKind::Move &&
+      command.kind != CanonicalCommandKind::MovementTick &&
+      command.kind != CanonicalCommandKind::Attack) {
+    return true;
+  }
+  if (beforeRoom != afterRoom || before.state != after.state ||
+      before.lootResolution != after.lootResolution ||
+      before.resultState != after.resultState ||
+      before.candidates != after.candidates ||
+      before.capturedParticipants != after.capturedParticipants ||
+      before.drops != after.drops || before.holdings != after.holdings ||
+      before.monster.has_value() != after.monster.has_value() ||
+      (before.monster && after.monster &&
+       before.monster->state != after.monster->state) ||
+      before.participants.size() != after.participants.size()) {
+    return true;
+  }
+  for (std::size_t index = 0U; index < before.participants.size(); ++index) {
+    const auto &old = before.participants[index];
+    const auto &now = after.participants[index];
+    if (old.slot != now.slot || old.sessionId != now.sessionId ||
+        old.inputEnabled != now.inputEnabled ||
+        old.gameplayEligible != now.gameplayEligible ||
+        old.exitStatus != now.exitStatus) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool validIdentity(const BattleIdentity &identity) noexcept {
   const auto room = identity.roomId.value();
   return identity.originRecoveryEpoch != 0U && room != 0U &&
@@ -292,11 +327,9 @@ FlightRecorder::FlightRecorder(
       batchRecordCount_(batchRecordCount), batchLastTick_(batchLastTick),
       nextSequence_(nextSequence), terminalRecorded_(terminalRecorded) {}
 
-std::optional<FlightRecorder>
-FlightRecorder::start(const battle::BattleInstance &battle,
-                      BattleIdentity identity,
-                      std::uint32_t writerRecoveryEpoch,
-                      const RoomRecoveryState &roomState) {
+std::optional<FlightRecorder> FlightRecorder::start(
+    const battle::BattleInstance &battle, BattleIdentity identity,
+    std::uint32_t writerRecoveryEpoch, const RoomRecoveryState &roomState) {
   if (!validIdentity(identity) || writerRecoveryEpoch == 0U) {
     return std::nullopt;
   }
@@ -352,20 +385,26 @@ FlightRecorder::start(const battle::BattleInstance &battle,
                  .canonicalStateBytes = encodedState.bytes,
                  .stateHash = *stateHash,
              }});
+  std::size_t encodedBytes = 0U;
   for (const auto &record : records) {
-    if (!encodeRecord(record).ok()) {
+    const auto encoded = encodeRecord(record);
+    if (!encoded.ok() ||
+        encodedBytes > kMaximumJournalBytes - encoded.bytes.size()) {
       return std::nullopt;
     }
+    encodedBytes += encoded.bytes.size();
   }
-  return FlightRecorder{identity,
-                        writerRecoveryEpoch,
-                        std::move(records),
-                        stateHash,
-                        1U,
-                        2U,
-                        state.battleTime.logicalTick,
-                        3U,
-                        false};
+  auto recorder = FlightRecorder{identity,
+                                 writerRecoveryEpoch,
+                                 std::move(records),
+                                 stateHash,
+                                 1U,
+                                 2U,
+                                 state.battleTime.logicalTick,
+                                 3U,
+                                 false};
+  recorder.encodedBytes_ = encodedBytes;
+  return recorder;
 }
 
 RecorderAppendResult FlightRecorder::failure(RecorderErrorCode code) const {
@@ -396,12 +435,14 @@ RecorderAppendResult FlightRecorder::appendDataRecord(Record record,
   if (batchRecordCount_ != 0U && record.header.logicalTick != batchLastTick_) {
     return failure(RecorderErrorCode::BatchNotCommitted);
   }
-  if (record.header.recordSequence != nextSequence_ ||
-      !encodeRecord(record).ok()) {
+  const auto encoded = encodeRecord(record);
+  if (record.header.recordSequence != nextSequence_ || !encoded.ok() ||
+      encodedBytes_ > kMaximumJournalBytes - encoded.bytes.size()) {
     return failure(RecorderErrorCode::CodecRejected);
   }
   const auto copy = record;
   records_.push_back(std::move(record));
+  encodedBytes_ += encoded.bytes.size();
   if (!batchStateHash_.has_value()) {
     batchFirstSequence_ = copy.header.recordSequence;
   }
@@ -413,14 +454,12 @@ RecorderAppendResult FlightRecorder::appendDataRecord(Record record,
       .recorded = true, .record = copy, .error = std::nullopt};
 }
 
-RecorderAppendResult
-FlightRecorder::appendCommand(const CanonicalCommand &command,
-                              const battle::BattleDeterministicState &before,
-                              const RoomRecoveryState &beforeRoom,
-                              const battle::BattleInstance &after,
-                              const RoomRecoveryState &afterRoom,
-                              std::uint16_t decisionCode,
-                              Bytes outcomePayload) {
+RecorderAppendResult FlightRecorder::appendCommand(
+    const CanonicalCommand &command,
+    const battle::BattleDeterministicState &before,
+    const RoomRecoveryState &beforeRoom, const battle::BattleInstance &after,
+    const RoomRecoveryState &afterRoom, std::uint16_t decisionCode,
+    Bytes outcomePayload) {
   if (!validCommand(command) || !outcomePayload.empty()) {
     // Result code is the only command outcome.  An opaque byte field would
     // let credentials or PII enter an otherwise value-only journal.
@@ -503,14 +542,14 @@ FlightRecorder::appendCheckpoint(const battle::BattleInstance &battle,
   if (!encoded.ok() || !hash.has_value()) {
     return failure(RecorderErrorCode::StateEncodingFailed);
   }
-  const auto record = Record{
-      .header =
-          headerFor(identity_, writerRecoveryEpoch_, RecordType::Checkpoint,
-                    nextSequence_, state.battleTime),
-      .payload = CheckpointPayload{
-          .checkpointSchemaVersion = kCheckpointSchemaVersion,
-                                   .canonicalStateBytes = encoded.bytes,
-                                   .stateHash = *hash}};
+  const auto record =
+      Record{.header = headerFor(identity_, writerRecoveryEpoch_,
+                                 RecordType::Checkpoint, nextSequence_,
+                                 state.battleTime),
+             .payload = CheckpointPayload{.checkpointSchemaVersion =
+                                              kCheckpointSchemaVersion,
+                                          .canonicalStateBytes = encoded.bytes,
+                                          .stateHash = *hash}};
   return appendDataRecord(record, *hash);
 }
 
@@ -606,10 +645,13 @@ RecorderAppendResult FlightRecorder::commitTick() {
           .recordCount = batchRecordCount_,
           .committedStateHash = *batchStateHash_,
       }};
-  if (!encodeRecord(record).ok()) {
+  const auto encoded = encodeRecord(record);
+  if (!encoded.ok() ||
+      encodedBytes_ > kMaximumJournalBytes - encoded.bytes.size()) {
     return failure(RecorderErrorCode::CodecRejected);
   }
   records_.push_back(record);
+  encodedBytes_ += encoded.bytes.size();
   ++nextSequence_;
   batchStateHash_.reset();
   batchFirstSequence_ = 0U;
@@ -654,25 +696,23 @@ std::uint32_t FlightRecorder::writerRecoveryEpoch() const noexcept {
 }
 
 BattleRecording::BattleRecording(
-    FlightRecorder recorder, std::uint64_t lastCheckpointTick,
+    FlightRecorder recorder, std::size_t submittedRecordCount,
     std::optional<RecordedTickBatch> pendingBatch,
     std::optional<RoomRecoveryState> roomState) noexcept
-    : recorder_(std::move(recorder)), lastCheckpointTick_(lastCheckpointTick),
-      pendingBatch_(std::move(pendingBatch)), roomState_(std::move(roomState)) {}
+    : recorder_(std::move(recorder)),
+      submittedRecordCount_(submittedRecordCount),
+      pendingBatch_(std::move(pendingBatch)), roomState_(std::move(roomState)) {
+}
 
-std::optional<BattleRecording>
-BattleRecording::start(const battle::BattleInstance &battle,
-                       BattleIdentity identity,
-                       std::uint32_t writerRecoveryEpoch,
-                       const RoomRecoveryState &roomState) {
+std::optional<BattleRecording> BattleRecording::start(
+    const battle::BattleInstance &battle, BattleIdentity identity,
+    std::uint32_t writerRecoveryEpoch, const RoomRecoveryState &roomState) {
   auto recorder =
       FlightRecorder::start(battle, identity, writerRecoveryEpoch, roomState);
   if (!recorder.has_value() || !recorder->commitTick().ok()) {
     return std::nullopt;
   }
-  BattleRecording recording{std::move(*recorder),
-                            battle.battleTime().logicalTick, std::nullopt,
-                            roomState};
+  BattleRecording recording{std::move(*recorder), 0U, std::nullopt, roomState};
   if (!recording.capturePendingBatch(false)) {
     return std::nullopt;
   }
@@ -700,14 +740,19 @@ BattleRecording::resume(const battle::BattleInstance &battle,
     return std::nullopt;
   }
   std::uint32_t maximumPreviousWriterEpoch = 0U;
-  std::uint64_t lastCheckpointTick = 0U;
+  std::size_t encodedBytes = 0U;
   bool checkpointSeen = false;
   bool terminalSeen = false;
   for (const auto &record : committedRecords) {
+    const auto encoded = encodeRecord(record);
+    if (!encoded.ok() ||
+        encodedBytes > kMaximumJournalBytes - encoded.bytes.size()) {
+      return std::nullopt;
+    }
+    encodedBytes += encoded.bytes.size();
     maximumPreviousWriterEpoch =
         std::max(maximumPreviousWriterEpoch, record.header.writerRecoveryEpoch);
     if (record.header.recordType == RecordType::Checkpoint) {
-      lastCheckpointTick = record.header.logicalTick;
       checkpointSeen = true;
     } else if (record.header.recordType == RecordType::TerminalReceipt) {
       terminalSeen = true;
@@ -734,6 +779,7 @@ BattleRecording::resume(const battle::BattleInstance &battle,
   }
 
   const auto nextSequence = committedRecords.back().header.recordSequence + 1U;
+  const auto submittedRecordCount = committedRecords.size();
   FlightRecorder recorder{identity,
                           writerRecoveryEpoch,
                           std::move(committedRecords),
@@ -743,24 +789,23 @@ BattleRecording::resume(const battle::BattleInstance &battle,
                           0U,
                           nextSequence,
                           terminalSeen};
-  return BattleRecording{std::move(recorder), lastCheckpointTick, std::nullopt,
-                         replay.finalRoomRecoveryState};
+  recorder.encodedBytes_ = encodedBytes;
+  return BattleRecording{std::move(recorder), submittedRecordCount,
+                         std::nullopt, replay.finalRoomRecoveryState};
 }
 
 bool BattleRecording::recordDecision(
     const CanonicalCommand &command,
     const battle::BattleDeterministicState &before,
-    const RoomRecoveryState &beforeRoom,
-    const battle::BattleInstance &after,
+    const RoomRecoveryState &beforeRoom, const battle::BattleInstance &after,
     const RoomRecoveryState &afterRoom, std::uint16_t decisionCode,
     std::optional<TerminalRecording> terminal) {
   if (!roomState_.has_value() || beforeRoom != *roomState_ ||
       pendingBatch_.has_value()) {
     return false;
   }
-  const auto appended =
-      recorder_.appendCommand(command, before, beforeRoom, after, afterRoom,
-                              decisionCode, {});
+  const auto appended = recorder_.appendCommand(
+      command, before, beforeRoom, after, afterRoom, decisionCode, {});
   if (!appended.ok()) {
     return false;
   }
@@ -769,17 +814,12 @@ bool BattleRecording::recordDecision(
   }
 
   const auto state = after.exportDeterministicState();
-  const bool phaseChanged = state.state != before.state ||
-                            state.lootResolution != before.lootResolution ||
-                            state.resultState != before.resultState;
-  const bool checkpointDue =
-      state.battleTime.logicalTick >= lastCheckpointTick_ &&
-      state.battleTime.logicalTick - lastCheckpointTick_ >= kTickHertz;
+  const bool critical =
+      isCriticalChange(command, before, beforeRoom, state, afterRoom);
 
   if (terminal.has_value()) {
     if (!recorder_
-             .appendTerminal(terminal->terminalReason, after,
-                             afterRoom,
+             .appendTerminal(terminal->terminalReason, after, afterRoom,
                              terminal->resultCommittedUnixEpochMilliseconds,
                              terminal->settlementBatchId,
                              std::move(terminal->settlements))
@@ -788,23 +828,18 @@ bool BattleRecording::recordDecision(
         !recorder_.commitTick().ok()) {
       return false;
     }
-    lastCheckpointTick_ = state.battleTime.logicalTick;
     roomState_ = afterRoom;
     return capturePendingBatch(true);
   }
 
-  if ((phaseChanged || checkpointDue) &&
-      !recorder_.appendCheckpoint(after, afterRoom).recorded) {
+  if (critical && !recorder_.appendCheckpoint(after, afterRoom).recorded) {
     return false;
   }
   if (!recorder_.commitTick().ok()) {
     return false;
   }
-  if (phaseChanged || checkpointDue) {
-    lastCheckpointTick_ = state.battleTime.logicalTick;
-  }
   roomState_ = afterRoom;
-  return capturePendingBatch(false);
+  return !critical || capturePendingBatch(false);
 }
 
 bool BattleRecording::capturePendingBatch(bool terminal) {
@@ -813,12 +848,7 @@ bool BattleRecording::capturePendingBatch(bool terminal) {
       records.back().header.recordType != RecordType::TickCommit) {
     return false;
   }
-  const auto &commit = std::get<TickCommitPayload>(records.back().payload);
-  if (commit.firstRecordSequence == 0U ||
-      commit.firstRecordSequence > records.back().header.recordSequence) {
-    return false;
-  }
-  const auto begin = static_cast<std::size_t>(commit.firstRecordSequence - 1U);
+  const auto begin = submittedRecordCount_;
   if (begin >= records.size()) {
     return false;
   }
@@ -834,12 +864,13 @@ bool BattleRecording::capturePendingBatch(bool terminal) {
   pendingBatch_ = RecordedTickBatch{
       .identity = recorder_.identity(),
       .writerRecoveryEpoch = recorder_.writerRecoveryEpoch(),
-      .firstRecordSequence = commit.firstRecordSequence,
+      .firstRecordSequence = records[begin].header.recordSequence,
       .lastRecordSequence = records.back().header.recordSequence,
       .logicalTick = records.back().header.logicalTick,
       .terminal = terminal,
       .encodedRecords = std::move(bytes),
   };
+  submittedRecordCount_ = records.size();
   return true;
 }
 

@@ -1268,16 +1268,22 @@ bool productionEntryServesPrivateMetrics() {
          response.find("Cache-Control: no-store") != std::string::npos &&
          response.find("\"schemaVersion\":1") != std::string::npos &&
          response.find("\"source\":\"game\"") != std::string::npos &&
+         response.find(
+             "\"name\":\"rudp_rtt_samples_accepted_total\",\"value\":0") !=
+             std::string::npos &&
+         response.find(
+             "\"name\":\"rudp_active_base_rto_ms_count\",\"value\":0") !=
+             std::string::npos &&
          response.find("\"sourceIdentityDigest\":\"" + std::string(64u, 'a') +
                        "\"") != std::string::npos &&
          exitCode.has_value() && *exitCode == 0;
 }
 
 template <class PeerDriver>
-bool productionEntryObservesPeerClosure(std::string_view roomTitle,
-                                        std::chrono::milliseconds closeTimeout,
-                                        bool expectedHostClosed,
-                                        PeerDriver drivePeer) {
+bool productionEntryObservesPeerClosure(
+    std::string_view roomTitle, std::chrono::milliseconds closeTimeout,
+    bool expectedHostClosed, PeerDriver drivePeer,
+    std::optional<std::uint16_t> metricsPort = std::nullopt) {
   TemporaryDirectory directory;
   const auto continuityRoot = directory.path() / "battle-continuity";
   std::error_code directoryError;
@@ -1289,10 +1295,13 @@ bool productionEntryObservesPeerClosure(std::string_view roomTitle,
       !writeText(directory.path() / "meta.credential",
                  "fixture-service-credential", S_IRUSR | S_IWUSR) ||
       !writeText(directory.path() / "server.conf",
-                 configText(directory, 0u, 0u, std::nullopt, true),
+                 configText(directory, 0u, 0u, metricsPort, true),
                  S_IRUSR | S_IWUSR)) {
     return false;
   }
+  if (metricsPort && !writeText(directory.path() / "metrics.credential",
+                                kMetricsCredential, S_IRUSR | S_IWUSR))
+    return false;
   ChildProcess child;
   if (!child.start(directory.path() / "server.conf")) {
     return false;
@@ -1410,6 +1419,164 @@ bool productionEntryAcceptsReliableAckPiggybackedOnMove() {
             return false;
           }
           std::this_thread::sleep_for(250ms);
+        }
+        return true;
+      });
+}
+
+bool productionEntrySamplesRtt() {
+  const auto metricsPort = reserveTcpPort();
+  if (!metricsPort)
+    return false;
+  return productionEntryObservesPeerClosure(
+      "rtt-room", 100ms, false,
+      [=](UdpClient &host, UdpClient &member) {
+        const auto metric = [](const std::string &response,
+                               std::string_view name) {
+          const auto prefix =
+              "\"name\":\"" + std::string{name} + "\",\"value\":";
+          const auto position = response.find(prefix);
+          if (position == std::string::npos)
+            return -1.0;
+          const auto *begin = response.c_str() + position + prefix.size();
+          char *end = nullptr;
+          const auto value = std::strtod(begin, &end);
+          return end == begin ? -1.0 : value;
+        };
+        if (metric(httpGetMetrics(*metricsPort),
+                   "rudp_rtt_samples_accepted_total") != 0)
+          return false;
+        std::uint32_t target = 0;
+        if (!receiveUdpUntil(host, 2s, [&](std::span<const std::byte> bytes) {
+              const auto decoded = RudpHeaderCodec::decode(bytes);
+              if (!decoded.header || decoded.header->messageId != 29u)
+                return false;
+              target = decoded.header->sequence;
+              return true;
+            }))
+          return false;
+        const auto ack = RudpHeaderCodec::encode(
+            RudpHeader{.flag = RudpFlag::AckOnly,
+                       .sessionId = host.sessionId,
+                       .sessionGeneration = host.generation,
+                       .transportEpoch = host.transportEpoch,
+                       .sequence = host.nextSequence++,
+                       .ack = target,
+                       .ackBits = 0,
+                       .messageId = 0},
+            {});
+        if (!ack ||
+            ::sendto(host.descriptor, ack->data(), ack->size(), 0,
+                     reinterpret_cast<const sockaddr *>(&host.server),
+                     sizeof(host.server)) != static_cast<ssize_t>(ack->size()))
+          return false;
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        do {
+          const auto response = httpGetMetrics(*metricsPort);
+          if (metric(response, "rudp_rtt_samples_accepted_total") == 1 &&
+              metric(response, "rudp_active_srtt_ms_count") == 1 &&
+              metric(response, "rudp_active_rttvar_ms_count") == 1 &&
+              metric(response, "rudp_active_base_rto_ms_count") == 2 &&
+              metric(response, "rudp_active_base_rto_ms_le_1000") == 2 &&
+              metric(response, "rudp_active_effective_rto_ms_count") == 1)
+            return true;
+          if (!heartbeatWithoutOutboundAck(host) ||
+              !heartbeatWithoutOutboundAck(member))
+            return false;
+          std::this_thread::sleep_for(20ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+        std::cerr << "real socket ACK did not produce a binding RTT sample\n";
+        return false;
+      },
+      metricsPort);
+}
+
+bool productionEntryAcceptsAckOnly(bool bitmap) {
+  return productionEntryObservesPeerClosure(
+      "ack-only-room", 100ms, false, [=](UdpClient &host, UdpClient &member) {
+        std::uint32_t target = 0;
+        const auto matchesTarget = [&](std::span<const std::byte> bytes) {
+          const auto decoded = RudpHeaderCodec::decode(bytes);
+          if (!decoded.header.has_value() || decoded.header->messageId != 29u ||
+              (target != 0 && decoded.header->sequence != target)) {
+            return false;
+          }
+          target = decoded.header->sequence;
+          return true;
+        };
+        const auto send =
+            [&](const std::optional<std::vector<std::byte>> &bytes,
+                int descriptor) {
+              return bytes.has_value() &&
+                     ::sendto(descriptor, bytes->data(), bytes->size(), 0,
+                              reinterpret_cast<const sockaddr *>(&host.server),
+                              sizeof(host.server)) ==
+                         static_cast<ssize_t>(bytes->size());
+            };
+        if (!receiveUdpUntil(host, 2s, matchesTarget) || !heartbeat(member)) {
+          std::cerr << "ACK-only setup: reliable packet missing\n";
+          return false;
+        }
+        const auto expiryCheckAt = std::chrono::steady_clock::now() + 6200ms;
+        const RudpHeader header{.flag = RudpFlag::AckOnly,
+                                .sessionId = host.sessionId,
+                                .sessionGeneration = host.generation,
+                                .transportEpoch = host.transportEpoch,
+                                .sequence = host.nextSequence++,
+                                .ack = bitmap ? target + 1u : target,
+                                .ackBits = bitmap ? 1u : 0u,
+                                .messageId = 0u};
+        const auto valid = RudpHeaderCodec::encode(header, {});
+        for (int field = 0; field != 3; ++field) {
+          auto invalid = header;
+          if (field == 0)
+            ++invalid.sessionId;
+          if (field == 1)
+            ++invalid.sessionGeneration;
+          if (field == 2)
+            invalid.transportEpoch = header.transportEpoch == 1u ? 2u : 1u;
+          if (!send(RudpHeaderCodec::encode(invalid, {}), host.descriptor))
+            return false;
+        }
+        if (!valid.has_value() || !send(valid, member.descriptor))
+          return false;
+        auto invalid = *valid;
+        invalid.back() ^= std::byte{1};
+        if (!send(invalid, host.descriptor))
+          return false;
+        // Reject bytes beyond the ACK-only packet's declared empty payload.
+        invalid = *valid;
+        invalid.push_back(std::byte{0});
+        auto wrongShape = header;
+        wrongShape.flag = RudpFlag::Unreliable;
+        wrongShape.messageId = 999u;
+        if (!send(invalid, host.descriptor) ||
+            !send(RudpHeaderCodec::encode(wrongShape, {}), host.descriptor) ||
+            !receiveUdpUntil(host, 1500ms, matchesTarget)) {
+          std::cerr << "invalid ACK-only removed reliable packet\n";
+          return false;
+        }
+        auto advance = header;
+        advance.flag = RudpFlag::Heartbeat;
+        advance.messageId = 24u;
+        advance.sequence += 100u;
+        advance.ack = advance.ackBits = 0u;
+        if ((bitmap &&
+             !send(RudpHeaderCodec::encode(advance, {}), host.descriptor)) ||
+            !send(valid, host.descriptor) || !send(valid, host.descriptor))
+          return false;
+        if (receiveUdpUntil(host, 1200ms, matchesTarget)) {
+          std::cerr << "ACK-only " << (bitmap ? "ackBits" : "ack")
+                    << ": retransmission continued after valid ACK\n";
+          return false;
+        }
+        // Keep the peer live without acknowledging the target through
+        // heartbeat. The enclosing fixture asserts the TCP peer survives
+        // reliable expiry.
+        while (std::chrono::steady_clock::now() < expiryCheckAt) {
+          if (!heartbeatWithoutOutboundAck(host) || !heartbeat(member))
+            return false;
+          std::this_thread::sleep_for(100ms);
         }
         return true;
       });
@@ -2028,12 +2195,15 @@ bool productionEntryRestoresBattleAfterProcessKill() {
       std::ranges::find_if(stopped->players, [&](const auto &candidate) {
         return candidate.sessionId == hostWelcome->sessionId;
       });
-  if (!applied.has_value() || stoppedHost == stopped->players.end()) {
+  if (!applied.has_value() || stoppedHost == stopped->players.end() ||
+      stoppedHost->posXMillimeter <= 2500) {
     return false;
   }
-  const auto durablePositionX = stoppedHost->posXMillimeter;
-  const auto durablePositionY = stoppedHost->posYMillimeter;
-  const auto durableServerTick = stopped->serverTick;
+  // Move and a nonlethal attack are visible but volatile. The last important
+  // save is gameplay admission: spawn position and full monster HP.
+  constexpr std::int32_t durablePositionX = 2500;
+  constexpr std::int32_t durablePositionY = 0;
+  const auto volatileServerTick = stopped->serverTick;
 
   const auto fixedConfig = makeConfig(ports->tcp, ports->udp);
   if (fixedConfig.empty() ||
@@ -2116,10 +2286,8 @@ bool productionEntryRestoresBattleAfterProcessKill() {
           lol::transport::tcp::BattleResumePhase::Combat ||
       !hostResume->snapshot.monster.has_value() ||
       !memberResume->snapshot.monster.has_value() ||
-      hostResume->snapshot.monster->hitPoints != 1500u ||
-      memberResume->snapshot.monster->hitPoints != 1500u ||
-      hostResume->snapshot.serverTick < durableServerTick ||
-      memberResume->snapshot.serverTick < durableServerTick) {
+      hostResume->snapshot.monster->hitPoints != 1600u ||
+      memberResume->snapshot.monster->hitPoints != 1600u) {
     return false;
   }
   const auto recoveredHost = std::ranges::find_if(
@@ -2131,7 +2299,7 @@ bool productionEntryRestoresBattleAfterProcessKill() {
               << durablePositionY
               << " recovered=" << recoveredHost->positionXMillimeters << ','
               << recoveredHost->positionYMillimeters
-              << " durable_tick=" << durableServerTick << '\n';
+              << " pre_crash_volatile_tick=" << volatileServerTick << '\n';
   }
   if (recoveredHost == hostResume->snapshot.players.end() ||
       recoveredHost->positionXMillimeters != durablePositionX ||
@@ -2183,16 +2351,16 @@ bool productionEntryRestoresBattleAfterProcessKill() {
     return false;
   }
 
-  for (std::uint64_t index = 0u; index < 15u; ++index) {
+  for (std::uint64_t index = 0u; index < 16u; ++index) {
     const auto expectedHitPoints =
-        static_cast<std::uint32_t>(1400u - (index * 100u));
+        static_cast<std::uint32_t>(1500u - (index * 100u));
     if (!sendAttack(resumedMemberUdp, 2000u + index) ||
         !waitForAttackApplied(resumedMemberUdp, expectedHitPoints, 3s)
              .has_value()) {
       std::cerr << "continuity attack send failed index=" << index << '\n';
       return false;
     }
-    if (index + 1u < 15u) {
+    if (index + 1u < 16u) {
       if (!heartbeat(resumedHostUdp)) {
         return false;
       }
@@ -2418,12 +2586,12 @@ bool productionEntryRestoresBattleAfterProcessKill() {
         return player.sessionId == hostWelcome->sessionId;
       });
   if (!successorAttack.has_value() || successorAttack->battleInstanceId != 2u ||
-      successorHost == successorStopped->players.end()) {
+      successorHost == successorStopped->players.end() ||
+      successorHost->posXMillimeter <= 2500) {
     return false;
   }
-  const auto successorPositionX = successorHost->posXMillimeter;
-  const auto successorPositionY = successorHost->posYMillimeter;
-  const auto successorServerTick = successorStopped->serverTick;
+  constexpr std::int32_t successorPositionX = 2500;
+  constexpr std::int32_t successorPositionY = 0;
 
   const auto successorKilled = terminalRecovery.stop(SIGKILL, 5s);
   if (!successorKilled.has_value() || *successorKilled != -SIGKILL) {
@@ -2467,10 +2635,8 @@ bool productionEntryRestoresBattleAfterProcessKill() {
           lol::transport::tcp::BattleResumePhase::Combat ||
       !successorHostResume->snapshot.monster.has_value() ||
       !successorMemberResume->snapshot.monster.has_value() ||
-      successorHostResume->snapshot.monster->hitPoints != 1500u ||
-      successorMemberResume->snapshot.monster->hitPoints != 1500u ||
-      successorHostResume->snapshot.serverTick < successorServerTick ||
-      successorMemberResume->snapshot.serverTick < successorServerTick) {
+      successorHostResume->snapshot.monster->hitPoints != 1600u ||
+      successorMemberResume->snapshot.monster->hitPoints != 1600u) {
     return false;
   }
   const auto recoveredSuccessorHost = std::ranges::find_if(
@@ -2564,9 +2730,10 @@ bool productionEntryRestoresBattleAfterProcessKill() {
       std::chrono::duration_cast<std::chrono::milliseconds>(snapshotAt -
                                                             killedAt);
   std::cout << "CRASH_RECOVERY_EVIDENCE room=" << *roomId
-            << " pre_tick=" << durableServerTick
+            << " pre_volatile_tick=" << volatileServerTick
             << " recovered_tick=" << hostResume->snapshot.serverTick
-            << " observed_command_rpo=0"
+            << " ordinary_move_attack_rolled_back=true"
+            << " critical_terminal_result_preserved=true"
             << " kill_to_ready_ms=" << killToReady.count()
             << " kill_to_snapshot_ms=" << killToSnapshot.count()
             << " unretired_settlement_batches=0"
@@ -2580,6 +2747,14 @@ bool productionEntryRestoresBattleAfterProcessKill() {
 } // namespace
 
 int main(int argc, char **argv) {
+  if (argc == 2 && std::string_view{argv[1]} == "rtt-sampling") {
+    return productionEntrySamplesRtt() ? EXIT_SUCCESS : EXIT_FAILURE;
+  }
+  if (argc == 2 && std::string_view{argv[1]} == "ack-only") {
+    const bool direct = productionEntryAcceptsAckOnly(false);
+    const bool bitmap = productionEntryAcceptsAckOnly(true);
+    return direct && bitmap ? EXIT_SUCCESS : 1;
+  }
   if (argc == 2 && std::string_view{argv[1]} == "movement-ack") {
     return productionEntryAcceptsReliableAckPiggybackedOnMove() ? EXIT_SUCCESS
                                                                 : 1;

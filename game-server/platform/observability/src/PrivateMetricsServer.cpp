@@ -250,6 +250,27 @@ void appendMetric(std::string &json, bool &first, std::string_view name,
       .push_back('}');
 }
 
+void appendRudpDistribution(std::string &json, bool &first,
+                            std::string_view name,
+                            const std::vector<double> &values) {
+  appendMetric(json, first, std::string{name} + "_count",
+               static_cast<double>(values.size()));
+  double sum = 0;
+  for (const auto value : values)
+    sum += value;
+  appendMetric(json, first, std::string{name} + "_sum", sum);
+  // Cumulative buckets of the current active population, not lifetime samples.
+  for (const int bound : {50, 100, 200, 400, 800, 1000, 5000}) {
+    std::size_t count = 0;
+    for (const auto value : values)
+      if (value <= bound)
+        ++count;
+    appendMetric(json, first,
+                 std::string{name} + "_le_" + std::to_string(bound),
+                 static_cast<double>(count));
+  }
+}
+
 std::string snapshotJson(const GameMetricSnapshot &snapshot,
                          std::string_view identity) {
   const auto capturedAt =
@@ -285,6 +306,50 @@ std::string snapshotJson(const GameMetricSnapshot &snapshot,
   appendMetric(json, first, "process_fd_count", snapshot.processFdCount);
   appendMetric(json, first, "server_invariant_total",
                snapshot.serverInvariantTotal);
+  appendMetric(json, first, "rudp_rtt_samples_accepted_total",
+               snapshot.rudpAcceptedSamples);
+  appendMetric(json, first, "rudp_rtt_samples_rejected_retransmitted_total",
+               snapshot.rudpRetransmittedSamples);
+  appendMetric(json, first, "rudp_rtt_samples_rejected_send_unconfirmed_total",
+               snapshot.rudpUnconfirmedSamples);
+  appendMetric(json, first, "rudp_rtt_samples_rejected_nonpositive_total",
+               snapshot.rudpNonpositiveSamples);
+  appendMetric(json, first, "rudp_rtt_samples_rejected_expired_total",
+               snapshot.rudpExpiredSamples);
+  appendMetric(json, first, "rudp_rtt_samples_rejected_stale_binding_total",
+               snapshot.rudpStaleSamples);
+  appendMetric(json, first, "rudp_rtt_samples_coalesced_total",
+               snapshot.rudpCoalescedSamples);
+  appendMetric(json, first, "rudp_ack_without_new_entry_total",
+               snapshot.rudpNoNewEntryAcks);
+  appendMetric(json, first, "rudp_retransmission_attempts_total",
+               snapshot.rudpRetransmissions);
+  appendMetric(json, first, "rudp_reliable_expiry_total",
+               snapshot.rudpExpiries);
+  appendMetric(json, first, "rudp_reliable_send_failure_total",
+               snapshot.rudpSendFailures);
+  appendRudpDistribution(json, first, "rudp_active_srtt_ms",
+                         snapshot.rudpSrttMs);
+  appendRudpDistribution(json, first, "rudp_active_rttvar_ms",
+                         snapshot.rudpRttvarMs);
+  appendRudpDistribution(json, first, "rudp_active_base_rto_ms",
+                         snapshot.rudpBaseRtoMs);
+  appendRudpDistribution(json, first, "rudp_active_effective_rto_ms",
+                         snapshot.rudpEffectiveRtoMs);
+  appendMetric(json, first, "rudp_recovery_entered_total",
+               snapshot.rudpRecoveryEntered);
+  appendMetric(json, first, "rudp_recovery_escalated_total",
+               snapshot.rudpRecoveryEscalated);
+  appendMetric(json, first, "rudp_recovery_reset_total",
+               snapshot.rudpRecoveryReset);
+  appendMetric(json, first, "rudp_recovery_stale_timeout_total",
+               snapshot.rudpRecoveryStaleTimeouts);
+  appendMetric(json, first, "rudp_recovery_active_bindings",
+               snapshot.rudpRecoveryActive);
+  appendRudpDistribution(json, first, "rudp_active_recovery_floor_ms",
+                         snapshot.rudpRecoveryFloorMs);
+  appendRudpDistribution(json, first, "rudp_active_initial_rto_ms",
+                         snapshot.rudpInitialRtoMs);
   json.append("]}");
   return json;
 }
